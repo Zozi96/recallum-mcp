@@ -1,0 +1,49 @@
+## 1. Base de aplicación
+
+- [ ] 1.1 Sustituir el programa de ejemplo por una estructura mínima de aplicación FastAPI con Python 3.13.
+- [ ] 1.2 Añadir y bloquear dependencias para FastAPI, FastMCP 3.x, Dependency Injector, SQLAlchemy 2.x, asyncpg, pgvector, Alembic y cliente HTTP.
+- [ ] 1.3 Crear configuración validada desde variables de entorno para base de datos, Ollama, autenticación y límites de memoria.
+- [ ] 1.4 Crear el `DeclarativeContainer` con `AsyncEngine`, `async_sessionmaker`, configuración y providers concretos, incluyendo overrides utilizables en pruebas.
+
+## 2. Persistencia y aislamiento
+
+- [ ] 2.1 Configurar Alembic con su template async y metadata declarativa de SQLAlchemy sin ejecutar `create_all()` en la aplicación.
+- [ ] 2.2 Añadir una migración Alembic para habilitar pgvector y crear `users`, `api_keys` y `memories` con vector de 768 dimensiones.
+- [ ] 2.3 Añadir DDL explícito en Alembic para `tsvector`, índices HNSW, deduplicación parcial y políticas Row-Level Security.
+- [ ] 2.4 Implementar el mecanismo de `AsyncSession` por operación que ejecuta `SET LOCAL` dentro de cada transacción autenticada.
+- [ ] 2.5 Implementar el repositorio asíncrono con SQLAlchemy para crear, obtener, enumerar, buscar y borrar lógicamente memorias.
+- [ ] 2.6 Añadir pruebas de integración que ejecuten las migraciones y demuestren deduplicación y aislamiento entre dos usuarios reales de PostgreSQL.
+
+## 3. Embeddings y lógica de memoria
+
+- [ ] 3.1 Implementar el cliente de Ollama para embeddings con timeouts y errores acotados.
+- [ ] 3.2 Implementar validación y normalización de contenido, categoría, ámbito, proyecto, importancia y metadata.
+- [ ] 3.3 Implementar `remember`, generando el embedding antes de persistir y devolviendo la memoria existente ante duplicados exactos.
+- [ ] 3.4 Implementar `recall` con candidatos vectoriales y textuales fusionados mediante Reciprocal Rank Fusion.
+- [ ] 3.5 Implementar fallback textual marcado como degradado cuando Ollama no pueda generar el embedding de una consulta.
+- [ ] 3.6 Implementar `context`, `list_memories` y `forget` respetando filtros, límites y borrado lógico.
+- [ ] 3.7 Añadir pruebas unitarias del servicio usando overrides del repositorio y cliente de embeddings.
+
+## 4. Autenticación y FastMCP
+
+- [ ] 4.1 Implementar generación, hashing, consulta y revocación de API keys sin persistir el secreto original.
+- [ ] 4.2 Añadir un CLI administrativo mínimo con stdlib para crear usuarios, emitir keys y revocarlas.
+- [ ] 4.3 Implementar middleware FastMCP que valide `Authorization: Bearer` y establezca la identidad de la petición.
+- [ ] 4.4 Exponer `remember`, `recall`, `context`, `list_memories` y `forget` con esquemas validados que no acepten `user_id`.
+- [ ] 4.5 Añadir pruebas MCP para descubrimiento, token válido, token inválido, token revocado y ausencia de acceso cruzado.
+
+## 5. Servidor y operación
+
+- [ ] 5.1 Montar la aplicación HTTP de FastMCP en `/mcp` dentro de la factory FastAPI y componer correctamente los lifespans.
+- [ ] 5.2 Añadir endpoints de liveness y readiness sin datos sensibles, comprobando PostgreSQL y Ollama sólo en readiness.
+- [ ] 5.3 Añadir logging estructurado que excluya API keys, contenido de memorias y headers de autorización.
+- [ ] 5.4 Añadir una prueba de aplicación ASGI que valide startup, health checks y cierre limpio de recursos.
+
+## 6. Despliegue y documentación
+
+- [ ] 6.1 Crear imágenes y configuración Docker para Recallum, PostgreSQL con pgvector y Ollama en una red privada.
+- [ ] 6.2 Añadir configuración de Dokploy/Traefik y límites de recursos sin publicar PostgreSQL ni Ollama.
+- [ ] 6.3 Documentar descarga persistente de `embeddinggemma:300m-qat-q4_0`, variables de entorno y migraciones.
+- [ ] 6.4 Documentar configuración MCP para Codex y Claude Code con el endpoint HTTPS y API key.
+- [ ] 6.5 Configurar backups diarios de PostgreSQL y documentar una restauración verificada.
+- [ ] 6.6 Ejecutar migraciones y smoke tests en el VPS, incluyendo acceso local, acceso remoto y aislamiento entre dos usuarios.
