@@ -89,7 +89,7 @@ No habrá reranker. `context` combinará memorias globales importantes con memor
 
 Dokploy ejecutará tres servicios: Recallum, PostgreSQL con pgvector y Ollama. Traefik publicará únicamente Recallum mediante HTTPS. PostgreSQL y Ollama permanecerán en una red privada y usarán volúmenes persistentes.
 
-Los límites iniciales serán aproximadamente 512 MiB para Recallum, 2 GiB para PostgreSQL y 1.5 GiB para Ollama. La imagen de Recallum usará Python 3.13 para evitar depender del Python 3.14 instalado en el host y mantener compatibilidad amplia con FastMCP y sus dependencias.
+Los límites iniciales serán aproximadamente 512 MiB para Recallum, 2 GiB para PostgreSQL y 1.5 GiB para Ollama. La imagen de Recallum usará Python 3.14, alineada con el host y con `requires-python` del proyecto; FastMCP 3.x y el resto de dependencias resuelven correctamente en 3.14 (decisión del propietario, sustituye a la idea original de 3.13).
 
 ## Risks / Trade-offs
 

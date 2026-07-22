@@ -1,0 +1,53 @@
+# Dokploy reference compose for the VPS.
+# Traefik publishes only Recallum over HTTPS; PostgreSQL and Ollama remain on
+# the private network with persistent volumes. Adjust the Host rule and attach
+# the existing Dokploy/Traefik network (external) to your setup.
+services:
+  recallum:
+    image: recallum:latest
+    environment:
+      RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:CHANGE_ME@postgres:5432/recallum
+      RECALLUM__OLLAMA__URL: http://ollama:11434
+    networks:
+      - recallum-private
+      - dokploy-network
+    mem_limit: 512m
+    restart: unless-stopped
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.recallum.rule: Host(`recallum.example.com`)
+      traefik.http.routers.recallum.entrypoints: websecure
+      traefik.http.routers.recallum.tls.certresolver: letsencrypt
+      traefik.http.services.recallum.loadbalancer.server.port: "8000"
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: recallum
+      POSTGRES_PASSWORD: CHANGE_ME
+      POSTGRES_DB: recallum
+    volumes:
+      - recallum-pgdata:/var/lib/postgresql/data
+    networks:
+      - recallum-private
+    mem_limit: 2g
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - recallum-ollama:/root/.ollama
+    networks:
+      - recallum-private
+    mem_limit: 1536m
+    restart: unless-stopped
+
+networks:
+  recallum-private:
+    driver: bridge
+  dokploy-network:
+    external: true
+
+volumes:
+  recallum-pgdata:
+  recallum-ollama:

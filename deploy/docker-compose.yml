@@ -1,0 +1,59 @@
+# Full local stack: Recallum + dedicated PostgreSQL with pgvector + private Ollama.
+# Only Recallum publishes a port; PostgreSQL and Ollama stay on the private network.
+services:
+  recallum:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:recallum@postgres:5432/recallum
+      RECALLUM__OLLAMA__URL: http://ollama:11434
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_started
+      ollama:
+        condition: service_started
+    networks:
+      - recallum
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: recallum
+      POSTGRES_PASSWORD: recallum
+      POSTGRES_DB: recallum
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - recallum
+    mem_limit: 2g
+    restart: unless-stopped
+    # Intentionally no published ports: private network only.
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    networks:
+      - recallum
+    mem_limit: 1536m
+    restart: unless-stopped
+    # Intentionally no published ports: private network only.
+    # Pull the model once: docker compose exec ollama ollama pull embeddinggemma:300m-qat-q4_0
+
+networks:
+  recallum:
+    driver: bridge
+
+volumes:
+  pgdata:
+  ollama:
