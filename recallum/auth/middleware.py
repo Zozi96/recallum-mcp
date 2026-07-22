@@ -30,7 +30,7 @@ class TokenAuthenticator:
             return None
         key, user = found
         await self._keys.touch(key.id)
-        return Identity(user_id=user.id, username=user.username, api_key_id=key.id)
+        return Identity(user_id=user.id, email=user.email, api_key_id=key.id)
 
 
 def _extract_bearer(headers: dict[str, str]) -> str | None:

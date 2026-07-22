@@ -122,9 +122,9 @@ async def container(pg_database: dict[str, str], monkeypatch):
     await shutdown_container(resolved)
 
 
-async def _make_user_with_key(container, username: str) -> uuid.UUID:
+async def _make_user_with_key(container, email: str) -> uuid.UUID:
     service = container.api_key_service()
-    user = await service.create_user(username)
+    user = await service.create_user(email)
     await service.issue_key(user.id)
     return user.id
 
@@ -136,6 +136,15 @@ async def test_migrations_applied(container):
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
         assert version == "0001_initial_schema"
+        columns = (
+            await connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'users' ORDER BY ordinal_position"
+                )
+            )
+        ).scalars().all()
+        assert columns == ["id", "email", "created_at"]
         dims = (
             await connection.execute(
                 text(
@@ -147,8 +156,22 @@ async def test_migrations_applied(container):
         assert dims == 768
 
 
+async def test_user_email_is_normalized_and_case_insensitive_unique(container):
+    service = container.api_key_service()
+    user = await service.create_user("Alice@Example.COM")
+
+    assert user.email == "alice@example.com"
+    found = await container.user_repository().get_by_email("ALICE@example.com")
+    assert found is not None
+    assert found.id == user.id
+    with pytest.raises(ValueError):
+        await service.create_user("ALICE@example.com")
+
+
 async def test_deduplication_returns_existing_memory(container):
-    user_id = await _make_user_with_key(container, f"dedup-{uuid.uuid4().hex[:8]}")
+    user_id = await _make_user_with_key(
+        container, f"dedup-{uuid.uuid4().hex[:8]}@example.com"
+    )
     service = container.memory_service()
 
     first = await service.remember(user_id, content="  usamos   uv  ", category="decision")
@@ -172,8 +195,8 @@ async def test_deduplication_returns_existing_memory(container):
 
 
 async def test_isolation_between_two_users(container, pg_database):
-    alice_id = await _make_user_with_key(container, f"alice-{uuid.uuid4().hex[:8]}")
-    bob_id = await _make_user_with_key(container, f"bob-{uuid.uuid4().hex[:8]}")
+    alice_id = await _make_user_with_key(container, f"alice-{uuid.uuid4().hex[:8]}@example.com")
+    bob_id = await _make_user_with_key(container, f"bob-{uuid.uuid4().hex[:8]}@example.com")
     service = container.memory_service()
 
     await service.remember(alice_id, content="secreto de alice", category="fact")
@@ -217,7 +240,9 @@ async def test_isolation_between_two_users(container, pg_database):
 
 
 async def test_forget_excludes_from_all_queries(container):
-    user_id = await _make_user_with_key(container, f"forget-{uuid.uuid4().hex[:8]}")
+    user_id = await _make_user_with_key(
+        container, f"forget-{uuid.uuid4().hex[:8]}@example.com"
+    )
     service = container.memory_service()
 
     result = await service.remember(user_id, content="temporal", category="fact")

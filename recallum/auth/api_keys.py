@@ -8,6 +8,8 @@ import secrets
 import uuid
 from dataclasses import dataclass
 
+from email_validator import EmailNotValidError, validate_email
+
 from recallum.db.models import ApiKey, User
 from recallum.db.repositories.api_key_repo import ApiKeyRepository
 from recallum.db.repositories.user_repo import UserRepository
@@ -41,13 +43,14 @@ class ApiKeyService:
         self._prefix = key_prefix
         self._entropy_bytes = key_entropy_bytes
 
-    async def create_user(self, username: str) -> User:
-        username = username.strip()
-        if not username:
-            raise ValueError("username must not be empty")
-        if await self._users.get_by_username(username) is not None:
-            raise ValueError(f"user '{username}' already exists")
-        return await self._users.create_user(username)
+    async def create_user(self, email: str) -> User:
+        try:
+            email = validate_email(email, check_deliverability=False).normalized.lower()
+        except EmailNotValidError as exc:
+            raise ValueError(str(exc)) from exc
+        if await self._users.get_by_email(email) is not None:
+            raise ValueError(f"user '{email}' already exists")
+        return await self._users.create_user(email)
 
     async def issue_key(self, user_id: uuid.UUID, name: str | None = None) -> IssuedKey:
         """Generate a key, persist only its hash, return the plaintext once."""

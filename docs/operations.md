@@ -63,9 +63,9 @@ uv run alembic current    # verify: 0001_initial_schema (head)
 ## Users and API keys
 
 ```bash
-uv run recallum-admin create-user --username zozi
-uv run recallum-admin issue-key --username zozi --name laptop   # printed ONCE
-uv run recallum-admin list-keys --username zozi
+uv run recallum-admin create-user --email zozi@example.com
+uv run recallum-admin issue-key --email zozi@example.com --name laptop   # printed ONCE
+uv run recallum-admin list-keys --email zozi@example.com
 uv run recallum-admin revoke-key --key-id <uuid>
 ```
 

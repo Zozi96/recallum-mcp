@@ -42,8 +42,8 @@ def mcp_client(base_url: str, token: str | None = None) -> Client:
 async def server() -> ServerInfo:
     container, _ = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
     key_service = container.api_key_service()
-    alice = await key_service.create_user("alice")
-    bob = await key_service.create_user("bob")
+    alice = await key_service.create_user("alice@example.com")
+    bob = await key_service.create_user("bob@example.com")
     alice_token = (await key_service.issue_key(alice.id)).plaintext
     bob_token = (await key_service.issue_key(bob.id)).plaintext
     revoked = await key_service.issue_key(alice.id)

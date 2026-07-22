@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.115",
     "fastmcp>=3.0",
     "dependency-injector>=4.46",
+    "email-validator>=2.3",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30",
     "pgvector>=0.3.6",

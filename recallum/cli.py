@@ -23,12 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create_user = subparsers.add_parser("create-user", help="Create a user account")
-    create_user.add_argument("--username", required=True)
+    create_user.add_argument("--email", required=True)
 
     issue_key = subparsers.add_parser(
         "issue-key", help="Issue an API key for a user (printed once)"
     )
-    issue_key.add_argument("--username", required=True)
+    issue_key.add_argument("--email", required=True)
     issue_key.add_argument("--name", default=None, help="Optional label for the key")
 
     revoke_key = subparsers.add_parser("revoke-key", help="Revoke an API key by id")
@@ -37,26 +37,26 @@ def build_parser() -> argparse.ArgumentParser:
     list_keys = subparsers.add_parser(
         "list-keys", help="List a user's keys (metadata only, never secrets)"
     )
-    list_keys.add_argument("--username", required=True)
+    list_keys.add_argument("--email", required=True)
 
     return parser
 
 
 async def _run(args: argparse.Namespace, container: Container) -> int:
     if args.command == "create-user":
-        user = await container.api_key_service().create_user(args.username)
-        print(f"user created: {user.id} ({user.username})")
+        user = await container.api_key_service().create_user(args.email)
+        print(f"user created: {user.id} ({user.email})")
         return 0
 
     if args.command == "issue-key":
         service = container.api_key_service()
-        user = await container.user_repository().get_by_username(args.username)
+        user = await container.user_repository().get_by_email(args.email)
         if user is None:
-            print(f"error: user '{args.username}' does not exist", file=sys.stderr)
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
             return 1
         issued = await service.issue_key(user.id, args.name)
         print(f"key id:    {issued.key.id}")
-        print(f"user:      {user.username}")
+        print(f"user:      {user.email}")
         print(f"api key:   {issued.plaintext}")
         print("warning:   this secret is shown only once; store it now.")
         return 0
@@ -70,9 +70,9 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
         return 0
 
     if args.command == "list-keys":
-        user = await container.user_repository().get_by_username(args.username)
+        user = await container.user_repository().get_by_email(args.email)
         if user is None:
-            print(f"error: user '{args.username}' does not exist", file=sys.stderr)
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
             return 1
         keys = await container.api_key_service().list_keys(user.id)
         if not keys:

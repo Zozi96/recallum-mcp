@@ -19,7 +19,7 @@ class Identity:
     """The authenticated principal for one request."""
 
     user_id: uuid.UUID
-    username: str
+    email: str
     api_key_id: uuid.UUID
 
 

@@ -25,7 +25,7 @@ def test_hash_token_is_sha256_hex():
 
 async def test_issue_key_never_stores_plaintext():
     service, _, keys = make_service()
-    user = await service.create_user("alice")
+    user = await service.create_user("alice@example.com")
     issued = await service.issue_key(user.id, name="laptop")
 
     assert issued.plaintext.startswith("rcl_")
@@ -35,22 +35,29 @@ async def test_issue_key_never_stores_plaintext():
     assert stored.name == "laptop"
 
 
-async def test_create_user_rejects_duplicates():
+async def test_create_user_normalizes_and_rejects_case_insensitive_duplicates():
     service, _, _ = make_service()
-    await service.create_user("bob")
+    user = await service.create_user("Bob@Example.COM")
+    assert user.email == "bob@example.com"
     with pytest.raises(ValueError):
-        await service.create_user("bob")
+        await service.create_user("BOB@example.com")
+
+
+async def test_create_user_rejects_invalid_email():
+    service, _, _ = make_service()
+    with pytest.raises(ValueError):
+        await service.create_user("not-an-email")
 
 
 async def test_authenticate_valid_invalid_revoked():
     service, authenticator, _ = make_service()
-    user = await service.create_user("carol")
+    user = await service.create_user("carol@example.com")
     issued = await service.issue_key(user.id)
 
     identity = await authenticator.authenticate(issued.plaintext)
     assert identity is not None
     assert identity.user_id == user.id
-    assert identity.username == "carol"
+    assert identity.email == "carol@example.com"
     assert identity.api_key_id == issued.key.id
 
     assert await authenticator.authenticate("rcl_wrong") is None
@@ -63,7 +70,7 @@ async def test_authenticate_valid_invalid_revoked():
 
 async def test_multiple_keys_per_user_independent():
     service, authenticator, _ = make_service()
-    user = await service.create_user("dave")
+    user = await service.create_user("dave@example.com")
     first = await service.issue_key(user.id)
     second = await service.issue_key(user.id)
 

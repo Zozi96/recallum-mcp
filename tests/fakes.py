@@ -213,13 +213,13 @@ class FakeUserRepository:
     def __init__(self) -> None:
         self.users: dict[uuid.UUID, User] = {}
 
-    async def create_user(self, username: str) -> User:
-        user = User(id=uuid.uuid4(), username=username, created_at=datetime.now(UTC))
+    async def create_user(self, email: str) -> User:
+        user = User(id=uuid.uuid4(), email=email, created_at=datetime.now(UTC))
         self.users[user.id] = user
         return user
 
-    async def get_by_username(self, username: str) -> User | None:
-        return next((u for u in self.users.values() if u.username == username), None)
+    async def get_by_email(self, email: str) -> User | None:
+        return next((u for u in self.users.values() if u.email == email.lower()), None)
 
     async def get_by_id(self, user_id: uuid.UUID) -> User | None:
         return self.users.get(user_id)
