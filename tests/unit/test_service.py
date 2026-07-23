@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 from recallum.embeddings.ollama import EmbeddingError
-from recallum.memory.normalize import MemoryValidationError
+from recallum.memory import MemoryValidationError
 from recallum.memory.service import MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
 
@@ -73,6 +73,79 @@ async def test_remember_rejects_invalid_input_before_embedding():
     with pytest.raises(MemoryValidationError):
         await service.remember(USER, content="ok", category="mood")
     assert embedder.embedded_texts == []
+
+
+async def test_remember_normalizes_content_and_project():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="  hello\n\n  world \t ",
+        category="fact",
+        project="  mi-proyecto  ",
+    )
+    assert result.memory.content == "hello world"
+    assert result.memory.project == "mi-proyecto"
+
+    blank = await service.remember(USER, content="global", category="fact", project="   ")
+    assert blank.memory.scope == "global"
+    assert blank.memory.project is None
+
+
+async def test_remember_enforces_content_and_project_limits():
+    service = MemoryService(
+        repository=FakeMemoryRepository(),
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        max_content_chars=10,
+        max_project_chars=4,
+    )
+    with pytest.raises(MemoryValidationError, match="content exceeds"):
+        await service.remember(USER, content="x" * 11, category="fact")
+    with pytest.raises(MemoryValidationError, match="project exceeds"):
+        await service.remember(USER, content="ok", category="fact", project="longer")
+
+
+@pytest.mark.parametrize("importance", [-1, 11, True])
+async def test_remember_rejects_invalid_importance(importance):
+    service, _, _ = make_service()
+    with pytest.raises(MemoryValidationError):
+        await service.remember(USER, content="ok", category="fact", importance=importance)
+
+
+async def test_remember_accepts_importance_bounds_and_flat_metadata():
+    service, _, _ = make_service()
+    low = await service.remember(
+        USER,
+        content="low",
+        category="fact",
+        importance=0,
+        metadata={"k": "v", "n": 1, "f": True, "empty": None},
+    )
+    high = await service.remember(USER, content="high", category="fact", importance=10)
+    assert low.memory.importance == 0
+    assert low.memory.metadata == {"k": "v", "n": 1, "f": True, "empty": None}
+    assert high.memory.importance == 10
+    assert high.memory.metadata == {}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "max_bytes", "max_keys"),
+    [
+        ({"k": {"nested": 1}}, 1024, 10),
+        ({"": "value"}, 1024, 10),
+        ({"a": 1, "b": 2}, 1024, 1),
+        ({"k": "x" * 100}, 50, 10),
+        (["not", "an", "object"], 1024, 10),
+    ],
+)
+async def test_remember_rejects_invalid_metadata(metadata, max_bytes, max_keys):
+    service = MemoryService(
+        repository=FakeMemoryRepository(),
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        max_metadata_bytes=max_bytes,
+        max_metadata_keys=max_keys,
+    )
+    with pytest.raises(MemoryValidationError):
+        await service.remember(USER, content="ok", category="fact", metadata=metadata)
 
 
 async def test_remember_fails_without_embedding_and_stores_nothing():
@@ -165,6 +238,24 @@ async def test_context_without_project_returns_only_global():
     assert contents == ["global solamente"]
 
 
+async def test_context_never_exceeds_max_chars():
+    service, _, _ = make_service()
+    await service.remember(USER, content="demasiado largo", category="preference")
+    result = await service.context(USER, max_chars=5)
+    assert result.total_items == 0
+    assert result.truncated is True
+
+
+async def test_context_checks_budget_across_categories():
+    service, _, _ = make_service()
+    await service.remember(USER, content="1234", category="preference")
+    await service.remember(USER, content="5678", category="constraint")
+    result = await service.context(USER, max_chars=6)
+    contents = [item.content for group in result.groups for item in group.items]
+    assert contents == ["1234"]
+    assert sum(map(len, contents)) <= 6
+
+
 async def test_list_memories_filters_and_paginates():
     service, _, _ = make_service()
     for i in range(4):
@@ -176,6 +267,42 @@ async def test_list_memories_filters_and_paginates():
     project_page = await service.list_memories(USER, project="p", limit=1, offset=0)
     assert len(project_page.items) == 1
     assert project_page.total == 4  # global + project "p"
+
+    scoped_project = await service.list_memories(USER, scope="project", project="p", limit=10)
+    assert scoped_project.total == 2
+    assert all(item.scope == "project" and item.project == "p" for item in scoped_project.items)
+
+    scoped_global = await service.list_memories(USER, scope="global", project="p", limit=10)
+    assert scoped_global.total == 2
+    assert all(item.scope == "global" for item in scoped_global.items)
+
+
+async def test_list_visibility_semantics_and_project_scope_validation():
+    service, _, _ = make_service()
+    await service.remember(USER, content="global", category="fact")
+    await service.remember(USER, content="project a", category="fact", project="a")
+    await service.remember(USER, content="project b", category="fact", project="b")
+
+    all_memories = await service.list_memories(USER, limit=10)
+    assert {item.content for item in all_memories.items} == {
+        "global",
+        "project a",
+        "project b",
+    }
+    project_window = await service.list_memories(USER, project="a", limit=10)
+    assert {item.content for item in project_window.items} == {"global", "project a"}
+    global_only = await service.list_memories(
+        USER, scope="global", project="a", limit=10
+    )
+    assert [item.content for item in global_only.items] == ["global"]
+    project_only = await service.list_memories(
+        USER, scope="project", project="a", limit=10
+    )
+    assert [item.content for item in project_only.items] == ["project a"]
+    with pytest.raises(MemoryValidationError, match="project is required"):
+        await service.list_memories(USER, scope="project")
+    with pytest.raises(MemoryValidationError, match="project is required"):
+        await service.recall(USER, query="anything", scope="project")
 
 
 async def test_forget_own_then_foreign_indistinguishable():

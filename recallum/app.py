@@ -15,7 +15,6 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
 from pydantic import BaseModel
-from sqlalchemy import text
 
 from recallum.config import Settings, get_settings
 from recallum.container import Container, create_container, shutdown_container
@@ -57,7 +56,7 @@ def create_health_router(container: Container) -> APIRouter:
         responses={503: {"model": ReadinessResponse}},
     )
     async def readyz() -> ReadinessResponse:
-        database_ok = await _database_ready(container)
+        database_ok = await container.database_readiness().is_ready()
         embeddings_ok = await container.embedding_client().is_available()
         checks = CheckStatus(
             database="ok" if database_ok else "unavailable",
@@ -72,17 +71,6 @@ def create_health_router(container: Container) -> APIRouter:
         return body
 
     return router
-
-
-async def _database_ready(container: Container) -> bool:
-    try:
-        engine = container.engine()
-        async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
 
 def create_app(settings: Settings | None = None, container: Container | None = None) -> FastAPI:
     """Build the ASGI application with composed lifespans and the /mcp mount."""

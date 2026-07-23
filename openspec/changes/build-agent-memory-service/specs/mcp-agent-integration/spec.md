@@ -46,3 +46,7 @@ FastAPI MUST exponer endpoints separados de liveness y readiness sin revelar sec
 #### Scenario: Dependencia no disponible
 - **WHEN** PostgreSQL u Ollama no están disponibles
 - **THEN** readiness indica que el servicio no está listo y no incluye credenciales ni detalles sensibles
+
+#### Scenario: Esquema o rol PostgreSQL inseguro
+- **WHEN** faltan las tablas requeridas o el rol de aplicación es superusuario, tiene `BYPASSRLS` o no posee las tablas
+- **THEN** readiness indica que el servicio no está listo sin revelar detalles sensibles

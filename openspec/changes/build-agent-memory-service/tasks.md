@@ -47,3 +47,11 @@
 - [x] 6.4 Documentar configuración MCP para Codex y Claude Code con el endpoint HTTPS y API key.
 - [ ] 6.5 Configurar backups diarios de PostgreSQL y documentar una restauración verificada. *(scripts y runbook entregados en `scripts/` y `docs/operations.md`; falta activar el cron y ejecutar el simulacro de restauración en el VPS)*
 - [ ] 6.6 Ejecutar migraciones y smoke tests en el VPS, incluyendo acceso local, acceso remoto y aislamiento entre dos usuarios. *(requiere acceso al VPS; `scripts/smoke_test.sh` entregado)*
+
+## 7. Correcciones posteriores al review
+
+- [x] 7.1 Asegurar que el rol propietario de tablas no sea superusuario ni tenga `BYPASSRLS`, manteniendo autenticación y `FORCE RLS` compatibles.
+- [x] 7.2 Ejecutar Alembic como job previo al servicio y hacer que readiness valide esquema, ownership y seguridad del rol.
+- [x] 7.3 Corregir la combinación de filtros `scope`/`project` y el presupuesto estricto de caracteres de `context`.
+- [x] 7.4 Convertir los checks de autenticación del smoke test en aserciones efectivas.
+- [x] 7.5 Restringir permisos de backups, hacer restores atómicos y añadir purga física explícita de soft-deletes.

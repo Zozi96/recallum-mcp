@@ -11,8 +11,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      postgres:
-        condition: service_started
+      migrate:
+        condition: service_completed_successfully
       ollama:
         condition: service_started
     networks:
@@ -25,18 +25,40 @@ services:
       timeout: 5s
       retries: 3
 
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:recallum@postgres:5432/recallum
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - recallum
+    restart: "no"
+
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: recallum
-      POSTGRES_PASSWORD: recallum
+      POSTGRES_USER: recallum_admin
+      POSTGRES_PASSWORD: recallum_admin
       POSTGRES_DB: recallum
+      RECALLUM_APP_USER: recallum
+      RECALLUM_APP_PASSWORD: recallum
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - recallum
     mem_limit: 2g
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recallum_admin -d recallum"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     # Intentionally no published ports: private network only.
 
   ollama:

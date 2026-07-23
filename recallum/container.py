@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from recallum.auth.api_keys import ApiKeyService
 from recallum.auth.middleware import TokenAuthenticator
 from recallum.config import Settings
+from recallum.db.readiness import DatabaseReadiness
 from recallum.db.repositories.api_key_repo import ApiKeyRepository
 from recallum.db.repositories.memory_repo import MemoryRepository
 from recallum.db.repositories.user_repo import UserRepository
@@ -57,6 +58,7 @@ class Container(containers.DeclarativeContainer):
     user_repository = providers.Singleton(UserRepository, sessions=sessions)
     api_key_repository = providers.Singleton(ApiKeyRepository, sessions=sessions)
     memory_repository = providers.Singleton(MemoryRepository, sessions=sessions)
+    database_readiness = providers.Singleton(DatabaseReadiness, engine=engine)
 
     api_key_service = providers.Singleton(
         ApiKeyService,

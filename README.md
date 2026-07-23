@@ -28,9 +28,8 @@ Python 3.14
 ```bash
 cd deploy && docker compose up -d --build
 docker compose exec ollama ollama pull embeddinggemma:300m-qat-q4_0
-RECALLUM__DATABASE__URL="postgresql+asyncpg://recallum:recallum@localhost:5432/recallum" uv run alembic upgrade head
-uv run recallum-admin create-user --email you@example.com
-uv run recallum-admin issue-key --email you@example.com   # printed once
+docker compose exec recallum uv run --no-sync recallum-admin create-user --email you@example.com
+docker compose exec recallum uv run --no-sync recallum-admin issue-key --email you@example.com
 ```
 
 ## Development

@@ -8,6 +8,9 @@ services:
     environment:
       RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:CHANGE_ME@postgres:5432/recallum
       RECALLUM__OLLAMA__URL: http://ollama:11434
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     networks:
       - recallum-private
       - dokploy-network
@@ -20,18 +23,38 @@ services:
       traefik.http.routers.recallum.tls.certresolver: letsencrypt
       traefik.http.services.recallum.loadbalancer.server.port: "8000"
 
+  migrate:
+    image: recallum:latest
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:CHANGE_ME@postgres:5432/recallum
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - recallum-private
+    restart: "no"
+
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: recallum
-      POSTGRES_PASSWORD: CHANGE_ME
+      POSTGRES_USER: recallum_admin
+      POSTGRES_PASSWORD: CHANGE_ADMIN_PASSWORD
       POSTGRES_DB: recallum
+      RECALLUM_APP_USER: recallum
+      RECALLUM_APP_PASSWORD: CHANGE_ME
     volumes:
       - recallum-pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - recallum-private
     mem_limit: 2g
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recallum_admin -d recallum"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   ollama:
     image: ollama/ollama:latest

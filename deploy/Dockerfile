@@ -12,7 +12,7 @@ WORKDIR /app
 # uv for deterministic installs from the lockfile.
 COPY --from=ghcr.io/astral-sh/uv:0.9.27 /uv /usr/local/bin/uv
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY recallum ./recallum
 
 # Install dependencies and the project itself, without dev extras.

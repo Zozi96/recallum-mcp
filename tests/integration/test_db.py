@@ -19,9 +19,11 @@ import pytest
 import pytest_asyncio
 from dependency_injector import providers
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from recallum.config import get_settings
 from recallum.container import create_container, shutdown_container
+from recallum.db.readiness import DatabaseReadiness
 from recallum.memory.schemas import RememberResult
 from tests.fakes import FakeEmbeddingClient
 
@@ -54,12 +56,7 @@ def _run_migrations(database_url: str) -> None:
 
 @pytest.fixture(scope="session")
 def pg_database() -> dict[str, str]:
-    """Start PostgreSQL+pgvector; yield app and restricted (RLS-subject) URLs.
-
-    ``app`` is a superuser URL (migrations/admin). ``restricted`` is a plain
-    role subject to Row-Level Security, the shape production deployments must
-    use: superusers bypass RLS, so the app must never connect as one.
-    """
+    """Start PostgreSQL+pgvector with the production owner/RLS role shape."""
     if not _docker_available():
         pytest.skip("docker is not available")
     try:
@@ -93,21 +90,21 @@ def pg_database() -> dict[str, str]:
         else:
             pytest.skip("test postgres did not become ready")
 
-        url = f"postgresql+asyncpg://postgres:test@127.0.0.1:{port}/recallum"
-        _run_migrations(url)
+        admin_url = f"postgresql+asyncpg://postgres:test@127.0.0.1:{port}/recallum"
         subprocess.run(
             [
                 "docker", "exec", name, "psql", "-U", "postgres", "-d", "recallum", "-c",
-                "CREATE ROLE recallum_app LOGIN PASSWORD 'app_test';"
-                "GRANT USAGE ON SCHEMA public TO recallum_app;"
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public"
-                " TO recallum_app;",
+                "CREATE EXTENSION IF NOT EXISTS vector;"
+                "CREATE ROLE recallum LOGIN PASSWORD 'app_test' NOSUPERUSER NOBYPASSRLS;"
+                "ALTER DATABASE recallum OWNER TO recallum;"
+                "ALTER SCHEMA public OWNER TO recallum;",
             ],
             check=True,
             capture_output=True,
         )
-        restricted = f"postgresql+asyncpg://recallum_app:app_test@127.0.0.1:{port}/recallum"
-        yield {"app": url, "restricted": restricted}
+        app_url = f"postgresql+asyncpg://recallum:app_test@127.0.0.1:{port}/recallum"
+        _run_migrations(app_url)
+        yield {"app": app_url, "admin": admin_url}
     finally:
         subprocess.run(["docker", "stop", name], capture_output=True)
 
@@ -136,6 +133,28 @@ async def test_migrations_applied(container):
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
         assert version == "0001_initial_schema"
+        role = (
+            await connection.execute(
+                text(
+                    "SELECT current_user, rolsuper, rolbypassrls "
+                    "FROM pg_roles WHERE rolname = current_user"
+                )
+            )
+        ).one()
+        assert role == ("recallum", False, False)
+        owners = (
+            await connection.execute(
+                text(
+                    "SELECT relname, pg_get_userbyid(relowner) FROM pg_class "
+                    "WHERE relname IN ('users', 'api_keys', 'memories') ORDER BY relname"
+                )
+            )
+        ).all()
+        assert owners == [
+            ("api_keys", "recallum"),
+            ("memories", "recallum"),
+            ("users", "recallum"),
+        ]
         columns = (
             await connection.execute(
                 text(
@@ -154,6 +173,30 @@ async def test_migrations_applied(container):
             )
         ).scalar_one()
         assert dims == 768
+
+    readiness = container.database_readiness()
+    assert isinstance(readiness, DatabaseReadiness)
+    assert await readiness.is_ready() is True
+
+
+async def test_database_readiness_rejects_superuser_and_missing_force_rls(
+    container, pg_database
+):
+    admin_engine = create_async_engine(pg_database["admin"])
+    try:
+        assert await DatabaseReadiness(admin_engine).is_ready() is False
+
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text("ALTER TABLE memories NO FORCE ROW LEVEL SECURITY"))
+            assert await container.database_readiness().is_ready() is False
+        finally:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text("ALTER TABLE memories FORCE ROW LEVEL SECURITY"))
+
+        assert await container.database_readiness().is_ready() is True
+    finally:
+        await admin_engine.dispose()
 
 
 async def test_user_email_is_normalized_and_case_insensitive_unique(container):
@@ -194,7 +237,7 @@ async def test_deduplication_returns_existing_memory(container):
         assert count == 1
 
 
-async def test_isolation_between_two_users(container, pg_database):
+async def test_isolation_between_two_users(container):
     alice_id = await _make_user_with_key(container, f"alice-{uuid.uuid4().hex[:8]}@example.com")
     bob_id = await _make_user_with_key(container, f"bob-{uuid.uuid4().hex[:8]}@example.com")
     service = container.memory_service()
@@ -214,29 +257,21 @@ async def test_isolation_between_two_users(container, pg_database):
     bob_forget = await service.forget(bob_id, alice_list.items[0].id)
     assert bob_forget.forgotten is False
 
-    # RLS second barrier, verified as a non-superuser role (the production
-    # shape): without SET LOCAL the policy hides every row; pinned to Alice
-    # via SET LOCAL, exactly her row becomes visible.
-    from sqlalchemy.ext.asyncio import create_async_engine
+    # The table-owning runtime role still obeys FORCE RLS on memories.
+    async with container.engine().connect() as connection:
+        unseen = (
+            await connection.execute(text("SELECT count(*) FROM memories"))
+        ).scalar_one()
+        assert unseen == 0
 
-    engine = create_async_engine(pg_database["restricted"])
-    try:
-        async with engine.connect() as connection:
-            unseen = (
-                await connection.execute(text("SELECT count(*) FROM memories"))
-            ).scalar_one()
-            assert unseen == 0
-
-            await connection.execute(
-                text("SELECT set_config('app.current_user_id', :uid, true)"),
-                {"uid": str(alice_id)},
-            )
-            visible = (
-                await connection.execute(text("SELECT count(*) FROM memories"))
-            ).scalar_one()
-            assert visible == 1
-    finally:
-        await engine.dispose()
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :uid, true)"),
+            {"uid": str(alice_id)},
+        )
+        visible = (
+            await connection.execute(text("SELECT count(*) FROM memories"))
+        ).scalar_one()
+        assert visible == 1
 
 
 async def test_forget_excludes_from_all_queries(container):

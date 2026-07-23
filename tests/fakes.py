@@ -17,6 +17,7 @@ from recallum.container import Container, create_container
 from recallum.db.models import ApiKey, Memory, User
 from recallum.db.repositories.memory_repo import ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError
+from recallum.memory import MemoryVisibility
 
 
 class FakeEmbeddingClient:
@@ -81,15 +82,10 @@ class FakeMemoryRepository:
     def _filtered(
         self,
         user_id: uuid.UUID,
-        scope: str | None,
-        project: str | None,
+        visibility: MemoryVisibility,
         category: str | None,
     ) -> list[Memory]:
-        rows = self._active(user_id)
-        if project is not None:
-            rows = [m for m in rows if m.scope == "global" or m.project == project]
-        elif scope is not None:
-            rows = [m for m in rows if m.scope == scope]
+        rows = [m for m in self._active(user_id) if visibility.includes(m)]
         if category is not None:
             rows = [m for m in rows if m.category == category]
         return rows
@@ -139,14 +135,13 @@ class FakeMemoryRepository:
         self,
         user_id: uuid.UUID,
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
         offset: int = 0,
     ) -> tuple[Sequence[Memory], int]:
         rows = sorted(
-            self._filtered(user_id, scope, project, category),
+            self._filtered(user_id, visibility, category),
             key=lambda m: (m.created_at, str(m.id)),
             reverse=True,
         )
@@ -157,14 +152,13 @@ class FakeMemoryRepository:
         user_id: uuid.UUID,
         embedding: list[float],
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
         scored = [
             ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
-            for m in self._filtered(user_id, scope, project, category)
+            for m in self._filtered(user_id, visibility, category)
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:limit]
@@ -174,14 +168,13 @@ class FakeMemoryRepository:
         user_id: uuid.UUID,
         query: str,
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
         words = [w for w in query.lower().split() if len(w) > 1]
         scored = []
-        for memory in self._filtered(user_id, scope, project, category):
+        for memory in self._filtered(user_id, visibility, category):
             haystack = memory.content.lower()
             score = sum(1.0 for w in words if w in haystack)
             if score > 0:
@@ -193,11 +186,10 @@ class FakeMemoryRepository:
         self,
         user_id: uuid.UUID,
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         limit: int,
     ) -> Sequence[Memory]:
-        rows = self._filtered(user_id, scope, project, None)
+        rows = self._filtered(user_id, visibility, None)
         rows.sort(key=lambda m: (m.importance, m.created_at), reverse=True)
         return rows[:limit]
 
@@ -269,8 +261,9 @@ class FakeApiKeyRepository:
 class FakeEngine:
     """Async engine stand-in for readiness probes and shutdown tests."""
 
-    def __init__(self, available: bool = True) -> None:
+    def __init__(self, available: bool = True, ready: bool = True) -> None:
         self.available = available
+        self.ready = ready
         self.disposed = False
 
     def connect(self):
@@ -286,12 +279,26 @@ class FakeEngine:
                 return None
 
             async def execute(self, *_args, **_kwargs):
-                return None
+                class _Result:
+                    def scalar_one(self):
+                        return repo.ready
+
+                return _Result()
 
         return _Connection()
 
     async def dispose(self) -> None:
         self.disposed = True
+
+
+class FakeDatabaseReadiness:
+    """Configurable adapter at the database-readiness seam."""
+
+    def __init__(self, ready: bool = True) -> None:
+        self.ready = ready
+
+    async def is_ready(self) -> bool:
+        return self.ready
 
 
 def build_test_container(

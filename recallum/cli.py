@@ -11,6 +11,7 @@ import asyncio
 import sys
 import uuid
 
+from recallum.auth.api_keys import UserNotFoundError
 from recallum.config import get_settings
 from recallum.container import Container, create_container, shutdown_container
 
@@ -50,13 +51,13 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
 
     if args.command == "issue-key":
         service = container.api_key_service()
-        user = await container.user_repository().get_by_email(args.email)
-        if user is None:
-            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+        try:
+            issued = await service.issue_key_for_email(args.email, args.name)
+        except UserNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return 1
-        issued = await service.issue_key(user.id, args.name)
         print(f"key id:    {issued.key.id}")
-        print(f"user:      {user.email}")
+        print(f"user:      {issued.user.email}")
         print(f"api key:   {issued.plaintext}")
         print("warning:   this secret is shown only once; store it now.")
         return 0
@@ -70,15 +71,15 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
         return 0
 
     if args.command == "list-keys":
-        user = await container.user_repository().get_by_email(args.email)
-        if user is None:
-            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+        try:
+            result = await container.api_key_service().list_keys_for_email(args.email)
+        except UserNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return 1
-        keys = await container.api_key_service().list_keys(user.id)
-        if not keys:
+        if not result.keys:
             print("no keys")
             return 0
-        for key in keys:
+        for key in result.keys:
             status = "revoked" if key.is_revoked else "active"
             label = f" ({key.name})" if key.name else ""
             print(f"{key.id}{label}  {status}  created={key.created_at:%Y-%m-%d}")

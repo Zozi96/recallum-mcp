@@ -15,7 +15,7 @@ from fastmcp.exceptions import ToolError
 from recallum.auth.identity import require_identity
 from recallum.auth.middleware import BearerAuthMiddleware
 from recallum.embeddings.ollama import EmbeddingError
-from recallum.memory.normalize import MemoryValidationError
+from recallum.memory import MemoryValidationError
 from recallum.memory.schemas import (
     ContextResult,
     ForgetResult,

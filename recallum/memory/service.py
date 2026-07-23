@@ -11,25 +11,21 @@ Business rules implemented here:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
+import unicodedata
 import uuid
 from collections import defaultdict
-from typing import Any
+from typing import Any, Literal, get_args
 
 from sqlalchemy.exc import IntegrityError
 
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import MAX_CANDIDATES, MemoryRepository, ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
-from recallum.memory.normalize import content_hash as compute_hash
-from recallum.memory.normalize import (
-    normalize_content,
-    normalize_project,
-    scope_for,
-    validate_category,
-    validate_importance,
-    validate_metadata,
-)
+from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.schemas import (
     ContextGroup,
     ContextItem,
@@ -49,6 +45,10 @@ RRF_K = 60
 
 # Category presentation order for context grouping.
 CONTEXT_CATEGORY_ORDER = ("preference", "constraint", "decision", "fact")
+
+Category = Literal["preference", "decision", "constraint", "fact"]
+CATEGORIES: tuple[str, ...] = get_args(Category)
+_WHITESPACE = re.compile(r"\s+")
 
 
 class MemoryService:
@@ -102,15 +102,13 @@ class MemoryService:
         source_client: str | None = None,
     ) -> RememberResult:
         """Store an atomic memory, deduplicating exact active repeats."""
-        normalized = normalize_content(content, self._max_content_chars)
-        normalized_project = normalize_project(project, self._max_project_chars)
-        validated_category = validate_category(category)
-        validated_importance = validate_importance(importance)
-        validated_metadata = validate_metadata(
-            metadata, self._max_metadata_bytes, self._max_metadata_keys
-        )
-        scope = scope_for(normalized_project)
-        digest = compute_hash(normalized)
+        normalized = self._normalize_content(content)
+        normalized_project = self._normalize_project(project)
+        validated_category = self._validate_category(category)
+        validated_importance = self._validate_importance(importance)
+        validated_metadata = self._validate_metadata(metadata)
+        scope = "project" if normalized_project is not None else "global"
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
         existing = await self._repo.find_active_by_hash(
             user_id, scope=scope, project=normalized_project, content_hash=digest
@@ -159,9 +157,10 @@ class MemoryService:
         limit: int | None = None,
     ) -> RecallResult:
         """Hybrid retrieval with RRF fusion; degrades to textual on embed failure."""
-        normalized_query = normalize_content(query, self._max_content_chars)
-        normalized_project = normalize_project(project, self._max_project_chars)
-        validated_category = validate_category(category) if category else None
+        normalized_query = self._normalize_content(query)
+        normalized_project = self._normalize_project(project)
+        visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
+        validated_category = self._validate_category(category) if category else None
         effective_limit = self._clamp_limit(
             limit, self._recall_default_limit, self._recall_max_limit
         )
@@ -179,8 +178,7 @@ class MemoryService:
                 await self._repo.search_vector(
                     user_id,
                     query_embedding,
-                    scope=scope,
-                    project=normalized_project,
+                    visibility=visibility,
                     category=validated_category,
                     limit=candidate_limit,
                 )
@@ -190,8 +188,7 @@ class MemoryService:
             await self._repo.search_text(
                 user_id,
                 normalized_query,
-                scope=scope,
-                project=normalized_project,
+                visibility=visibility,
                 category=validated_category,
                 limit=candidate_limit,
             )
@@ -236,7 +233,7 @@ class MemoryService:
         max_chars: int | None = None,
     ) -> ContextResult:
         """Compact, category-grouped context: global memories plus project ones."""
-        normalized_project = normalize_project(project, self._max_project_chars)
+        normalized_project = self._normalize_project(project)
         effective_max_items = self._clamp_limit(
             max_items, self._context_default_max_items, self._context_max_items_cap
         )
@@ -248,22 +245,21 @@ class MemoryService:
         # truncated flag reflects real overflow, not the fetch limit.
         fetch_limit = self._context_max_items_cap
         global_memories = await self._repo.most_important_active(
-            user_id, scope="global", limit=fetch_limit
+            user_id, visibility=MemoryVisibility.global_only(), limit=fetch_limit
         )
         project_memories = (
             await self._repo.most_important_active(
-                user_id, project=normalized_project, limit=fetch_limit
+                user_id,
+                visibility=MemoryVisibility.project_only(normalized_project),
+                limit=fetch_limit,
             )
             if normalized_project is not None
             else []
         )
-        # The project query also returns global memories; keep one copy of each
-        # id, preferring the global listing order for globals.
+        # Preserve the established ordering: globals first, then project rows.
         seen: set[uuid.UUID] = set()
         ordered: list[Memory] = []
         for memory in (*global_memories, *project_memories):
-            if memory.scope == "project" and memory.project != normalized_project:
-                continue
             if memory.id in seen:
                 continue
             seen.add(memory.id)
@@ -291,8 +287,9 @@ class MemoryService:
             items = grouped.get(category, [])
             kept: list[ContextItem] = []
             for item in items:
-                if total_items >= effective_max_items or (
-                    used_chars + len(item.content) > effective_max_chars and kept
+                if (
+                    total_items >= effective_max_items
+                    or used_chars + len(item.content) > effective_max_chars
                 ):
                     truncated = True
                     break
@@ -326,15 +323,15 @@ class MemoryService:
         offset: int = 0,
     ) -> ListResult:
         """Enumerate the caller's active memories with bounded pagination."""
-        normalized_project = normalize_project(project, self._max_project_chars)
-        validated_category = validate_category(category) if category else None
+        normalized_project = self._normalize_project(project)
+        visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
+        validated_category = self._validate_category(category) if category else None
         effective_limit = self._clamp_limit(limit, self._list_default_limit, self._list_max_limit)
         if offset < 0:
             offset = 0
         rows, total = await self._repo.list_active(
             user_id,
-            scope=scope,
-            project=normalized_project,
+            visibility=visibility,
             category=validated_category,
             limit=effective_limit,
             offset=offset,
@@ -361,6 +358,67 @@ class MemoryService:
         if requested is None:
             return default
         return max(1, min(int(requested), maximum))
+
+    def _normalize_content(self, content: str) -> str:
+        if content is None:
+            raise MemoryValidationError("content must not be empty")
+        normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", content)).strip()
+        if not normalized:
+            raise MemoryValidationError("content must not be empty")
+        if len(normalized) > self._max_content_chars:
+            raise MemoryValidationError(
+                f"content exceeds {self._max_content_chars} characters"
+            )
+        return normalized
+
+    def _normalize_project(self, project: str | None) -> str | None:
+        if project is None:
+            return None
+        normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", project)).strip()
+        if not normalized:
+            return None
+        if len(normalized) > self._max_project_chars:
+            raise MemoryValidationError(
+                f"project exceeds {self._max_project_chars} characters"
+            )
+        return normalized
+
+    def _validate_category(self, category: str) -> Category:
+        if category not in CATEGORIES:
+            raise MemoryValidationError(
+                f"unknown category '{category}'; expected one of {', '.join(CATEGORIES)}"
+            )
+        return category  # type: ignore[return-value]
+
+    def _validate_importance(self, importance: int) -> int:
+        if not isinstance(importance, int) or isinstance(importance, bool):
+            raise MemoryValidationError("importance must be an integer")
+        if not 0 <= importance <= 10:
+            raise MemoryValidationError("importance must be between 0 and 10")
+        return importance
+
+    def _validate_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        if metadata is None:
+            return {}
+        if not isinstance(metadata, dict):
+            raise MemoryValidationError("metadata must be a JSON object")
+        if len(metadata) > self._max_metadata_keys:
+            raise MemoryValidationError(
+                f"metadata exceeds {self._max_metadata_keys} keys"
+            )
+        for key, value in metadata.items():
+            if not isinstance(key, str) or not key:
+                raise MemoryValidationError("metadata keys must be non-empty strings")
+            if not isinstance(value, (str, int, float, bool)) and value is not None:
+                raise MemoryValidationError(
+                    f"metadata value for '{key}' must be a JSON primitive"
+                )
+        serialized = json.dumps(metadata, ensure_ascii=True, sort_keys=True)
+        if len(serialized.encode("utf-8")) > self._max_metadata_bytes:
+            raise MemoryValidationError(
+                f"metadata exceeds {self._max_metadata_bytes} bytes"
+            )
+        return dict(metadata)
 
 
 def _to_memory_out(memory: Memory) -> MemoryOut:

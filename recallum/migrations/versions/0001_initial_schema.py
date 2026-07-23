@@ -7,18 +7,16 @@ tsvector columns, HNSW indexes, partial unique indexes and RLS policies.
 
 Isolation model
 ---------------
-- ``memories`` has RLS enabled **and forced** so even the table owner is
-  subject to the policy (superusers and BYPASSRLS roles still bypass RLS by
-  design; the application must therefore connect with a regular, non-superuser
-  role). Every application statement runs after
+- The application role owns the tables but is created without SUPERUSER or
+  BYPASSRLS during PostgreSQL initialization. ``memories`` has
+  RLS enabled **and forced**, so its owner remains subject to the policy. Every
+  application statement runs after
   ``set_config('app.current_user_id', uid, true)`` (SET LOCAL), so a missing
   or wrong context yields zero rows instead of another user's memories.
-- ``api_keys`` has RLS enabled but **not forced**. Authentication must resolve
-  a bearer-token hash to a user *before* any user context can exist, which is
-  impossible if the owner role is filtered by RLS during that lookup. The
-  application still never returns key rows through the MCP surface; only the
-  SHA-256 hash is persisted, and the admin CLI is the sole management path.
-  If Recallum later adopts a non-owner connection role, FORCE can be added.
+- ``api_keys`` has RLS enabled but **not forced**, allowing the non-superuser
+  table owner to resolve a bearer-token hash before user context exists. The
+  application never returns key rows through MCP; only the SHA-256 hash is
+  persisted, and the admin CLI is the sole management path.
 """
 
 from __future__ import annotations
@@ -137,7 +135,7 @@ def upgrade() -> None:
         """
     )
 
-    # api_keys: policy ready for non-owner roles; not forced (see module note).
+    # api_keys: owner bypass is required for the pre-authentication hash lookup.
     op.execute("ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY")
     op.execute(
         """

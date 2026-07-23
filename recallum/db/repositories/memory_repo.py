@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import REGCONFIG
 
 from recallum.db.models import Memory
 from recallum.db.session import SessionProvider
+from recallum.memory import MemoryVisibility
 
 # Candidate pool cap for each retrieval signal before Reciprocal Rank Fusion.
 MAX_CANDIDATES = 60
@@ -100,15 +101,14 @@ class MemoryRepository:
         self,
         user_id: uuid.UUID,
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
         offset: int = 0,
     ) -> tuple[Sequence[Memory], int]:
         """Return a page of active memories plus the total matching count."""
         async with self._sessions.for_user(user_id) as session:
-            filters = self._filters(user_id, scope=scope, project=project, category=category)
+            filters = self._filters(user_id, visibility=visibility, category=category)
             count_stmt = select(func.count()).select_from(Memory).where(*filters)
             total = (await session.execute(count_stmt)).scalar_one()
             stmt = (
@@ -126,8 +126,7 @@ class MemoryRepository:
         user_id: uuid.UUID,
         embedding: list[float],
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
@@ -137,7 +136,7 @@ class MemoryRepository:
             score = (literal(1.0) - distance).label("score")
             stmt = (
                 select(Memory, score)
-                .where(*self._filters(user_id, scope=scope, project=project, category=category))
+                .where(*self._filters(user_id, visibility=visibility, category=category))
                 .order_by(distance)
                 .limit(min(limit, MAX_CANDIDATES))
             )
@@ -151,8 +150,7 @@ class MemoryRepository:
         user_id: uuid.UUID,
         query: str,
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
@@ -163,7 +161,7 @@ class MemoryRepository:
             stmt = (
                 select(Memory, rank)
                 .where(
-                    *self._filters(user_id, scope=scope, project=project, category=category),
+                    *self._filters(user_id, visibility=visibility, category=category),
                     Memory.content_tsv.op("@@")(ts_query),
                 )
                 .order_by(rank.desc(), Memory.created_at.desc())
@@ -178,15 +176,14 @@ class MemoryRepository:
         self,
         user_id: uuid.UUID,
         *,
-        scope: str | None = None,
-        project: str | None = None,
+        visibility: MemoryVisibility,
         limit: int,
     ) -> Sequence[Memory]:
         """Active memories ordered by importance then recency (for context)."""
         async with self._sessions.for_user(user_id) as session:
             stmt = (
                 select(Memory)
-                .where(*self._filters(user_id, scope=scope, project=project, category=None))
+                .where(*self._filters(user_id, visibility=visibility, category=None))
                 .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
                 .limit(limit)
             )
@@ -211,20 +208,22 @@ class MemoryRepository:
         self,
         user_id: uuid.UUID,
         *,
-        scope: str | None,
-        project: str | None,
+        visibility: MemoryVisibility,
         category: str | None,
     ) -> list[Any]:
-        """Explicit per-user filters plus scope/project/category rules.
-
-        ``project`` widens the window to global memories of the user plus the
-        named project; ``scope`` narrows to exactly that scope.
-        """
+        """Translate domain visibility into PostgreSQL adapter expressions."""
         filters: list[Any] = [Memory.user_id == user_id, Memory.deleted_at.is_(None)]
-        if project is not None:
-            filters.append((Memory.scope == "global") | (Memory.project == project))
-        elif scope is not None:
-            filters.append(Memory.scope == scope)
+        if visibility.mode == "global":
+            filters.append(Memory.scope == "global")
+        elif visibility.mode == "project":
+            filters.extend(
+                (Memory.scope == "project", Memory.project == visibility.project)
+            )
+        elif visibility.mode == "global_and_project":
+            filters.append(
+                (Memory.scope == "global")
+                | ((Memory.scope == "project") & (Memory.project == visibility.project))
+            )
         if category is not None:
             filters.append(Memory.category == category)
         return filters

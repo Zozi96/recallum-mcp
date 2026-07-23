@@ -45,19 +45,26 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__AUTH__KEY_PREFIX` | `rcl_` | API key prefix |
 | `RECALLUM__LIMITS__*` | see `src/recallum/config.py` | Content/metadata/retrieval limits |
 
-**Important:** the application database user must be a regular role, never a
-superuser or BYPASSRLS role — superusers bypass Row-Level Security. The
-migrations may run as a privileged role; the runtime `RECALLUM__DATABASE__URL`
-should not.
+**Important:** the application database user owns Recallum's tables but must
+never be a superuser or have `BYPASSRLS`. On a fresh volume,
+`deploy/postgres-init/10-secure-runtime-role.sh` installs pgvector and creates
+that role separately from `recallum_admin`. For an existing volume originally
+created with `POSTGRES_USER=recallum`, first create a separate superuser admin,
+then demote the runtime role before deploying this version:
+
+```sql
+CREATE ROLE recallum_admin LOGIN SUPERUSER PASSWORD 'replace-me';
+ALTER ROLE recallum NOSUPERUSER NOBYPASSRLS;
+```
 
 ## Migrations
 
-Alembic owns the schema. The application never runs `create_all()`.
+Alembic owns the schema. The application never runs `create_all()`. Compose
+runs the one-shot `migrate` service before starting Recallum.
 
 ```bash
-# From the repo (or an image with the same env var):
-RECALLUM__DATABASE__URL="postgresql+asyncpg://..." uv run alembic upgrade head
-uv run alembic current    # verify: 0001_initial_schema (head)
+docker compose run --rm migrate
+docker compose run --rm migrate uv run --no-sync alembic current
 ```
 
 ## Users and API keys
@@ -72,8 +79,9 @@ uv run recallum-admin revoke-key --key-id <uuid>
 ## Health probes
 
 - `GET /healthz` — liveness, no dependency checks, always 200 when the process runs.
-- `GET /readyz` — readiness, checks PostgreSQL (`SELECT 1`) and Ollama
-  (`/api/version`); 200 `ready` or 503 `unavailable` with per-check status.
+- `GET /readyz` — readiness, checks the PostgreSQL schema, table ownership,
+  runtime role safety and Ollama (`/api/version`); 200 `ready` or 503
+  `unavailable` with per-check status.
   Never includes credentials or memory data.
 
 ## Backups and verified restore
@@ -81,23 +89,28 @@ uv run recallum-admin revoke-key --key-id <uuid>
 Daily backups via cron (`scripts/backup_pg.sh`):
 
 ```cron
-15 3 * * * PGPASSWORD=... /opt/recallum/scripts/backup_pg.sh >> /var/log/recallum-backup.log 2>&1
+15 3 * * * PGUSER=recallum_admin PGPASSWORD=... /opt/recallum/scripts/backup_pg.sh >> /var/log/recallum-backup.log 2>&1
 ```
 
-Backups are custom-format dumps in `/opt/recallum/backups` with 14-day
-retention. Restore with `scripts/restore_pg.sh`.
+Backups are private custom-format dumps (`0700` directory, `0600` files) in
+`/opt/recallum/backups` with 14-day retention. Restore only into an explicit
+target database with `scripts/restore_pg.sh`.
 
 **Verified restore drill (perform after first deploy and quarterly):**
 
-1. `PGPASSWORD=... ./scripts/restore_pg.sh <latest-dump> recallum_verify`
-2. `psql -d recallum_verify -c 'SELECT count(*) FROM users; SELECT count(*) FROM memories;'`
-3. Spot-check one memory: `psql -d recallum_verify -c 'SELECT content FROM memories LIMIT 1;'`
-4. `psql -c 'DROP DATABASE recallum_verify;'`
-5. Record date + result of the drill.
+1. `createdb recallum_verify`
+2. `PGUSER=recallum_admin PGPASSWORD=... ./scripts/restore_pg.sh <latest-dump> recallum_verify`
+3. `psql -d recallum_verify -c 'SELECT count(*) FROM users; SELECT count(*) FROM memories;'`
+4. Spot-check one memory: `psql -d recallum_verify -c 'SELECT content FROM memories LIMIT 1;'`
+5. `dropdb recallum_verify`
+6. Record date + result of the drill.
 
-Before restoring a backup that will be shared or moved, run a physical purge
-of logically-deleted rows first (design constraint: soft-deletes stay on disk
-until maintenance).
+Physically purge old soft-deletes during maintenance, and before creating a
+backup that will be shared or moved:
+
+```bash
+PGUSER=recallum_admin PGPASSWORD=... ./scripts/purge_deleted.sh 30
+```
 
 ## Rollback
 

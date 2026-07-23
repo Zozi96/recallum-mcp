@@ -69,9 +69,9 @@ Se desplegará una instancia PostgreSQL dedicada con pgvector; no se reutilizar�
 
 El esquema mínimo contendrá `users`, `api_keys` y `memories`. La tabla `memories` incluirá `user_id`, ámbito, proyecto opcional, categoría, contenido, hash normalizado, vector de 768 dimensiones, importancia, cliente de origen, metadata limitada y timestamps.
 
-Todas las operaciones del repositorio se ejecutarán dentro de una transacción de `AsyncSession` que configure el usuario actual mediante `SET LOCAL`. Row-Level Security restringirá `memories` y `api_keys` a ese usuario. La aplicación también incluirá filtros explícitos por usuario; RLS actuará como segunda barrera.
+Todas las operaciones del repositorio se ejecutarán dentro de una transacción de `AsyncSession` que configure el usuario actual mediante `SET LOCAL`. El rol de aplicación será propietario de las tablas, pero no será superusuario ni tendrá `BYPASSRLS`. `memories` forzará RLS incluso para el propietario; `api_keys` no la forzará para permitir resolver el hash de una key antes de conocer el usuario. La aplicación también incluirá filtros explícitos por usuario.
 
-El contenido será inmutable. `forget` establecerá `deleted_at`, y las búsquedas excluirán filas eliminadas. Un índice único parcial sobre usuario, ámbito y hash evitará duplicados exactos activos.
+El contenido será inmutable. `forget` establecerá `deleted_at`, las búsquedas excluirán filas eliminadas y un script administrativo purgará físicamente soft-deletes antiguos. Un índice único parcial sobre usuario, ámbito y hash evitará duplicados exactos activos.
 
 ### Ollama generará embeddings locales
 
@@ -87,7 +87,7 @@ No habrá reranker. `context` combinará memorias globales importantes con memor
 
 ### El despliegue reutilizará la infraestructura existente
 
-Dokploy ejecutará tres servicios: Recallum, PostgreSQL con pgvector y Ollama. Traefik publicará únicamente Recallum mediante HTTPS. PostgreSQL y Ollama permanecerán en una red privada y usarán volúmenes persistentes.
+Dokploy ejecutará Recallum, PostgreSQL con pgvector, Ollama y un job efímero de migración. En el primer arranque PostgreSQL instalará pgvector y creará un rol de aplicación separado, sin `SUPERUSER` ni `BYPASSRLS`, antes de que Alembic cree las tablas. Traefik publicará únicamente Recallum mediante HTTPS. PostgreSQL y Ollama permanecerán en una red privada y usarán volúmenes persistentes.
 
 Los límites iniciales serán aproximadamente 512 MiB para Recallum, 2 GiB para PostgreSQL y 1.5 GiB para Ollama. La imagen de Recallum usará Python 3.14, alineada con el host y con `requires-python` del proyecto; FastMCP 3.x y el resto de dependencias resuelven correctamente en 3.14 (decisión del propietario, sustituye a la idea original de 3.13).
 
