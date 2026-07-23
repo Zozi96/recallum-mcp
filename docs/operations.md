@@ -145,31 +145,64 @@ uv run recallum-admin revoke-key --key-id <uuid>
 
 ## Backups and verified restore
 
-Daily backups via cron (`scripts/backup_pg.sh`):
+**Primary mechanism: Dokploy native scheduled backups (to S3).** Dokploy runs
+`pg_dump` inside the managed database container and uploads to S3-compatible
+storage. This matches the pg17 server, needs no PostgreSQL client on the host,
+and works with the private-network topology (no published port required).
+
+Prerequisites:
+- The Recallum PostgreSQL is deployed as a Dokploy **Database** resource.
+- An **S3-compatible bucket + credentials** (e.g. Cloudflare R2, Backblaze B2,
+  MinIO, AWS S3). Dokploy native backups require an S3 destination.
+
+Configure in Dokploy (exact labels vary by version):
+
+1. **Settings → Destinations (S3):** add a destination with endpoint, bucket,
+   region, access key, secret key.
+2. **Database (postgres) → Backups:** add a schedule with
+   - cron `0 3 * * *` (daily 03:00),
+   - database `recallum`,
+   - the destination from step 1 and a key prefix (e.g. `recallum/`),
+   - enabled.
+3. **Run a manual backup once** and confirm the object lands in the bucket.
+
+Retention: set a lifecycle/expiry rule on the bucket (e.g. 14 days) or prune in
+the destination.
+
+**Verified restore drill (perform after first deploy and quarterly):**
+
+1. Download the latest dump from S3 (or use Dokploy's restore action).
+2. Restore into a scratch database, e.g. inside the pg container:
+   `pg_restore -U recallum_admin -d recallum_verify --clean --if-exists <dump>`
+   (create `recallum_verify` first with `createdb`).
+3. Verify: `psql -d recallum_verify -c 'SELECT count(*) FROM users; SELECT count(*) FROM memories;'`
+4. Spot-check one memory: `psql -d recallum_verify -c 'SELECT content FROM memories LIMIT 1;'`
+5. Drop the scratch database.
+6. Record date + result of the drill.
+
+Physically purge old soft-deletes during maintenance (run inside the pg
+container as `recallum_admin`):
+
+```bash
+docker exec <pg-container> psql -U recallum_admin -d recallum \
+  -c "DELETE FROM memories WHERE deleted_at < now() - interval '30 days'"
+```
+
+### Alternative: self-hosted script backups (no S3)
+
+If you prefer local dumps instead of Dokploy/S3, the repo ships
+`scripts/backup_pg.sh`, `scripts/restore_pg.sh` and `scripts/purge_deleted.sh`.
+They expect host-level `pg_dump`/`psql` (pg17) reaching the database, so with the
+private-network topology run them via `docker exec` into the pg container. Cron
+example:
 
 ```cron
 15 3 * * * PGUSER=recallum_admin PGPASSWORD=... /opt/recallum/scripts/backup_pg.sh >> /var/log/recallum-backup.log 2>&1
 ```
 
 Backups are private custom-format dumps (`0700` directory, `0600` files) in
-`/opt/recallum/backups` with 14-day retention. Restore only into an explicit
-target database with `scripts/restore_pg.sh`.
-
-**Verified restore drill (perform after first deploy and quarterly):**
-
-1. `createdb recallum_verify`
-2. `PGUSER=recallum_admin PGPASSWORD=... ./scripts/restore_pg.sh <latest-dump> recallum_verify`
-3. `psql -d recallum_verify -c 'SELECT count(*) FROM users; SELECT count(*) FROM memories;'`
-4. Spot-check one memory: `psql -d recallum_verify -c 'SELECT content FROM memories LIMIT 1;'`
-5. `dropdb recallum_verify`
-6. Record date + result of the drill.
-
-Physically purge old soft-deletes during maintenance, and before creating a
-backup that will be shared or moved:
-
-```bash
-PGUSER=recallum_admin PGPASSWORD=... ./scripts/purge_deleted.sh 30
-```
+`/opt/recallum/backups` with 14-day retention. Purge shared/moved backups first
+with `./scripts/purge_deleted.sh 30`.
 
 ## Rollback
 
