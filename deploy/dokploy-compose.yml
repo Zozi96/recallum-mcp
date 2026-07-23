@@ -1,4 +1,10 @@
-# Dokploy reference compose for the VPS.
+# ALTERNATIVE: single Compose stack for Dokploy.
+#
+# The primary deployment is separate Dokploy resources (Database + Applications)
+# with migrations as a pre-deploy command — see the "Dokploy deployment
+# (separate services)" section in docs/operations.md. Use THIS file only if you
+# prefer deploying everything as one Dokploy Compose stack instead.
+#
 # Traefik publishes only Recallum over HTTPS; PostgreSQL and Ollama remain on
 # the private network with persistent volumes. Adjust the Host rule and attach
 # the existing Dokploy/Traefik network (external) to your setup.

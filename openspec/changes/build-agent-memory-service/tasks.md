@@ -46,7 +46,7 @@
 - [x] 6.3 Documentar descarga persistente de `embeddinggemma:300m-qat-q4_0`, variables de entorno y migraciones.
 - [x] 6.4 Documentar configuración MCP para Codex y Claude Code con el endpoint HTTPS y API key.
 - [ ] 6.5 Configurar backups diarios de PostgreSQL y documentar una restauración verificada. *(scripts y runbook entregados en `scripts/` y `docs/operations.md`; falta activar el cron y ejecutar el simulacro de restauración en el VPS)*
-- [ ] 6.6 Ejecutar migraciones y smoke tests en el VPS, incluyendo acceso local, acceso remoto y aislamiento entre dos usuarios. *(requiere acceso al VPS; `scripts/smoke_test.sh` entregado)*
+- [ ] 6.6 Ejecutar migraciones y smoke tests en el VPS, incluyendo acceso local, acceso remoto y aislamiento entre dos usuarios. *(2026-07-22: smoke test ejecutado con éxito en la VPS sobre un stack efímero (`deploy/docker-compose.yml`, `http://127.0.0.1:8000`): migraciones, los 6 chequeos y aislamiento entre dos usuarios OK. Falta el **acceso remoto** vía HTTPS/Traefik contra el deploy real de Dokploy. Runbook en `docs/operations.md`)*
 
 ## 7. Correcciones posteriores al review
 
