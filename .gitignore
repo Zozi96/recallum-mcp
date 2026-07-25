@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Agent worktrees (scratch, never commit)
+.claude/worktrees/
+
+# graphify: machine-local / regenerable (keep graph.json, GRAPH_REPORT.md, graph.html, manifest.json, cost.json, labels)
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/cache/
