@@ -1,0 +1,6 @@
+interface:
+  display_name: "Recallum Setup"
+  short_description: "Install and diagnose Recallum for Codex"
+  default_prompt: "Use $recallum-setup to configure and verify the Recallum MCP connection."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recallum Memory"
+  short_description: "Recall and preserve durable project memory"
+  default_prompt: "Use $recallum-memory to load relevant context and preserve durable decisions."

@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; y=\"$(command -v python3 || command -v python)\"; if [ -n \"$p\" ] && [ -n \"$y\" ] && [ -f \"$p/hooks/recallum_hook.py\" ]; then exec \"$y\" \"$p/hooks/recallum_hook.py\" session; fi; cat >/dev/null 2>&1; exit 0",
+            "commandWindows": "pwsh -NoProfile -Command \"$r = if ($env:PLUGIN_ROOT) { $env:PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT }; $p = Get-Command python3, python, py -ErrorAction SilentlyContinue | Select-Object -First 1; $s = if ($r) { Join-Path $r 'hooks/recallum_hook.py' }; if ($p -and $s -and (Test-Path $s)) { & $p.Source $s session } else { $null = [Console]::In.ReadToEnd(); exit 0 }\"",
+            "timeout": 5,
+            "statusMessage": "Preparing Recallum project context"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; y=\"$(command -v python3 || command -v python)\"; if [ -n \"$p\" ] && [ -n \"$y\" ] && [ -f \"$p/hooks/recallum_hook.py\" ]; then exec \"$y\" \"$p/hooks/recallum_hook.py\" prompt; fi; cat >/dev/null 2>&1; exit 0",
+            "commandWindows": "pwsh -NoProfile -Command \"$r = if ($env:PLUGIN_ROOT) { $env:PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT }; $p = Get-Command python3, python, py -ErrorAction SilentlyContinue | Select-Object -First 1; $s = if ($r) { Join-Path $r 'hooks/recallum_hook.py' }; if ($p -and $s -and (Test-Path $s)) { & $p.Source $s prompt } else { $null = [Console]::In.ReadToEnd(); exit 0 }\"",
+            "timeout": 5,
+            "statusMessage": "Checking for relevant Recallum memory"
+          }
+        ]
+      }
+    ]
+  }
+}
