@@ -260,8 +260,7 @@ class MemoryService:
         effective_limit = self._clamp_limit(
             limit, self._limits.list_default_limit, self._limits.list_max_limit
         )
-        if offset < 0:
-            offset = 0
+        offset = max(0, min(int(offset), self._limits.list_max_offset))
         rows, total = await self._repo.list_active(
             user_id,
             visibility=visibility,

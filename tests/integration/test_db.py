@@ -9,6 +9,7 @@ Skipped when Docker is unavailable or the image cannot be pulled.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -34,7 +35,13 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0001_initial_schema"
+        assert version == "0002_require_pgvector_0_8"
+        vector_version = (
+            await connection.execute(
+                text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+            )
+        ).scalar_one()
+        assert tuple(map(int, vector_version.split("."))) >= (0, 8, 0)
         role = (
             await connection.execute(
                 text(
@@ -111,6 +118,28 @@ async def test_user_email_is_normalized_and_case_insensitive_unique(container):
     assert found.id == user.id
     with pytest.raises(ValueError):
         await service.create_user("ALICE@example.com")
+
+
+async def test_concurrent_user_creation_inserts_once(container):
+    service = container.api_key_service()
+    email = f"concurrent-{uuid.uuid4().hex[:8]}@example.com"
+
+    results = await asyncio.gather(
+        service.create_user(email),
+        service.create_user(email),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    async with container.engine().connect() as connection:
+        count = (
+            await connection.execute(
+                text("SELECT count(*) FROM users WHERE email = :email"),
+                {"email": email},
+            )
+        ).scalar_one()
+    assert count == 1
 
 
 async def test_deduplication_returns_existing_memory(container):

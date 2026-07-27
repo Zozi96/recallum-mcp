@@ -78,6 +78,7 @@ class FakeMemoryRepository:
 
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, Memory] = {}
+        self.last_list_offset: int | None = None
 
     def _active(self, user_id: uuid.UUID) -> list[Memory]:
         return [m for m in self.rows.values() if m.user_id == user_id and not m.is_deleted]
@@ -143,6 +144,7 @@ class FakeMemoryRepository:
         limit: int,
         offset: int = 0,
     ) -> tuple[Sequence[Memory], int]:
+        self.last_list_offset = offset
         # Matches Postgres' ORDER BY created_at DESC, id ASC: stable-sort by
         # id ascending first, then stable-sort by created_at descending so
         # ties on created_at keep id-ascending order.
@@ -211,7 +213,9 @@ class FakeUserRepository:
     def __init__(self) -> None:
         self.users: dict[uuid.UUID, User] = {}
 
-    async def create_user(self, email: str) -> User:
+    async def create_user(self, email: str) -> User | None:
+        if await self.get_by_email(email) is not None:
+            return None
         user = User(id=uuid.uuid4(), email=email, created_at=datetime.now(UTC))
         self.users[user.id] = user
         return user

@@ -18,6 +18,7 @@ class MemoryLimits(BaseModel):
     recall_max_limit: int = Field(default=50, gt=0)
     list_default_limit: int = Field(default=50, gt=0)
     list_max_limit: int = Field(default=100, gt=0)
+    list_max_offset: int = Field(default=10_000, ge=0)
     context_default_max_items: int = Field(default=20, gt=0)
     context_max_items_cap: int = Field(default=50, gt=0)
     context_default_max_chars: int = Field(default=6000, gt=0)

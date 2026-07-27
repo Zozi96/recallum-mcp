@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import cast, func, literal, select, update
+from sqlalchemy import cast, func, literal, select, text, update
 from sqlalchemy.dialects.postgresql import REGCONFIG
 
 from recallum.db.models import Memory
@@ -132,6 +132,7 @@ class MemoryRepository:
     ) -> Sequence[ScoredMemory]:
         """Nearest neighbours by cosine similarity (1 - distance)."""
         async with self._sessions.for_user(user_id) as session:
+            await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
             distance = Memory.embedding.cosine_distance(embedding)
             score = (literal(1.0) - distance).label("score")
             stmt = (

@@ -86,7 +86,12 @@ class Memory(Base):
         ),
         CheckConstraint("importance BETWEEN 0 AND 10", name="ck_memories_importance"),
         CheckConstraint("(scope = 'project') = (project IS NOT NULL)", name="ck_memories_project"),
-        Index("ix_memories_user_active_created", "user_id", text("created_at DESC")),
+        Index(
+            "ix_memories_user_active_created",
+            "user_id",
+            text("created_at DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

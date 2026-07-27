@@ -279,6 +279,21 @@ async def test_list_memories_filters_and_paginates():
     assert all(item.scope == "global" for item in scoped_global.items)
 
 
+@pytest.mark.parametrize(("requested", "expected"), [(-1, 0), (101, 100)])
+async def test_list_memories_clamps_offset(requested, expected):
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        limits=MemoryLimits(list_max_offset=100),
+    )
+
+    page = await service.list_memories(USER, offset=requested)
+
+    assert page.offset == expected
+    assert repo.last_list_offset == expected
+
+
 async def test_list_visibility_semantics_and_project_scope_validation():
     service, _, _ = make_service()
     await service.remember(USER, content="global", category="fact")

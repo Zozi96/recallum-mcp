@@ -79,9 +79,10 @@ class ApiKeyService:
 
     async def create_user(self, email: str) -> User:
         email = _normalize_email(email)
-        if await self._users.get_by_email(email) is not None:
+        user = await self._users.create_user(email)
+        if user is None:
             raise ValueError(f"user '{email}' already exists")
-        return await self._users.create_user(email)
+        return user
 
     async def issue_key(self, user_id: uuid.UUID, name: str | None = None) -> IssuedKey:
         """Generate a key, persist only its hash, return the plaintext once."""

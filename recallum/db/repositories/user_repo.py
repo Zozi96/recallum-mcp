@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from recallum.db.models import User
 from recallum.db.session import SessionProvider
@@ -16,13 +17,15 @@ class UserRepository:
     def __init__(self, sessions: SessionProvider) -> None:
         self._sessions = sessions
 
-    async def create_user(self, email: str) -> User:
+    async def create_user(self, email: str) -> User | None:
         async with self._sessions.admin() as session:
-            user = User(email=email)
-            session.add(user)
-            await session.flush()
-            await session.refresh(user)
-            return user
+            stmt = (
+                insert(User)
+                .values(email=email)
+                .on_conflict_do_nothing(index_elements=[User.email])
+                .returning(User)
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
 
     async def get_by_email(self, email: str) -> User | None:
         async with self._sessions.admin() as session:
