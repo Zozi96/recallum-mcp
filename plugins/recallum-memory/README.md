@@ -42,12 +42,23 @@ plugins/recallum-memory/scripts/install.sh --dry-run
 | `--target TARGET` | `auto` | `auto`, `codex`, `claude`, or `both`. `auto` uses every detected CLI; `codex`/`claude`/`both` fail if a named CLI is missing |
 | `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex reads the bearer token from. Claude Code always checks `RECALLUM_API_KEY` |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
+| `--remote` | off | Register the private GitHub repository instead of this local checkout |
 | `--force-mcp` | off | Replace an existing setup: a differing Codex MCP definition, or an already-installed Claude Code plugin |
 | `--dry-run` | off | Validate and print the plan without mutating anything |
 | `--help` | | Usage |
 
 The script validates the URL and both marketplace manifests **before** invoking any CLI, and
 refuses to overwrite an existing Recallum setup unless you pass `--force-mcp`.
+
+For an installation that keeps updating from the private repository rather than this checkout:
+
+```bash
+export RECALLUM_API_KEY=...
+plugins/recallum-memory/scripts/install.sh --target both --remote
+```
+
+GitHub SSH access must already work. The checkout used to launch the script can be removed after
+installation.
 
 ### The trailing slash is not cosmetic
 

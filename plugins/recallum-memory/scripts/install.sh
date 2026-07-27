@@ -18,6 +18,7 @@ Options:
   --token-env-var NAME      Codex only: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
+  --remote                  Register the private GitHub repository instead of the local checkout
   --force-mcp               Replace an existing recallum setup: a differing Codex MCP
                             definition, or an already-installed Claude Code plugin
   --dry-run                 Validate and print safe actions without mutating anything
@@ -39,6 +40,7 @@ url="$DEFAULT_URL"
 target="auto"
 token_env_var="RECALLUM_API_KEY"
 claude_scope="user"
+remote_marketplace=0
 force_mcp=0
 dry_run=0
 
@@ -63,6 +65,10 @@ while (($#)); do
       (($# >= 2)) || { echo "error: --claude-scope requires a value" >&2; exit 2; }
       claude_scope=$2
       shift 2
+      ;;
+    --remote)
+      remote_marketplace=1
+      shift
       ;;
     --force-mcp)
       force_mcp=1
@@ -163,6 +169,12 @@ esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd -P)
+codex_marketplace_source="$repo_root"
+claude_marketplace_source="$repo_root"
+if ((remote_marketplace)); then
+  codex_marketplace_source="git@github.com:Zozi96/recallum-mcp.git"
+  claude_marketplace_source="Zozi96/recallum-mcp"
+fi
 
 tmp_dir=$(mktemp -d)
 cleanup() { rm -rf -- "$tmp_dir"; }
@@ -214,15 +226,22 @@ PY
 
   codex plugin marketplace list --json >"$tmp_dir/codex-marketplaces.json"
   local marketplace_state
-  marketplace_state=$(python3 - "$tmp_dir/codex-marketplaces.json" "$marketplace_name" "$repo_root" <<'PY'
+  marketplace_state=$(python3 - "$tmp_dir/codex-marketplaces.json" "$marketplace_name" "$repo_root" "$remote_marketplace" "$codex_marketplace_source" <<'PY'
 import json
 import os
 import sys
 items = json.load(open(sys.argv[1], encoding="utf-8")).get("marketplaces", [])
 matches = [item for item in items if item.get("name") == sys.argv[2]]
+remote = sys.argv[4] == "1"
 if not matches:
     print("missing")
-elif len(matches) == 1 and os.path.realpath(matches[0].get("root", "")) == os.path.realpath(sys.argv[3]):
+elif len(matches) == 1 and (
+    (remote and matches[0].get("marketplaceSource", {}).get("source") == sys.argv[5])
+    or (
+        not remote
+        and os.path.realpath(matches[0].get("root", "")) == os.path.realpath(sys.argv[3])
+    )
+):
     print("matching")
 else:
     print("conflict")
@@ -267,7 +286,7 @@ PY
   fi
 
   if [[ "$marketplace_state" == "missing" ]]; then
-    run_action codex plugin marketplace add "$repo_root"
+    run_action codex plugin marketplace add "$codex_marketplace_source"
   else
     echo "Codex marketplace '$marketplace_name' already points to this repository."
   fi
@@ -316,7 +335,7 @@ PY
 
   claude plugin marketplace list --json >"$tmp_dir/claude-marketplaces.json"
   local marketplace_state
-  marketplace_state=$(python3 - "$tmp_dir/claude-marketplaces.json" "$marketplace_name" "$repo_root" <<'PY'
+  marketplace_state=$(python3 - "$tmp_dir/claude-marketplaces.json" "$marketplace_name" "$repo_root" "$remote_marketplace" "$claude_marketplace_source" <<'PY'
 import json
 import os
 import sys
@@ -327,6 +346,7 @@ if not isinstance(items, list):
     raise SystemExit("error: unexpected 'claude plugin marketplace list --json' payload")
 matches = [item for item in items if isinstance(item, dict) and item.get("name") == sys.argv[2]]
 expected = os.path.realpath(sys.argv[3])
+remote = sys.argv[4] == "1"
 
 
 def locations(item):
@@ -340,7 +360,17 @@ def locations(item):
 
 if not matches:
     print("missing")
-elif len(matches) == 1 and any(os.path.realpath(p) == expected for p in locations(matches[0])):
+elif len(matches) == 1 and (
+    (
+        remote
+        and matches[0].get("source") == "github"
+        and matches[0].get("repo") == sys.argv[5]
+    )
+    or (
+        not remote
+        and any(os.path.realpath(p) == expected for p in locations(matches[0]))
+    )
+):
     print("matching")
 else:
     print("conflict")
@@ -381,7 +411,7 @@ PY
   fi
 
   if [[ "$marketplace_state" == "missing" ]]; then
-    run_action claude plugin marketplace add "$repo_root" --scope "$claude_scope"
+    run_action claude plugin marketplace add "$claude_marketplace_source" --scope "$claude_scope"
   else
     echo "Claude Code marketplace '$marketplace_name' already points to this repository."
   fi

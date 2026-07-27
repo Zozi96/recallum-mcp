@@ -381,6 +381,14 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: codex plugin marketplace add", result.stdout)
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
 
+    def test_remote_uses_private_repository_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            result = self._run(env, "--target", "both", "--remote", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("git@github.com:Zozi96/recallum-mcp.git", result.stdout)
+            self.assertIn("Zozi96/recallum-mcp", result.stdout)
+
     def test_auto_target_skips_a_cli_that_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory), stub_codex=False)
