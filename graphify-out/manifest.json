@@ -498,5 +498,95 @@
     "mtime": 1785116428.6185443,
     "ast_hash": "97359b31c12ca3b80cdd944cc46cd9c2",
     "semantic_hash": "97359b31c12ca3b80cdd944cc46cd9c2"
+  },
+  ".agents/plugins/marketplace.json": {
+    "mtime": 1785122587.674572,
+    "ast_hash": "8c9d34fdd84fca4540e3ebf6e4f0a090",
+    "semantic_hash": ""
+  },
+  ".claude-plugin/marketplace.json": {
+    "mtime": 1785125104.714773,
+    "ast_hash": "6ba798a6a3fbd745dd2240bf68c35e66",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/.claude-plugin/plugin.json": {
+    "mtime": 1785130679.0910883,
+    "ast_hash": "eb0d7eda258265cf9977f59859685a6f",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/.codex-plugin/plugin.json": {
+    "mtime": 1785122935.8716545,
+    "ast_hash": "167307a5f5990258f96c573216e5ef47",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/hooks/hooks.json": {
+    "mtime": 1785122999.8532994,
+    "ast_hash": "74c92fe0ee7217ccaeac005bcdf864ac",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/hooks/recallum_hook.py": {
+    "mtime": 1785127751.1797817,
+    "ast_hash": "8106863fb186929e454bdc396bea592c",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/scripts/install.sh": {
+    "mtime": 1785130702.8139226,
+    "ast_hash": "1628a1f58eabf16651f12fb3ecc2997b",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/tests/test_plugin.py": {
+    "mtime": 1785130720.008803,
+    "ast_hash": "d8d666b9da383b37ffea2edca6f355a7",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_230701_okay__cu\u00e1les_son_las_variables_de_entorno_que_hay.md": {
+    "mtime": 1785107221.368682,
+    "ast_hash": "d4b0c5eca1d1e3205f68599f87ddac5a",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_232449_as\u00ed_est\u00e1_bien__configuraci\u00f3n_dockerfile_en_dokplo.md": {
+    "mtime": 1785108289.4750764,
+    "ast_hash": "e8fae609a9bfaa44c4cc84687e0d47fd",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_233311_dokploy_build_error___recallum_not_found.md": {
+    "mtime": 1785108791.8090806,
+    "ast_hash": "a171b235702a044ecf8588a07eaefb67",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_233712_c\u00f3mo_saber_si_recallum_reconoce_la_base_de_datos.md": {
+    "mtime": 1785109032.968649,
+    "ast_hash": "6c9209973e0b8733f4214b4126e6eb38",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/skills/recallum-memory/SKILL.md": {
+    "mtime": 1785127765.8787405,
+    "ast_hash": "5e4d2a69dc35bee8e04b064b8c005def",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/skills/recallum-memory/agents/openai.yaml": {
+    "mtime": 1785122598.843511,
+    "ast_hash": "12169874ba73d22908740f2c00edf0b7",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/skills/recallum-setup/SKILL.md": {
+    "mtime": 1785127929.334215,
+    "ast_hash": "09c733eb96fea9287d96c403bb699985",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/skills/recallum-setup/agents/openai.yaml": {
+    "mtime": 1785122935.8796546,
+    "ast_hash": "0fe0290399662c489ef474ce45a21a35",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/.mcp.json": {
+    "mtime": 1785127733.5088296,
+    "ast_hash": "5ecca10e214b2b8b9d54de9c36a74e5a",
+    "semantic_hash": ""
+  },
+  "plugins/recallum-memory/README.md": {
+    "mtime": 1785130750.0675948,
+    "ast_hash": "3214e48da6246ba2e4fcae2027cffce4",
+    "semantic_hash": ""
   }
 }
