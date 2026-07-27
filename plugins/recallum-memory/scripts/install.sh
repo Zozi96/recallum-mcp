@@ -27,9 +27,9 @@ This script never reads, prints, or stores the API key.
 
   Codex        registers the MCP server against --token-env-var, and resolves that
                environment variable at connection time.
-  Claude Code  carries the MCP server inside the plugin and fills it from userConfig.
-               Only the endpoint is passed here; set the key afterwards with
-               `/plugin configure recallum-memory@recallum-local`, which masks it.
+  Claude Code  carries the MCP server inside the plugin. It prefers RECALLUM_API_KEY,
+               with a masked fallback set through
+               `/plugin configure recallum-memory@recallum-local`.
 EOF
 }
 
@@ -353,9 +353,9 @@ PY
 
   # Claude Code carries the MCP server inside the plugin (.mcp.json) and fills
   # it from userConfig, so there is no separate `claude mcp add` step. Only the
-  # non-sensitive endpoint is passed on the command line; the API key is left
-  # for `/plugin configure`, which masks it and keeps it out of argv, shell
-  # history, and the process list.
+  # non-sensitive endpoint is passed on the command line. The API key comes
+  # from RECALLUM_API_KEY, or from a masked `/plugin configure` fallback,
+  # keeping the credential out of argv and the process list.
   claude plugin list --json >"$tmp_dir/claude-plugins.json"
   local plugin_state
   plugin_state=$(python3 - "$tmp_dir/claude-plugins.json" <<'PY'
@@ -403,6 +403,6 @@ if ((install_codex)); then
   echo "Codex: start a new thread, open /hooks, review the Recallum hook path, and trust it."
 fi
 if ((install_claude)); then
-  echo "Claude Code: run '/plugin configure recallum-memory@recallum-local' to set the API key,"
-  echo "             then restart the session so the plugin, its hooks, and the MCP tools load."
+  echo "Claude Code: export RECALLUM_API_KEY or set a masked fallback with"
+  echo "             '/plugin configure recallum-memory@recallum-local', then restart the session."
 fi

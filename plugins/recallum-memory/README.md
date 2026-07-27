@@ -40,7 +40,7 @@ plugins/recallum-memory/scripts/install.sh --dry-run
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
 | `--target TARGET` | `auto` | `auto`, `codex`, `claude`, or `both`. `auto` uses every detected CLI; `codex`/`claude`/`both` fail if a named CLI is missing |
-| `--token-env-var NAME` | `RECALLUM_API_KEY` | **Codex only.** Environment variable Codex reads the bearer token from |
+| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex reads the bearer token from. Claude Code always checks `RECALLUM_API_KEY` |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--force-mcp` | off | Replace an existing setup: a differing Codex MCP definition, or an already-installed Claude Code plugin |
 | `--dry-run` | off | Validate and print the plan without mutating anything |
@@ -79,8 +79,8 @@ The installer never reads, prints, or stores your key. The two clients get there
 | --- | --- | --- |
 | MCP registration | `codex mcp add`, separate from the plugin | `.mcp.json` bundled **inside** the plugin |
 | Endpoint | `--url` | `userConfig.mcp_url`, passed by the installer |
-| Key | `--token-env-var` names an env var, resolved at connect time | `userConfig.api_token`, declared `sensitive` and stored by Claude Code |
-| Key set by | you, in your shell | you, via `/plugin configure` |
+| Key | `--token-env-var` names an env var, resolved at connect time | `${RECALLUM_API_KEY:-${user_config.api_token}}` |
+| Key set by | you, in your shell | environment, or masked fallback via `/plugin configure` |
 
 The key is deliberately **not** passed as `--config api_token=...`: that would put the credential
 into `argv`, shell history, and the process list. Only the non-sensitive endpoint is scripted.
@@ -95,11 +95,20 @@ export RECALLUM_API_KEY=...        # put this in your shell profile
 
 Open `/hooks`, confirm the Recallum hook path points at this installation, and trust it.
 
-**Claude Code** — set the key, then restart the session:
+**Claude Code** — export the same variable before launching Claude, or store a masked fallback,
+then restart the session:
 
+```bash
+export RECALLUM_API_KEY=...
 ```
+
+```text
 /plugin configure recallum-memory@recallum-local
 ```
+
+`RECALLUM_API_KEY` takes precedence. Unset it before launching Claude to use the stored
+`api_token` fallback. When the variable is set, Claude Code may still warn that one `userConfig`
+option is unset during installation; the MCP connection uses the environment variable normally.
 
 ## Verify
 
@@ -136,8 +145,8 @@ Changing the endpoint:
 plugins/recallum-memory/scripts/install.sh --url https://new.example.com/mcp --force-mcp
 ```
 
-On Claude Code this uninstalls and reinstalls the plugin, so re-run `/plugin configure` afterwards
-to set the key again.
+On Claude Code this uninstalls and reinstalls the plugin. Export `RECALLUM_API_KEY` before launching
+Claude, or re-run `/plugin configure` to restore a masked fallback.
 
 ## Uninstall
 
@@ -152,7 +161,7 @@ claude plugin uninstall recallum-memory@recallum-local
 | --- | --- |
 | Tools missing after install | Start a **new** session; both clients discover MCP tools only at session start |
 | Tools missing in `claude -p` | A restricted `agent` in `settings.json` can pin a tool allowlist that excludes MCP tools. Check the `agent` key and its `tools:` frontmatter |
-| Claude Code reports `userConfig option not yet set` | `api_token` is unset — run `/plugin configure recallum-memory@recallum-local` |
+| Claude authentication failure | Export `RECALLUM_API_KEY` before launching Claude, or run `/plugin configure recallum-memory@recallum-local`; the environment variable wins when both exist |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |
 

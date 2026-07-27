@@ -1,7 +1,7 @@
 {
   "name": "recallum-memory",
   "displayName": "Recallum Memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Persistent, project-aware memory for Claude Code through Recallum. Loads concise project context at session start, recalls prior decisions on demand, and preserves newly settled preferences, constraints, decisions, and facts.",
   "author": {
     "name": "Zozi"
@@ -25,7 +25,7 @@
     "api_token": {
       "type": "string",
       "title": "Recallum API key",
-      "description": "API key issued by your Recallum server. Stored by Claude Code and masked in the UI.",
+      "description": "Fallback API key used when RECALLUM_API_KEY is unset. Stored by Claude Code and masked in the UI.",
       "sensitive": true
     }
   }

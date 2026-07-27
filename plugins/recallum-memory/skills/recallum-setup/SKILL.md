@@ -45,13 +45,16 @@ actions.
 ## Setup — Claude Code
 
 Claude Code does not use a separate MCP registration. The plugin ships `.mcp.json`, whose `url` and
-`Authorization` header are filled from the `userConfig` values `mcp_url` and `api_token`.
+`Authorization` header are filled from `userConfig`. Authentication uses
+`${RECALLUM_API_KEY:-${user_config.api_token}}`: the environment variable wins, with the masked
+plugin option as fallback.
 
 1. Confirm the plugin marketplace and installation:
    `claude plugin marketplace list --json` must contain `recallum-local` at this repository root,
    and `claude plugin list --json` must contain the id `recallum-memory@recallum-local`.
-2. Set or check the configuration with `/plugin configure recallum-memory@recallum-local`.
-   `api_token` is declared `sensitive`, so Claude Code masks it. Never pass the key with
+2. Check whether `RECALLUM_API_KEY` was exported before Claude Code started, or set a masked
+   fallback with `/plugin configure recallum-memory@recallum-local`. `api_token` is declared
+   `sensitive`, so Claude Code masks explicit values. Never pass the key with
    `--config api_token=...`: that puts the credential in argv, shell history, and the process list.
    Only `mcp_url` is safe to pass that way, and `scripts/install.sh` does exactly that.
 3. Confirm the server is reachable:
@@ -60,8 +63,10 @@ Claude Code does not use a separate MCP registration. The plugin ships `.mcp.jso
    claude mcp list | grep recallum
    ```
 
-   It appears as `plugin:recallum-memory:recallum`. A missing or unset `userConfig` value shows up
-   as a connection failure, and `claude plugin install` reports `userConfig option not yet set`.
+   It appears as `plugin:recallum-memory:recallum`. A missing environment variable with no
+   configured fallback shows up as a connection failure. The installer may still call the fallback
+   unset when the environment variable is present; that warning does not block environment
+   expansion.
 4. Restart the Claude Code session after installation or reconfiguration so the plugin, its hooks,
    and the MCP tools load.
 5. Verify the plugin manifest with `claude plugin validate <repo-root> --strict` and
@@ -69,8 +74,8 @@ Claude Code does not use a separate MCP registration. The plugin ships `.mcp.jso
 
 ## Shared Checks
 
-1. On Codex, check only whether the token environment variable is present. Report set or unset;
-   never reveal its value. On Claude Code, report only whether `api_token` is configured.
+1. Check only whether the token environment variable or Claude Code fallback is present. Report set
+   or unset; never reveal its value.
 2. Confirm the server is ready and that tool discovery exposes exactly five tools — `context`,
    `recall`, `remember`, `list_memories`, and `forget` — under the prefix for that client:
 
@@ -96,8 +101,9 @@ sentinel afterward with `mcp__recallum__forget` if the user does not want to ret
   discovery.
 - Authentication failure on Codex: verify the named environment variable is present in the
   environment that launches Codex and that the key is active; do not request the value in chat.
-- Authentication failure on Claude Code: re-run `/plugin configure recallum-memory@recallum-local`
-  and re-enter the key. Do not ask for the value in chat and do not read it back.
+- Authentication failure on Claude Code: verify `RECALLUM_API_KEY` was exported before Claude
+  started, or re-run `/plugin configure recallum-memory@recallum-local`. Do not ask for the value
+  in chat and do not read it back.
 - Connection failure: verify the URL and service readiness independently, then retry discovery.
 - Hook absent or blocked (Codex): use `/hooks` to inspect the path and trust state; never bypass the
   trust review.

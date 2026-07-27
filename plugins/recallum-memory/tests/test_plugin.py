@@ -198,11 +198,14 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(user_config["api_token"]["sensitive"])
         self.assertNotIn("sensitive", user_config["mcp_url"])
 
-    def test_bundled_mcp_server_reads_both_values_from_user_config(self) -> None:
+    def test_bundled_mcp_server_prefers_env_token_with_user_config_fallback(self) -> None:
         server = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["recallum"]
         self.assertEqual(server["type"], "http")
         self.assertEqual(server["url"], "${user_config.mcp_url}")
-        self.assertEqual(server["headers"]["Authorization"], "Bearer ${user_config.api_token}")
+        self.assertEqual(
+            server["headers"]["Authorization"],
+            "Bearer ${RECALLUM_API_KEY:-${user_config.api_token}}",
+        )
 
     def test_claude_tool_prefix_is_derivable_from_the_manifest_and_server_name(self) -> None:
         """Pin the prefix to its inputs so a rename cannot silently break it.
