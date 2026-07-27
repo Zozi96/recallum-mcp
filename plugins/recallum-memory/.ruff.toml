@@ -1,0 +1,10 @@
+# The plugin ships to Codex and Claude Code and runs under whichever `python3`
+# the host provides, not the interpreter this repository pins. Formatting and
+# linting must therefore target the oldest interpreter the hook supports, or
+# `ruff format` rewrites the hook into Python 3.14-only syntax (PEP 758
+# unparenthesized `except A, B:`), which is a SyntaxError everywhere else.
+line-length = 100
+target-version = "py39"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]

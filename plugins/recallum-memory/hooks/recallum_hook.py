@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
-"""Fail-open context hints for the Recallum Codex plugin."""
+"""Fail-open context hints for the Recallum plugin (Codex and Claude Code).
+
+Runs under whichever ``python3`` is on the host PATH, so this module must stay
+compatible with older interpreters. Do not use syntax newer than Python 3.9.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+
+# Codex registers the MCP server under its bare name, so its tools are
+# `mcp__recallum__*`. Claude Code registers a plugin-bundled server as
+# `plugin:<plugin>:<server>` and sanitizes every character outside
+# [A-Za-z0-9_-] to `_` when building tool ids, so the same tools are
+# `mcp__plugin_recallum-memory_recallum__*` there.
+CODEX_TOOL_PREFIX = "mcp__recallum__"
+CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 
 MEMORY_SIGNAL = re.compile(
     r"\b(?:remember|remembered|recall|recalled|memory|memories|prefer|preference|"
@@ -26,7 +39,7 @@ FALSE_POSITIVE = re.compile(
 def _read_payload() -> dict[str, object] | None:
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
-    except json.JSONDecodeError, OSError, ValueError:  # noqa: UP034
+    except (json.JSONDecodeError, OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -40,7 +53,7 @@ def _git(cwd: Path, *args: str) -> str | None:
             text=True,
             timeout=0.5,
         )
-    except OSError, subprocess.TimeoutExpired:  # noqa: UP034
+    except (OSError, subprocess.TimeoutExpired):
         return None
     value = result.stdout.strip()
     return value if result.returncode == 0 and value else None
@@ -80,6 +93,24 @@ def _project(payload: dict[str, object]) -> str:
     return f"local:{digest}"
 
 
+def _tool(name: str) -> str:
+    """Name a Recallum tool the way the running client exposes it.
+
+    Claude Code exports CLAUDE_PLUGIN_ROOT and never a bare PLUGIN_ROOT; Codex
+    exports PLUGIN_ROOT. When the signal is ambiguous, name both spellings
+    rather than guess, so the model can pick whichever tool actually exists.
+    """
+    claude = bool(os.environ.get("CLAUDE_PLUGIN_ROOT"))
+    codex = bool(os.environ.get("PLUGIN_ROOT"))
+    if claude and not codex:
+        prefixes = [CLAUDE_TOOL_PREFIX]
+    elif codex and not claude:
+        prefixes = [CODEX_TOOL_PREFIX]
+    else:
+        prefixes = [CODEX_TOOL_PREFIX, CLAUDE_TOOL_PREFIX]
+    return " or ".join(prefix + name for prefix in prefixes)
+
+
 def _emit(event: str, context: str) -> None:
     print(
         json.dumps(
@@ -106,7 +137,7 @@ def main() -> int:
     if event == "session":
         _emit(
             "SessionStart",
-            f"Recallum: before planning, call mcp__recallum__context(project={project!r}) "
+            f"Recallum: before planning, call {_tool('context')} with project={project!r} "
             "if available; current user and repository instructions override memory.",
         )
         return 0

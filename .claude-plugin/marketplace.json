@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "recallum-local",
+  "description": "Local marketplace for the Recallum durable-memory plugin.",
+  "owner": {
+    "name": "Zozi"
+  },
+  "plugins": [
+    {
+      "name": "recallum-memory",
+      "source": "./plugins/recallum-memory",
+      "description": "Recall durable project context across Claude Code sessions via the Recallum MCP server.",
+      "category": "productivity"
+    }
+  ]
+}
