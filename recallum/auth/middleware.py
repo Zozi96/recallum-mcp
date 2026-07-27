@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -16,11 +17,27 @@ from recallum.db.repositories.api_key_repo import ApiKeyRepository
 logger = logging.getLogger("recallum.auth")
 
 
-class TokenAuthenticator:
-    """Resolves a raw bearer token to an ``Identity`` via its stored hash."""
+# How stale ``last_used_at`` may get before authentication refreshes it. Every
+# refresh is a write on a row that a busy agent hits on every single tool call,
+# so the timestamp trades exactness for not serialising the hot path.
+LAST_USED_REFRESH_INTERVAL = timedelta(seconds=60)
 
-    def __init__(self, api_key_repository: ApiKeyRepository) -> None:
+
+class TokenAuthenticator:
+    """Resolves a raw bearer token to an ``Identity`` via its stored hash.
+
+    Authenticating refreshes ``last_used_at``, but at most once per
+    ``refresh_interval`` — the timestamp answers "is this key still in use?",
+    not "when exactly was the last call?".
+    """
+
+    def __init__(
+        self,
+        api_key_repository: ApiKeyRepository,
+        refresh_interval: timedelta = LAST_USED_REFRESH_INTERVAL,
+    ) -> None:
         self._keys = api_key_repository
+        self._refresh_interval = refresh_interval
 
     async def authenticate(self, token: str) -> Identity | None:
         if not token:
@@ -29,8 +46,14 @@ class TokenAuthenticator:
         if found is None:
             return None
         key, user = found
-        await self._keys.touch(key.id)
+        if self._needs_refresh(key.last_used_at):
+            await self._keys.touch(key.id)
         return Identity(user_id=user.id, email=user.email, api_key_id=key.id)
+
+    def _needs_refresh(self, last_used_at: datetime | None) -> bool:
+        if last_used_at is None:
+            return True
+        return datetime.now(UTC) - last_used_at >= self._refresh_interval
 
 
 def _extract_bearer(headers: dict[str, str]) -> str | None:

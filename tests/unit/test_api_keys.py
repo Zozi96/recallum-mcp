@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -167,3 +168,69 @@ async def test_cli_email_workflows_preserve_output_and_codes(capsys):
     invalid = capsys.readouterr()
     assert invalid.out == ""
     assert invalid.err == "error: user 'Not An Email' does not exist\n"
+
+
+class CountingApiKeyRepository(FakeApiKeyRepository):
+    """Counts writes so the authentication hot path can be measured."""
+
+    def __init__(self, users: FakeUserRepository) -> None:
+        super().__init__(users)
+        self.touches = 0
+
+    async def touch(self, key_id) -> None:
+        self.touches += 1
+        await super().touch(key_id)
+
+
+async def _issue(keys: CountingApiKeyRepository, users: FakeUserRepository) -> str:
+    service = ApiKeyService(user_repository=users, api_key_repository=keys)
+    user = await service.create_user("alice@example.com")
+    return (await service.issue_key(user.id)).plaintext
+
+
+async def test_authentication_refreshes_last_used_once_per_interval():
+    """F4: last_used_at used to be written on every single tool call."""
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    auth = TokenAuthenticator(api_key_repository=keys, refresh_interval=timedelta(seconds=60))
+
+    assert await auth.authenticate(token) is not None
+    assert keys.touches == 1, "the first use must record last_used_at"
+
+    for _ in range(20):
+        assert await auth.authenticate(token) is not None
+    assert keys.touches == 1, "a busy agent must not write on every call"
+
+
+async def test_authentication_refreshes_last_used_once_the_interval_elapses():
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    auth = TokenAuthenticator(api_key_repository=keys, refresh_interval=timedelta(seconds=60))
+
+    await auth.authenticate(token)
+    assert keys.touches == 1
+
+    # Age the stored timestamp past the refresh interval.
+    key = next(iter(keys.keys.values()))
+    key.last_used_at = datetime.now(UTC) - timedelta(seconds=61)
+
+    await auth.authenticate(token)
+    assert keys.touches == 2
+
+
+async def test_authentication_still_rejects_invalid_and_revoked_keys_without_writing():
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    auth = TokenAuthenticator(api_key_repository=keys)
+
+    assert await auth.authenticate("rcl_wrong") is None
+    assert await auth.authenticate("") is None
+    assert keys.touches == 0
+
+    key = next(iter(keys.keys.values()))
+    await keys.revoke(key.id)
+    assert await auth.authenticate(token) is None
+    assert keys.touches == 0

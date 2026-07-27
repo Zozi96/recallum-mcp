@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from recallum.db.models import Memory
+from recallum.db.repositories.memory_repo import ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
+from recallum.memory.limits import MemoryLimits
 from recallum.memory.service import MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
 
@@ -95,8 +99,7 @@ async def test_remember_enforces_content_and_project_limits():
     service = MemoryService(
         repository=FakeMemoryRepository(),
         embeddings=FakeEmbeddingClient(dimensions=8),
-        max_content_chars=10,
-        max_project_chars=4,
+        limits=MemoryLimits(max_content_chars=10, max_project_chars=4),
     )
     with pytest.raises(MemoryValidationError, match="content exceeds"):
         await service.remember(USER, content="x" * 11, category="fact")
@@ -141,8 +144,7 @@ async def test_remember_rejects_invalid_metadata(metadata, max_bytes, max_keys):
     service = MemoryService(
         repository=FakeMemoryRepository(),
         embeddings=FakeEmbeddingClient(dimensions=8),
-        max_metadata_bytes=max_bytes,
-        max_metadata_keys=max_keys,
+        limits=MemoryLimits(max_metadata_bytes=max_bytes, max_metadata_keys=max_keys),
     )
     with pytest.raises(MemoryValidationError):
         await service.remember(USER, content="ok", category="fact", metadata=metadata)
@@ -321,3 +323,62 @@ async def test_forget_own_then_foreign_indistinguishable():
 
     listing = await service.list_memories(USER)
     assert listing.total == 0
+
+
+def _scored(content: str, age_days: int) -> ScoredMemory:
+    return ScoredMemory(
+        memory=Memory(
+            id=uuid.uuid4(),
+            category="fact",
+            content=content,
+            scope="global",
+            project=None,
+            importance=5,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=age_days),
+        ),
+        score=1.0,
+    )
+
+
+def test_rrf_breaks_score_ties_newest_first():
+    """F1: recall used to prefer the oldest memory on an equal RRF score."""
+    service, _, _ = make_service()
+    older = _scored("older", age_days=0)
+    newer = _scored("newer", age_days=10)
+
+    # Symmetric ranks give both memories an identical RRF score.
+    fused = service._reciprocal_rank_fusion([older, newer], [newer, older])
+
+    assert fused[0][1] == fused[1][1], "precondition: the scores must tie"
+    assert [scored.memory.content for scored, _ in fused] == ["newer", "older"]
+
+
+async def test_context_reports_truncation_beyond_the_fetch_window():
+    """F3: truncated used to be measured against the fetch window, not reality."""
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(context_max_items_cap=3, context_default_max_items=3)
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+    for i in range(10):
+        await service.remember(USER, content=f"memory {i}", category="fact")
+
+    result = await service.context(USER)
+
+    assert result.total_items == 3
+    assert result.truncated is True
+
+
+async def test_context_is_not_truncated_when_everything_fits():
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(context_max_items_cap=3, context_default_max_items=3)
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+    for i in range(3):
+        await service.remember(USER, content=f"memory {i}", category="fact")
+
+    result = await service.context(USER)
+
+    assert result.total_items == 3
+    assert result.truncated is False

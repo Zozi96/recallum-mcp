@@ -12,6 +12,8 @@ from typing import Any
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from recallum.memory.limits import MemoryLimits
+
 EMBEDDING_DIMENSIONS = 768
 
 
@@ -42,23 +44,6 @@ class AuthSettings(BaseModel):
     key_entropy_bytes: int = Field(default=32, ge=16, le=64)
 
 
-class LimitsSettings(BaseModel):
-    """Memory validation and retrieval limits."""
-
-    max_content_chars: int = Field(default=4000, gt=0)
-    max_project_chars: int = Field(default=200, gt=0)
-    max_metadata_bytes: int = Field(default=2048, gt=0)
-    max_metadata_keys: int = Field(default=16, gt=0)
-    recall_default_limit: int = Field(default=10, gt=0)
-    recall_max_limit: int = Field(default=50, gt=0)
-    list_default_limit: int = Field(default=50, gt=0)
-    list_max_limit: int = Field(default=100, gt=0)
-    context_default_max_items: int = Field(default=20, gt=0)
-    context_max_items_cap: int = Field(default=50, gt=0)
-    context_default_max_chars: int = Field(default=6000, gt=0)
-    context_max_chars_cap: int = Field(default=20000, gt=0)
-
-
 class Settings(BaseSettings):
     """Top-level Recallum settings."""
 
@@ -71,7 +56,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     ollama: OllamaSettings = OllamaSettings()
     auth: AuthSettings = AuthSettings()
-    limits: LimitsSettings = LimitsSettings()
+    limits: MemoryLimits = MemoryLimits()
 
     def for_container(self) -> dict[str, Any]:
         """Plain nested dict with secrets revealed, suitable for the DI container."""
@@ -92,7 +77,7 @@ class Settings(BaseSettings):
                 "key_prefix": self.auth.key_prefix,
                 "key_entropy_bytes": self.auth.key_entropy_bytes,
             },
-            "limits": self.limits.model_dump(),
+            "limits": self.limits,
         }
 
 

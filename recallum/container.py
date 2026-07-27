@@ -76,18 +76,7 @@ class Container(containers.DeclarativeContainer):
         MemoryService,
         repository=memory_repository,
         embeddings=embedding_client,
-        max_content_chars=config.limits.max_content_chars.as_int(),
-        max_project_chars=config.limits.max_project_chars.as_int(),
-        max_metadata_bytes=config.limits.max_metadata_bytes.as_int(),
-        max_metadata_keys=config.limits.max_metadata_keys.as_int(),
-        recall_default_limit=config.limits.recall_default_limit.as_int(),
-        recall_max_limit=config.limits.recall_max_limit.as_int(),
-        list_default_limit=config.limits.list_default_limit.as_int(),
-        list_max_limit=config.limits.list_max_limit.as_int(),
-        context_default_max_items=config.limits.context_default_max_items.as_int(),
-        context_max_items_cap=config.limits.context_max_items_cap.as_int(),
-        context_default_max_chars=config.limits.context_default_max_chars.as_int(),
-        context_max_chars_cap=config.limits.context_max_chars_cap.as_int(),
+        limits=config.limits,
     )
 
 def create_container(settings: Settings) -> Container:

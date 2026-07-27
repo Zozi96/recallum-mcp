@@ -26,9 +26,9 @@ from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import MAX_CANDIDATES, MemoryRepository, ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
 from recallum.memory import MemoryValidationError, MemoryVisibility
+from recallum.memory.context import SessionContextBudget
+from recallum.memory.limits import MemoryLimits
 from recallum.memory.schemas import (
-    ContextGroup,
-    ContextItem,
     ContextResult,
     ForgetResult,
     ListResult,
@@ -43,9 +43,6 @@ logger = logging.getLogger("recallum.memory")
 # Reciprocal Rank Fusion constant; 60 is the conventional default.
 RRF_K = 60
 
-# Category presentation order for context grouping.
-CONTEXT_CATEGORY_ORDER = ("preference", "constraint", "decision", "fact")
-
 Category = Literal["preference", "decision", "constraint", "fact"]
 CATEGORIES: tuple[str, ...] = get_args(Category)
 _WHITESPACE = re.compile(r"\s+")
@@ -58,33 +55,11 @@ class MemoryService:
         self,
         repository: MemoryRepository,
         embeddings: OllamaEmbeddingClient,
-        max_content_chars: int = 4000,
-        max_project_chars: int = 200,
-        max_metadata_bytes: int = 2048,
-        max_metadata_keys: int = 16,
-        recall_default_limit: int = 10,
-        recall_max_limit: int = 50,
-        list_default_limit: int = 50,
-        list_max_limit: int = 100,
-        context_default_max_items: int = 20,
-        context_max_items_cap: int = 50,
-        context_default_max_chars: int = 6000,
-        context_max_chars_cap: int = 20000,
+        limits: MemoryLimits | None = None,
     ) -> None:
         self._repo = repository
         self._embeddings = embeddings
-        self._max_content_chars = max_content_chars
-        self._max_project_chars = max_project_chars
-        self._max_metadata_bytes = max_metadata_bytes
-        self._max_metadata_keys = max_metadata_keys
-        self._recall_default_limit = recall_default_limit
-        self._recall_max_limit = recall_max_limit
-        self._list_default_limit = list_default_limit
-        self._list_max_limit = list_max_limit
-        self._context_default_max_items = context_default_max_items
-        self._context_max_items_cap = context_max_items_cap
-        self._context_default_max_chars = context_default_max_chars
-        self._context_max_chars_cap = context_max_chars_cap
+        self._limits = limits if limits is not None else MemoryLimits()
 
     # ------------------------------------------------------------------
     # remember
@@ -162,7 +137,7 @@ class MemoryService:
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         validated_category = self._validate_category(category) if category else None
         effective_limit = self._clamp_limit(
-            limit, self._recall_default_limit, self._recall_max_limit
+            limit, self._limits.recall_default_limit, self._limits.recall_max_limit
         )
         candidate_limit = min(MAX_CANDIDATES, max(effective_limit * 3, 10))
 
@@ -214,10 +189,9 @@ class MemoryService:
                 scores[scored.memory.id] += 1.0 / (RRF_K + rank)
                 entries.setdefault(scored.memory.id, scored)
         ranked = sorted(
-            scores.items(),
-            key=lambda item: (-item[1], entries[item[0]].memory.created_at),
-            reverse=False,
+            scores.items(), key=lambda item: entries[item[0]].memory.created_at, reverse=True
         )
+        ranked.sort(key=lambda item: item[1], reverse=True)
         return [(entries[memory_id], score) for memory_id, score in ranked]
 
     # ------------------------------------------------------------------
@@ -235,15 +209,17 @@ class MemoryService:
         """Compact, category-grouped context: global memories plus project ones."""
         normalized_project = self._normalize_project(project)
         effective_max_items = self._clamp_limit(
-            max_items, self._context_default_max_items, self._context_max_items_cap
+            max_items, self._limits.context_default_max_items, self._limits.context_max_items_cap
         )
         effective_max_chars = self._clamp_limit(
-            max_chars, self._context_default_max_chars, self._context_max_chars_cap
+            max_chars, self._limits.context_default_max_chars, self._limits.context_max_chars_cap
         )
 
-        # Fetch a wider candidate window than the requested budget so the
-        # truncated flag reflects real overflow, not the fetch limit.
-        fetch_limit = self._context_max_items_cap
+        # Fetch one row beyond the largest snapshot the caller could ask for.
+        # A requested budget can never exceed the cap, so an extra row is
+        # enough to tell "this is everything" from "there was more", and
+        # ``truncated`` stops being a statement about the fetch window.
+        fetch_limit = self._limits.context_max_items_cap + 1
         global_memories = await self._repo.most_important_active(
             user_id, visibility=MemoryVisibility.global_only(), limit=fetch_limit
         )
@@ -256,56 +232,11 @@ class MemoryService:
             if normalized_project is not None
             else []
         )
-        # Preserve the established ordering: globals first, then project rows.
-        seen: set[uuid.UUID] = set()
-        ordered: list[Memory] = []
-        for memory in (*global_memories, *project_memories):
-            if memory.id in seen:
-                continue
-            seen.add(memory.id)
-            ordered.append(memory)
-
-        grouped: dict[str, list[ContextItem]] = defaultdict(list)
-        for memory in ordered:
-            grouped[memory.category].append(
-                ContextItem(
-                    id=memory.id,
-                    category=memory.category,
-                    content=memory.content,
-                    scope=memory.scope,
-                    project=memory.project,
-                    importance=memory.importance,
-                    created_at=memory.created_at,
-                )
-            )
-
-        groups: list[ContextGroup] = []
-        total_items = 0
-        used_chars = 0
-        truncated = False
-        for category in CONTEXT_CATEGORY_ORDER:
-            items = grouped.get(category, [])
-            kept: list[ContextItem] = []
-            for item in items:
-                if (
-                    total_items >= effective_max_items
-                    or used_chars + len(item.content) > effective_max_chars
-                ):
-                    truncated = True
-                    break
-                kept.append(item)
-                total_items += 1
-                used_chars += len(item.content)
-            if kept:
-                groups.append(ContextGroup(category=category, items=kept))
-        if any(grouped.get(c) for c in grouped if c not in CONTEXT_CATEGORY_ORDER):
-            truncated = True
-
-        return ContextResult(
-            project=normalized_project,
-            groups=groups,
-            total_items=total_items,
-            truncated=truncated or total_items < len(ordered),
+        budget = SessionContextBudget(
+            max_items=effective_max_items, max_chars=effective_max_chars
+        )
+        return budget.assemble(
+            global_memories, project_memories, project=normalized_project
         )
 
     # ------------------------------------------------------------------
@@ -326,7 +257,9 @@ class MemoryService:
         normalized_project = self._normalize_project(project)
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         validated_category = self._validate_category(category) if category else None
-        effective_limit = self._clamp_limit(limit, self._list_default_limit, self._list_max_limit)
+        effective_limit = self._clamp_limit(
+            limit, self._limits.list_default_limit, self._limits.list_max_limit
+        )
         if offset < 0:
             offset = 0
         rows, total = await self._repo.list_active(
@@ -365,9 +298,9 @@ class MemoryService:
         normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", content)).strip()
         if not normalized:
             raise MemoryValidationError("content must not be empty")
-        if len(normalized) > self._max_content_chars:
+        if len(normalized) > self._limits.max_content_chars:
             raise MemoryValidationError(
-                f"content exceeds {self._max_content_chars} characters"
+                f"content exceeds {self._limits.max_content_chars} characters"
             )
         return normalized
 
@@ -377,9 +310,9 @@ class MemoryService:
         normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", project)).strip()
         if not normalized:
             return None
-        if len(normalized) > self._max_project_chars:
+        if len(normalized) > self._limits.max_project_chars:
             raise MemoryValidationError(
-                f"project exceeds {self._max_project_chars} characters"
+                f"project exceeds {self._limits.max_project_chars} characters"
             )
         return normalized
 
@@ -402,9 +335,9 @@ class MemoryService:
             return {}
         if not isinstance(metadata, dict):
             raise MemoryValidationError("metadata must be a JSON object")
-        if len(metadata) > self._max_metadata_keys:
+        if len(metadata) > self._limits.max_metadata_keys:
             raise MemoryValidationError(
-                f"metadata exceeds {self._max_metadata_keys} keys"
+                f"metadata exceeds {self._limits.max_metadata_keys} keys"
             )
         for key, value in metadata.items():
             if not isinstance(key, str) or not key:
@@ -414,9 +347,9 @@ class MemoryService:
                     f"metadata value for '{key}' must be a JSON primitive"
                 )
         serialized = json.dumps(metadata, ensure_ascii=True, sort_keys=True)
-        if len(serialized.encode("utf-8")) > self._max_metadata_bytes:
+        if len(serialized.encode("utf-8")) > self._limits.max_metadata_bytes:
             raise MemoryValidationError(
-                f"metadata exceeds {self._max_metadata_bytes} bytes"
+                f"metadata exceeds {self._limits.max_metadata_bytes} bytes"
             )
         return dict(metadata)
 

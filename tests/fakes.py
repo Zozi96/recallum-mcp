@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -15,9 +16,11 @@ from sqlalchemy.exc import IntegrityError
 from recallum.config import EMBEDDING_DIMENSIONS, Settings
 from recallum.container import Container, create_container
 from recallum.db.models import ApiKey, Memory, User
-from recallum.db.repositories.memory_repo import ScoredMemory
+from recallum.db.repositories.memory_repo import MAX_CANDIDATES, ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryVisibility
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 class FakeEmbeddingClient:
@@ -140,11 +143,11 @@ class FakeMemoryRepository:
         limit: int,
         offset: int = 0,
     ) -> tuple[Sequence[Memory], int]:
-        rows = sorted(
-            self._filtered(user_id, visibility, category),
-            key=lambda m: (m.created_at, str(m.id)),
-            reverse=True,
-        )
+        # Matches Postgres' ORDER BY created_at DESC, id ASC: stable-sort by
+        # id ascending first, then stable-sort by created_at descending so
+        # ties on created_at keep id-ascending order.
+        rows = sorted(self._filtered(user_id, visibility, category), key=lambda m: str(m.id))
+        rows.sort(key=lambda m: m.created_at, reverse=True)
         return rows[offset : offset + limit], len(rows)
 
     async def search_vector(
@@ -161,7 +164,7 @@ class FakeMemoryRepository:
             for m in self._filtered(user_id, visibility, category)
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
-        return scored[:limit]
+        return scored[: min(limit, MAX_CANDIDATES)]
 
     async def search_text(
         self,
@@ -172,15 +175,17 @@ class FakeMemoryRepository:
         category: str | None = None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
-        words = [w for w in query.lower().split() if len(w) > 1]
+        # Whole-word matching (like Postgres' tsvector/tsquery), not
+        # substring matching: "cat" must not match "concatenate".
+        words = {w for w in _WORD_RE.findall(query.lower()) if len(w) > 1}
         scored = []
         for memory in self._filtered(user_id, visibility, category):
-            haystack = memory.content.lower()
-            score = sum(1.0 for w in words if w in haystack)
+            tokens = set(_WORD_RE.findall(memory.content.lower()))
+            score = float(len(words & tokens))
             if score > 0:
                 scored.append(ScoredMemory(memory=memory, score=score))
         scored.sort(key=lambda s: s.score, reverse=True)
-        return scored[:limit]
+        return scored[: min(limit, MAX_CANDIDATES)]
 
     async def most_important_active(
         self,
@@ -189,7 +194,8 @@ class FakeMemoryRepository:
         visibility: MemoryVisibility,
         limit: int,
     ) -> Sequence[Memory]:
-        rows = self._filtered(user_id, visibility, None)
+        # Matches Postgres' ORDER BY importance DESC, created_at DESC, id ASC.
+        rows = sorted(self._filtered(user_id, visibility, None), key=lambda m: str(m.id))
         rows.sort(key=lambda m: (m.importance, m.created_at), reverse=True)
         return rows[:limit]
 

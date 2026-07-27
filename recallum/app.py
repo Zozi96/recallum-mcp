@@ -19,7 +19,11 @@ from pydantic import BaseModel
 from recallum.config import Settings, get_settings
 from recallum.container import Container, create_container, shutdown_container
 from recallum.logging_setup import setup_logging
-from recallum.mcp.server import build_mcp_server, validate_no_user_inputs
+from recallum.mcp.server import (
+    build_mcp_server,
+    validate_no_user_inputs,
+    validate_only_tools_are_exposed,
+)
 
 
 class LivenessResponse(BaseModel):
@@ -86,12 +90,15 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         app.state.container = resolved_container
         app.state.mcp_server = mcp_server
         await validate_no_user_inputs(mcp_server)
+        # Bearer auth only guards on_call_tool, so any other surface would be
+        # unauthenticated. Fail closed at startup rather than in production.
+        await validate_only_tools_are_exposed(mcp_server)
         yield
         await shutdown_container(resolved_container)
 
     app = FastAPI(
         title="Recallum",
-        version="0.1.0",
+        version="0.2.0",
         summary="Private persistent memory for AI coding agents over MCP.",
         lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
     )

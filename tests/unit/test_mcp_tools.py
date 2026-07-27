@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import pytest
 import uvicorn
-from fastmcp import Client
+from dependency_injector import providers
+from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 
 from recallum.app import create_app
 from recallum.config import Settings
+from recallum.embeddings.ollama import EmbeddingError
+from recallum.mcp.server import build_mcp_server, validate_only_tools_are_exposed
+from recallum.memory import MemoryValidationError
 from tests.fakes import FakeEmbeddingClient, build_test_container
 
 EXPECTED_TOOLS = {"remember", "recall", "context", "list_memories", "forget"}
@@ -66,6 +72,102 @@ async def server() -> ServerInfo:
     finally:
         uv_server.should_exit = True
         await task
+
+
+class _ExplodingMemoryService:
+    """Stands in for the memory module so any tool raises a chosen domain error."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def remember(self, *_args, **_kwargs):
+        raise self._exc
+
+    async def recall(self, *_args, **_kwargs):
+        raise self._exc
+
+    async def context(self, *_args, **_kwargs):
+        raise self._exc
+
+    async def list_memories(self, *_args, **_kwargs):
+        raise self._exc
+
+    async def forget(self, *_args, **_kwargs):
+        raise self._exc
+
+
+@asynccontextmanager
+async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
+    """Serve a container whose memory module always raises ``exc``."""
+    container, _ = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    key_service = container.api_key_service()
+    alice = await key_service.create_user("alice@example.com")
+    token = (await key_service.issue_key(alice.id)).plaintext
+    container.memory_service.override(providers.Object(_ExplodingMemoryService(exc)))
+
+    app = create_app(Settings(), container)
+    port = _free_port()
+    uv_server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    )
+    task = asyncio.create_task(uv_server.serve())
+    try:
+        while not uv_server.started:
+            await asyncio.sleep(0.02)
+        yield ServerInfo(
+            url=f"http://127.0.0.1:{port}",
+            alice_token=token,
+            bob_token=token,
+            alice_revoked_token=token,
+        )
+    finally:
+        uv_server.should_exit = True
+        await task
+
+
+async def test_forget_now_translates_validation_errors():
+    """forget had no handler before the middleware; it is covered now."""
+    async with _exploding_server(MemoryValidationError("bad memory id")) as info:
+        async with mcp_client(info.url, info.alice_token) as client:
+            with pytest.raises(ToolError, match="bad memory id"):
+                await client.call_tool(
+                    "forget", {"memory_id": "00000000-0000-0000-0000-000000000001"}
+                )
+
+
+async def test_embedding_errors_translate_outside_remember():
+    """EmbeddingError was only translated in remember before the middleware."""
+    async with _exploding_server(EmbeddingError("ollama is down")) as info:
+        async with mcp_client(info.url, info.alice_token) as client:
+            with pytest.raises(ToolError, match="could not embed memory content"):
+                await client.call_tool("list_memories", {})
+
+
+async def test_validate_only_tools_are_exposed_passes_for_the_real_server():
+    container, _ = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    await validate_only_tools_are_exposed(build_mcp_server(container))
+
+
+async def test_validate_only_tools_are_exposed_rejects_a_resource():
+    mcp = FastMCP(name="leaky")
+
+    @mcp.resource("resource://secret")
+    def secret() -> str:
+        return "unauthenticated"
+
+    with pytest.raises(RuntimeError, match="resources"):
+        await validate_only_tools_are_exposed(mcp)
+
+
+async def test_validate_only_tools_are_exposed_rejects_a_prompt():
+    mcp = FastMCP(name="leaky")
+
+    @mcp.prompt
+    def helper() -> str:
+        return "unauthenticated"
+
+    with pytest.raises(RuntimeError, match="prompts"):
+        await validate_only_tools_are_exposed(mcp)
 
 
 async def test_discovery_announces_exactly_five_tools_without_user_inputs(server: ServerInfo):

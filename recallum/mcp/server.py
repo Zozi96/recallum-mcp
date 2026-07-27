@@ -10,12 +10,10 @@ import uuid
 from typing import TYPE_CHECKING, Any, Literal
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 
 from recallum.auth.identity import require_identity
 from recallum.auth.middleware import BearerAuthMiddleware
-from recallum.embeddings.ollama import EmbeddingError
-from recallum.memory import MemoryValidationError
+from recallum.mcp.errors import translates_domain_errors
 from recallum.memory.schemas import (
     ContextResult,
     ForgetResult,
@@ -45,6 +43,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         return container.memory_service()
 
     @mcp.tool
+    @translates_domain_errors
     async def remember(
         content: str,
         category: Literal["preference", "decision", "constraint", "fact"],
@@ -59,22 +58,18 @@ def build_mcp_server(container: Container) -> FastMCP:
         Omit project for global memories. Storing the same content and scope
         again returns the existing memory instead of duplicating it.
         """
-        try:
-            return await service().remember(
-                require_identity().user_id,
-                content=content,
-                category=category,
-                project=project,
-                importance=importance,
-                metadata=metadata,
-                source_client=source_client,
-            )
-        except MemoryValidationError as exc:
-            raise ToolError(str(exc)) from exc
-        except EmbeddingError as exc:
-            raise ToolError(f"could not embed memory content: {exc}") from exc
+        return await service().remember(
+            require_identity().user_id,
+            content=content,
+            category=category,
+            project=project,
+            importance=importance,
+            metadata=metadata,
+            source_client=source_client,
+        )
 
     @mcp.tool
+    @translates_domain_errors
     async def recall(
         query: str,
         project: str | None = None,
@@ -88,19 +83,17 @@ def build_mcp_server(container: Container) -> FastMCP:
         ones; scope narrows to exactly 'global' or 'project'. When embeddings
         are unavailable the result mode is 'degraded_textual'.
         """
-        try:
-            return await service().recall(
-                require_identity().user_id,
-                query=query,
-                project=project,
-                scope=scope,
-                category=category,
-                limit=limit,
-            )
-        except MemoryValidationError as exc:
-            raise ToolError(str(exc)) from exc
+        return await service().recall(
+            require_identity().user_id,
+            query=query,
+            project=project,
+            scope=scope,
+            category=category,
+            limit=limit,
+        )
 
     @mcp.tool
+    @translates_domain_errors
     async def context(
         project: str | None = None,
         max_items: int | None = None,
@@ -111,17 +104,15 @@ def build_mcp_server(container: Container) -> FastMCP:
         Results are grouped by category and truncated to the requested budget.
         Call this when starting or resuming work on a project.
         """
-        try:
-            return await service().context(
-                require_identity().user_id,
-                project=project,
-                max_items=max_items,
-                max_chars=max_chars,
-            )
-        except MemoryValidationError as exc:
-            raise ToolError(str(exc)) from exc
+        return await service().context(
+            require_identity().user_id,
+            project=project,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
 
     @mcp.tool
+    @translates_domain_errors
     async def list_memories(
         scope: Literal["global", "project"] | None = None,
         project: str | None = None,
@@ -130,19 +121,17 @@ def build_mcp_server(container: Container) -> FastMCP:
         offset: int = 0,
     ) -> ListResult:
         """List active memories with optional filters and bounded pagination."""
-        try:
-            return await service().list_memories(
-                require_identity().user_id,
-                scope=scope,
-                project=project,
-                category=category,
-                limit=limit,
-                offset=offset,
-            )
-        except MemoryValidationError as exc:
-            raise ToolError(str(exc)) from exc
+        return await service().list_memories(
+            require_identity().user_id,
+            scope=scope,
+            project=project,
+            category=category,
+            limit=limit,
+            offset=offset,
+        )
 
     @mcp.tool
+    @translates_domain_errors
     async def forget(memory_id: uuid.UUID) -> ForgetResult:
         """Logically delete one of your memories by id.
 
@@ -172,4 +161,29 @@ async def tool_names(mcp: FastMCP) -> list[str]:
     return [tool.name for tool in await mcp.list_tools()]
 
 
-__all__: list[Any] = ["build_mcp_server", "tool_names", "validate_no_user_inputs"]
+async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
+    """Fail fast if the server exposes resources or prompts.
+
+    ``BearerAuthMiddleware`` only guards ``on_call_tool``, so any resource or
+    prompt would be reachable without authentication.
+    """
+    resources = await mcp.list_resources()
+    if resources:
+        names = [resource.name for resource in resources]
+        raise RuntimeError(f"unauthenticated resources exposed: {names}")
+    templates = await mcp.list_resource_templates()
+    if templates:
+        names = [template.name for template in templates]
+        raise RuntimeError(f"unauthenticated resource templates exposed: {names}")
+    prompts = await mcp.list_prompts()
+    if prompts:
+        names = [prompt.name for prompt in prompts]
+        raise RuntimeError(f"unauthenticated prompts exposed: {names}")
+
+
+__all__: list[Any] = [
+    "build_mcp_server",
+    "tool_names",
+    "validate_no_user_inputs",
+    "validate_only_tools_are_exposed",
+]

@@ -15,9 +15,9 @@
     "semantic_hash": "c5279a55f71055dfedd911ac5a1359df"
   },
   "recallum/app.py": {
-    "mtime": 1784767689.8082252,
-    "ast_hash": "47321ae1bbb0bbebdbb9bc7bb302946b",
-    "semantic_hash": "47321ae1bbb0bbebdbb9bc7bb302946b"
+    "mtime": 1785114668.8845582,
+    "ast_hash": "260aa6232ea2212aa24b4f14fa8ecc11",
+    "semantic_hash": ""
   },
   "recallum/auth/__init__.py": {
     "mtime": 1784692642.3273528,
@@ -35,9 +35,9 @@
     "semantic_hash": "2656d78149e455afbef35cbc1b8c49e2"
   },
   "recallum/auth/middleware.py": {
-    "mtime": 1784697429.3751025,
-    "ast_hash": "4f077637dea09b80955a98ba0d54af99",
-    "semantic_hash": "4f077637dea09b80955a98ba0d54af99"
+    "mtime": 1785114799.1227586,
+    "ast_hash": "aa25d190aba77f5b54ed8af4fcd95d85",
+    "semantic_hash": ""
   },
   "recallum/cli.py": {
     "mtime": 1784767769.2826939,
@@ -45,14 +45,14 @@
     "semantic_hash": "cba4b02ed2feb3d2297ee74d294562d7"
   },
   "recallum/config.py": {
-    "mtime": 1784694255.080164,
-    "ast_hash": "add590d183789216c57b447ae6366dc6",
-    "semantic_hash": "add590d183789216c57b447ae6366dc6"
+    "mtime": 1785112830.4532661,
+    "ast_hash": "81eaa4bce704ca3b485e43329855ed83",
+    "semantic_hash": ""
   },
   "recallum/container.py": {
-    "mtime": 1784767769.279694,
-    "ast_hash": "d4535029205307bf0dd69dcd84c29395",
-    "semantic_hash": "d4535029205307bf0dd69dcd84c29395"
+    "mtime": 1785112830.4532661,
+    "ast_hash": "e0d6714401bdd4d2c628bda8ab4fba37",
+    "semantic_hash": ""
   },
   "recallum/db/__init__.py": {
     "mtime": 1784692471.104433,
@@ -120,9 +120,9 @@
     "semantic_hash": "4040d59992673ee1972d4cec28611d20"
   },
   "recallum/mcp/server.py": {
-    "mtime": 1784767462.7477472,
-    "ast_hash": "43c73b0557613bce336d1bb44ebe59a1",
-    "semantic_hash": "43c73b0557613bce336d1bb44ebe59a1"
+    "mtime": 1785114657.21963,
+    "ast_hash": "4eccb7a8022e56b53adb5bfd24b2f493",
+    "semantic_hash": ""
   },
   "recallum/memory/__init__.py": {
     "mtime": 1784767833.9992619,
@@ -135,9 +135,9 @@
     "semantic_hash": "cd1dad70305d19a3ee6295be65f21b89"
   },
   "recallum/memory/service.py": {
-    "mtime": 1784767769.283694,
-    "ast_hash": "c4548565f9c46d6b86e11cf1602f91e0",
-    "semantic_hash": "c4548565f9c46d6b86e11cf1602f91e0"
+    "mtime": 1785114742.6171052,
+    "ast_hash": "8af3d5733de015d27aa4f130764b4fed",
+    "semantic_hash": ""
   },
   "recallum/migrations/env.py": {
     "mtime": 1784694621.4691665,
@@ -180,9 +180,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "tests/fakes.py": {
-    "mtime": 1784767689.8102252,
-    "ast_hash": "24625ca02b2aa31e64b642aeebd9b7ad",
-    "semantic_hash": "24625ca02b2aa31e64b642aeebd9b7ad"
+    "mtime": 1785115769.7602694,
+    "ast_hash": "8d1c711f8c57e2adacdf438e0a6a1fa4",
+    "semantic_hash": ""
   },
   "tests/integration/__init__.py": {
     "mtime": 1784693467.9311385,
@@ -190,9 +190,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "tests/integration/test_db.py": {
-    "mtime": 1784768170.5720193,
-    "ast_hash": "029c7a77974189e18ec67803d6ae713d",
-    "semantic_hash": "029c7a77974189e18ec67803d6ae713d"
+    "mtime": 1785115769.7602694,
+    "ast_hash": "86976c0f028062d81baebf96da271bb5",
+    "semantic_hash": ""
   },
   "tests/unit/__init__.py": {
     "mtime": 1784693467.3731422,
@@ -200,9 +200,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "tests/unit/test_api_keys.py": {
-    "mtime": 1784768202.127773,
-    "ast_hash": "84e63fedb055e25fd965744e55a83d37",
-    "semantic_hash": "84e63fedb055e25fd965744e55a83d37"
+    "mtime": 1785114819.8656316,
+    "ast_hash": "09879b4611941529f8d38573bb1a2b1d",
+    "semantic_hash": ""
   },
   "tests/unit/test_app.py": {
     "mtime": 1784767912.9497352,
@@ -210,14 +210,14 @@
     "semantic_hash": "4446319db77905a78548d207660ab3ab"
   },
   "tests/unit/test_mcp_tools.py": {
-    "mtime": 1784697429.4161024,
-    "ast_hash": "54f3f65c8f4dcb5c716a8e103d9f449d",
-    "semantic_hash": "54f3f65c8f4dcb5c716a8e103d9f449d"
+    "mtime": 1785114657.21963,
+    "ast_hash": "f7fc9e788fc68512012600c5254ce44c",
+    "semantic_hash": ""
   },
   "tests/unit/test_service.py": {
-    "mtime": 1784767720.9870167,
-    "ast_hash": "2fcd3ec0287863bdce16bb20932dee23",
-    "semantic_hash": "2fcd3ec0287863bdce16bb20932dee23"
+    "mtime": 1785114750.6200562,
+    "ast_hash": "b949cc46bf248b3a22fa27fc4f9eed88",
+    "semantic_hash": ""
   },
   ".agents/skills/fastapi/SKILL.md": {
     "mtime": 1784688461.108666,
@@ -443,5 +443,75 @@
     "mtime": 1784688484.4435034,
     "ast_hash": "9e3e7672b387a282583011181ab35f9a",
     "semantic_hash": "9e3e7672b387a282583011181ab35f9a"
+  },
+  "recallum/memory/limits.py": {
+    "mtime": 1785112830.464266,
+    "ast_hash": "6874ca304eeb9af349983b0c7789150a",
+    "semantic_hash": ""
+  },
+  "tests/unit/test_cli.py": {
+    "mtime": 1785112830.4692662,
+    "ast_hash": "c854526b6e586b3085c1bd942e0224c2",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_230701_okay__cu\u00e1les_son_las_variables_de_entorno_que_hay.md": {
+    "mtime": 1785107221.368682,
+    "ast_hash": "d4b0c5eca1d1e3205f68599f87ddac5a",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_232449_as\u00ed_est\u00e1_bien__configuraci\u00f3n_dockerfile_en_dokplo.md": {
+    "mtime": 1785108289.4750764,
+    "ast_hash": "e8fae609a9bfaa44c4cc84687e0d47fd",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_233311_dokploy_build_error___recallum_not_found.md": {
+    "mtime": 1785108791.8090806,
+    "ast_hash": "a171b235702a044ecf8588a07eaefb67",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260726_233712_c\u00f3mo_saber_si_recallum_reconoce_la_base_de_datos.md": {
+    "mtime": 1785109032.968649,
+    "ast_hash": "6c9209973e0b8733f4214b4126e6eb38",
+    "semantic_hash": ""
+  },
+  "recallum/mcp/errors.py": {
+    "mtime": 1785114690.1754272,
+    "ast_hash": "fd183028d8c1da85ba9a8c39ced74aaf",
+    "semantic_hash": ""
+  },
+  "recallum/memory/context.py": {
+    "mtime": 1785113965.305957,
+    "ast_hash": "e961804ea7486e799388c97cc12b684d",
+    "semantic_hash": ""
+  },
+  "tests/contract/__init__.py": {
+    "mtime": 1785115769.7732694,
+    "ast_hash": "a9d1d8f826fd19aed11f222af278dfe9",
+    "semantic_hash": ""
+  },
+  "tests/contract/memory_repository.py": {
+    "mtime": 1785115856.6507926,
+    "ast_hash": "b1f9128db2da009ac6952331f726109a",
+    "semantic_hash": ""
+  },
+  "tests/integration/conftest.py": {
+    "mtime": 1785115769.7792695,
+    "ast_hash": "9128a51a1eaa19f89e6159b10ea839ca",
+    "semantic_hash": ""
+  },
+  "tests/integration/test_memory_repo_contract.py": {
+    "mtime": 1785115769.7842693,
+    "ast_hash": "4f2b2e764067e8fc74cf6c50039e5496",
+    "semantic_hash": ""
+  },
+  "tests/unit/test_context_budget.py": {
+    "mtime": 1785114072.405274,
+    "ast_hash": "22912e4f5bbfaf3de3dfbfc082c017ee",
+    "semantic_hash": ""
+  },
+  "tests/unit/test_memory_repo_contract.py": {
+    "mtime": 1785115769.7912693,
+    "ast_hash": "c3b913726cc785f3ad94c1ddb62dd041",
+    "semantic_hash": ""
   }
 }
