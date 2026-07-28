@@ -170,6 +170,41 @@ class MemoryRepositoryContract:
         assert await repo.soft_delete(user_id, created.id) is True
         assert await repo.get_active(user_id, created.id) is None
 
+    async def test_history_and_statistics_are_user_scoped(
+        self, repo, user_id, other_user_id
+    ):
+        first = await repo.create_memory(
+            user_id, **self._kwargs(content="history one", content_hash=_hash("history one"))
+        )
+        second = await repo.supersede(
+            user_id,
+            first.id,
+            content="history two",
+            content_hash=_hash("history two"),
+            embedding=_embedding(42),
+            embedding_model="contract-embedding-model",
+            category=None,
+            importance=None,
+            metadata=None,
+            source_client=None,
+        )
+        assert second is not None
+        await repo.create_memory(
+            other_user_id,
+            **self._kwargs(content="other private", content_hash=_hash("other private")),
+        )
+
+        history = await repo.history(user_id, second.id)
+        assert history is not None
+        assert [row.id for row in history] == [first.id]
+        assert await repo.history(other_user_id, second.id) is None
+        stats = await repo.statistics(user_id)
+        assert stats["active"] == 1
+        assert stats["superseded"] == 1
+        assert stats["retired"] == 0
+        assert stats["by_category"] == {"fact": 1}
+        assert stats["volume_bytes"] > 0
+
     # -- list_active ---------------------------------------------------
 
     async def test_list_active_orders_newest_first(self, repo, user_id):

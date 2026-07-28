@@ -357,6 +357,54 @@ class FakeMemoryRepository:
     async def count_active(self, user_id: uuid.UUID) -> int:
         return len(self._active(user_id))
 
+    async def history(
+        self, user_id: uuid.UUID, memory_id: uuid.UUID
+    ) -> Sequence[Memory] | None:
+        anchor = self.rows.get(memory_id)
+        if anchor is None or anchor.user_id != user_id:
+            return None
+        chain = []
+        current = memory_id
+        while previous := next(
+            (
+                row
+                for row in self.rows.values()
+                if row.user_id == user_id and row.superseded_by == current
+            ),
+            None,
+        ):
+            chain.append(previous)
+            current = previous.id
+        chain.reverse()
+        return chain
+
+    async def statistics(self, user_id: uuid.UUID) -> dict[str, Any]:
+        from recallum.config import EMBEDDING_DIMENSIONS
+
+        rows = [row for row in self.rows.values() if row.user_id == user_id]
+        active = [row for row in rows if not row.is_deleted]
+
+        def counts(values):
+            result = {}
+            for value in values:
+                key = str(value) if value is not None else "none"
+                result[key] = result.get(key, 0) + 1
+            return result
+
+        return {
+            "active": len(active),
+            "superseded": sum(row.superseded_by is not None for row in rows),
+            "retired": sum(row.is_deleted and row.superseded_by is None for row in rows),
+            "by_category": counts([row.category for row in active]),
+            "by_scope": counts([row.scope for row in active]),
+            "by_project": counts([row.project for row in active]),
+            "by_importance": counts([row.importance for row in active]),
+            "created_by_day": counts([row.created_at.date().isoformat() for row in rows]),
+            "volume_bytes": sum(
+                len(row.content.encode("utf-8")) + EMBEDDING_DIMENSIONS * 4 for row in rows
+            ),
+        }
+
     async def has_model_mismatch(self, user_id: uuid.UUID, model: str) -> bool:
         return any(
             memory.embedding_model is not None and memory.embedding_model != model

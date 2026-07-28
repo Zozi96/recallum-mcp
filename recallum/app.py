@@ -27,6 +27,7 @@ from recallum.mcp.server import (
 )
 from recallum.web.admin import create_admin_router
 from recallum.web.auth import WebAuthenticator, create_auth_router
+from recallum.web.self_service import create_self_service_router
 
 
 class LivenessResponse(BaseModel):
@@ -128,7 +129,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         CORSMiddleware,
         allow_origins=[resolved_settings.web.allowed_origin],
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
     )
     web_authenticator = WebAuthenticator(
@@ -144,6 +145,16 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     )
     web_app.include_router(
         create_admin_router(resolved_container.admin_service(), web_authenticator)
+    )
+    web_app.include_router(
+        create_self_service_router(
+            resolved_container.memory_service(),
+            resolved_container.memory_repository(),
+            resolved_container.api_key_service(),
+            resolved_container.api_key_repository(),
+            resolved_container.password_service(),
+            web_authenticator,
+        )
     )
     app.mount("/api/v1", web_app)
     app.mount("/mcp", mcp_app)

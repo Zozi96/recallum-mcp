@@ -12,7 +12,7 @@ from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
-from recallum.config import TEXT_SEARCH_CONFIG
+from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
 from recallum.db.models import Memory
 from recallum.db.session import SessionProvider
 from recallum.memory import MemoryVisibility
@@ -101,6 +101,82 @@ class MemoryRepository:
                     .where(Memory.user_id == user_id, Memory.deleted_at.is_(None))
                 )
             ).scalar_one()
+
+    async def history(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Sequence[Memory] | None:
+        """Return predecessors oldest-first, or None when the anchor is invisible."""
+        async with self._sessions.for_user(user_id) as session:
+            anchor = (
+                await session.execute(
+                    select(Memory.id).where(
+                        Memory.id == memory_id,
+                        Memory.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if anchor is None:
+                return None
+            chain: list[Memory] = []
+            current = memory_id
+            while True:
+                previous = (
+                    await session.execute(
+                        select(Memory)
+                        .options(*_light())
+                        .where(
+                            Memory.user_id == user_id,
+                            Memory.superseded_by == current,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if previous is None:
+                    break
+                chain.append(previous)
+                current = previous.id
+            chain.reverse()
+            return chain
+
+    async def statistics(self, user_id: uuid.UUID) -> dict[str, Any]:
+        """Derive per-user aggregates in one forced-RLS transaction."""
+        async with self._sessions.for_user(user_id) as session:
+            rows = (
+                await session.execute(
+                    select(
+                        Memory.category,
+                        Memory.scope,
+                        Memory.project,
+                        Memory.importance,
+                        Memory.created_at,
+                        Memory.content,
+                        Memory.deleted_at,
+                        Memory.superseded_by,
+                    ).where(Memory.user_id == user_id)
+                )
+            ).all()
+        active = [row for row in rows if row.deleted_at is None]
+
+        def counts(values: Sequence[Any]) -> dict[str, int]:
+            result: dict[str, int] = {}
+            for value in values:
+                key = str(value) if value is not None else "none"
+                result[key] = result.get(key, 0) + 1
+            return result
+
+        return {
+            "active": len(active),
+            "superseded": sum(row.superseded_by is not None for row in rows),
+            "retired": sum(
+                row.deleted_at is not None and row.superseded_by is None for row in rows
+            ),
+            "by_category": counts([row.category for row in active]),
+            "by_scope": counts([row.scope for row in active]),
+            "by_project": counts([row.project for row in active]),
+            "by_importance": counts([row.importance for row in active]),
+            "created_by_day": counts([row.created_at.date().isoformat() for row in rows]),
+            "volume_bytes": sum(
+                len(row.content.encode("utf-8")) + EMBEDDING_DIMENSIONS * 4 for row in rows
+            ),
+        }
 
     async def has_model_mismatch(self, user_id: uuid.UUID, model: str) -> bool:
         """Probe provenance without selecting memory content."""
