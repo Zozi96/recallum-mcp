@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import sys
 import uuid
 
@@ -39,6 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
         "list-keys", help="List a user's keys (metadata only, never secrets)"
     )
     list_keys.add_argument("--email", required=True)
+
+    set_password = subparsers.add_parser(
+        "set-password", help="Set a user's web password interactively"
+    )
+    set_password.add_argument("--email", required=True)
+    grant_admin = subparsers.add_parser("grant-admin", help="Grant web administrator status")
+    grant_admin.add_argument("--email", required=True)
+    revoke_admin = subparsers.add_parser("revoke-admin", help="Revoke web administrator status")
+    revoke_admin.add_argument("--email", required=True)
 
     return parser
 
@@ -83,6 +93,25 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
             status = "revoked" if key.is_revoked else "active"
             label = f" ({key.name})" if key.name else ""
             print(f"{key.id}{label}  {status}  created={key.created_at:%Y-%m-%d}")
+        return 0
+
+    if args.command in {"set-password", "grant-admin", "revoke-admin"}:
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        if args.command == "set-password":
+            password = getpass.getpass("Password: ")
+            confirmation = getpass.getpass("Confirm password: ")
+            if password != confirmation:
+                print("error: passwords do not match", file=sys.stderr)
+                return 1
+            await container.password_service().set_password(user, password)
+            print(f"password set: {user.email}")
+        else:
+            is_admin = args.command == "grant-admin"
+            await container.user_repository().set_admin(user.id, is_admin)
+            print(f"administrator {'granted' if is_admin else 'revoked'}: {user.email}")
         return 0
 
     return 2  # pragma: no cover - argparse enforces known commands

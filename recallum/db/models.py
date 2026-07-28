@@ -13,6 +13,7 @@ from typing import Any
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CHAR,
+    Boolean,
     CheckConstraint,
     Computed,
     DateTime,
@@ -41,11 +42,18 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), nullable=False
+    )
 
     api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     memories: Mapped[list[Memory]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    web_sessions: Mapped[list[WebSession]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -72,6 +80,29 @@ class ApiKey(Base):
     @property
     def is_revoked(self) -> bool:
         return self.revoked_at is not None
+
+
+class WebSession(Base):
+    """A browser credential; only its SHA-256 token hash is stored."""
+
+    __tablename__ = "web_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(CHAR(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    absolute_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rotated_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("web_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="web_sessions")
 
 
 class Memory(Base):

@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from recallum.config import EMBEDDING_DIMENSIONS, Settings
 from recallum.container import Container, create_container
-from recallum.db.models import ApiKey, Memory, User
+from recallum.db.models import ApiKey, Memory, User, WebSession
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
     CandidatePools,
@@ -354,6 +354,15 @@ class FakeMemoryRepository:
         memory.deleted_at = datetime.now(UTC)
         return True
 
+    async def count_active(self, user_id: uuid.UUID) -> int:
+        return len(self._active(user_id))
+
+    async def has_model_mismatch(self, user_id: uuid.UUID, model: str) -> bool:
+        return any(
+            memory.embedding_model is not None and memory.embedding_model != model
+            for memory in self._active(user_id)
+        )
+
 
 class FakeUserRepository:
     def __init__(self) -> None:
@@ -362,7 +371,13 @@ class FakeUserRepository:
     async def create_user(self, email: str) -> User | None:
         if await self.get_by_email(email) is not None:
             return None
-        user = User(id=uuid.uuid4(), email=email, created_at=datetime.now(UTC))
+        user = User(
+            id=uuid.uuid4(),
+            email=email,
+            created_at=datetime.now(UTC),
+            password_hash=None,
+            is_admin=False,
+        )
         self.users[user.id] = user
         return user
 
@@ -371,6 +386,29 @@ class FakeUserRepository:
 
     async def get_by_id(self, user_id: uuid.UUID) -> User | None:
         return self.users.get(user_id)
+
+    async def set_password(self, user_id: uuid.UUID, password_hash: str) -> None:
+        self.users[user_id].password_hash = password_hash
+
+    async def set_admin(self, user_id: uuid.UUID, is_admin: bool) -> None:
+        self.users[user_id].is_admin = is_admin
+
+    async def list_users(self) -> Sequence[User]:
+        return sorted(self.users.values(), key=lambda user: (user.created_at, str(user.id)))
+
+    async def count_admins(self) -> int:
+        return sum(user.is_admin for user in self.users.values())
+
+    async def set_admin_preserving_last(self, user_id: uuid.UUID, is_admin: bool):
+        from recallum.db.repositories.user_repo import LastAdminError
+
+        user = self.users.get(user_id)
+        if user is None:
+            return None
+        if user.is_admin and not is_admin and await self.count_admins() == 1:
+            raise LastAdminError
+        user.is_admin = is_admin
+        return user
 
 
 class FakeApiKeyRepository:
@@ -410,8 +448,68 @@ class FakeApiKeyRepository:
         key.revoked_at = datetime.now(UTC)
         return True
 
+    async def revoke_for_user(self, user_id: uuid.UUID, key_id: uuid.UUID) -> bool:
+        key = self.keys.get(key_id)
+        if key is None or key.user_id != user_id or key.revoked_at is not None:
+            return False
+        key.revoked_at = datetime.now(UTC)
+        return True
+
+    async def count_by_status(self) -> tuple[int, int]:
+        return (
+            sum(key.revoked_at is None for key in self.keys.values()),
+            sum(key.revoked_at is not None for key in self.keys.values()),
+        )
+
     async def list_for_user(self, user_id: uuid.UUID) -> Sequence[ApiKey]:
         return [k for k in self.keys.values() if k.user_id == user_id]
+
+
+class FakeWebSessionRepository:
+    def __init__(self, users: FakeUserRepository) -> None:
+        self.users = users
+        self.sessions: dict[uuid.UUID, WebSession] = {}
+
+    async def create(
+        self, user_id, token_hash, now, idle_expires_at, absolute_expires_at
+    ) -> WebSession:
+        row = WebSession(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            token_hash=token_hash,
+            created_at=now,
+            idle_expires_at=idle_expires_at,
+            absolute_expires_at=absolute_expires_at,
+            rotated_to_id=None,
+            revoked_at=None,
+        )
+        self.sessions[row.id] = row
+        return row
+
+    async def find_by_hash(self, token_hash):
+        row = next((row for row in self.sessions.values() if row.token_hash == token_hash), None)
+        return (row, self.users.users[row.user_id]) if row else None
+
+    async def rotate(
+        self, previous_id, user_id, token_hash, now, idle_expires_at, absolute_expires_at
+    ):
+        previous = self.sessions[previous_id]
+        if previous.rotated_to_id is not None or previous.revoked_at is not None:
+            return None
+        replacement = await self.create(
+            user_id, token_hash, now, idle_expires_at, absolute_expires_at
+        )
+        previous.rotated_to_id = replacement.id
+        return replacement
+
+    async def revoke(self, session_id, now):
+        self.sessions[session_id].revoked_at = now
+
+    async def revoke_chain(self, session_id, now):
+        current = self.sessions.get(session_id)
+        while current:
+            current.revoked_at = now
+            current = self.sessions.get(current.rotated_to_id)
 
 
 class FakeEngine:
@@ -465,13 +563,21 @@ def build_test_container(
     container = create_container(Settings())
     users = FakeUserRepository()
     keys = FakeApiKeyRepository(users)
+    web_sessions = FakeWebSessionRepository(users)
     memories = FakeMemoryRepository()
     embedder = embedder if embedder is not None else FakeEmbeddingClient()
     container.user_repository.override(providers.Object(users))
     container.api_key_repository.override(providers.Object(keys))
+    container.web_session_repository.override(providers.Object(web_sessions))
     container.memory_repository.override(providers.Object(memories))
     container.embedding_client.override(providers.Object(embedder))
     if engine is not None:
         container.engine.override(providers.Object(engine))
-    fakes = {"users": users, "keys": keys, "memories": memories, "embedder": embedder}
+    fakes = {
+        "users": users,
+        "keys": keys,
+        "web_sessions": web_sessions,
+        "memories": memories,
+        "embedder": embedder,
+    }
     return container, fakes

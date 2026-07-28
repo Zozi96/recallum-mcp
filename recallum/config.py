@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from recallum.memory.limits import MemoryLimits
@@ -61,6 +62,36 @@ class AuthSettings(BaseModel):
     identity_cache_seconds: float = Field(default=0.0, ge=0.0, le=300.0)
 
 
+class WebSettings(BaseModel):
+    """Browser-session and password settings."""
+
+    allowed_origin: str = "https://memory.zozbit.com"
+    cookie_name: str = Field(default="recallum_session", min_length=1, max_length=64)
+    idle_seconds: int = Field(default=7 * 24 * 60 * 60, gt=0, le=31 * 24 * 60 * 60)
+    absolute_seconds: int = Field(default=30 * 24 * 60 * 60, gt=0, le=366 * 24 * 60 * 60)
+    rotation_threshold: float = Field(default=0.5, gt=0, lt=1)
+    argon2_memory_cost: int = Field(default=19456, ge=8192, le=1048576)
+    argon2_time_cost: int = Field(default=2, ge=1, le=10)
+    argon2_parallelism: int = Field(default=1, ge=1, le=16)
+    argon2_hash_len: int = Field(default=32, ge=16, le=64)
+    argon2_salt_len: int = Field(default=16, ge=16, le=64)
+
+    @model_validator(mode="after")
+    def validate_web_policy(self) -> WebSettings:
+        origin = urlsplit(self.allowed_origin)
+        if (
+            origin.scheme not in {"http", "https"}
+            or not origin.netloc
+            or origin.path
+            or origin.query
+            or origin.fragment
+        ):
+            raise ValueError("allowed_origin must be an exact HTTP origin")
+        if self.absolute_seconds <= self.idle_seconds:
+            raise ValueError("absolute_seconds must exceed idle_seconds")
+        return self
+
+
 class Settings(BaseSettings):
     """Top-level Recallum settings."""
 
@@ -73,6 +104,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     ollama: OllamaSettings = OllamaSettings()
     auth: AuthSettings = AuthSettings()
+    web: WebSettings = WebSettings()
     limits: MemoryLimits = MemoryLimits()
 
     def for_container(self) -> dict[str, Any]:
@@ -95,6 +127,7 @@ class Settings(BaseSettings):
                 "key_entropy_bytes": self.auth.key_entropy_bytes,
                 "identity_cache_seconds": self.auth.identity_cache_seconds,
             },
+            "web": self.web.model_dump(),
             "limits": self.limits,
         }
 

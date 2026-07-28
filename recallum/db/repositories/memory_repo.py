@@ -91,6 +91,35 @@ class MemoryRepository:
     def __init__(self, sessions: SessionProvider) -> None:
         self._sessions = sessions
 
+    async def count_active(self, user_id: uuid.UUID) -> int:
+        """Count active rows inside exactly one user's forced-RLS context."""
+        async with self._sessions.for_user(user_id) as session:
+            return (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(Memory.user_id == user_id, Memory.deleted_at.is_(None))
+                )
+            ).scalar_one()
+
+    async def has_model_mismatch(self, user_id: uuid.UUID, model: str) -> bool:
+        """Probe provenance without selecting memory content."""
+        async with self._sessions.for_user(user_id) as session:
+            return (
+                await session.execute(
+                    select(
+                        select(Memory.id)
+                        .where(
+                            Memory.user_id == user_id,
+                            Memory.deleted_at.is_(None),
+                            Memory.embedding_model.is_not(None),
+                            Memory.embedding_model != model,
+                        )
+                        .exists()
+                    )
+                )
+            ).scalar_one()
+
     async def create_memory(
         self,
         user_id: uuid.UUID,

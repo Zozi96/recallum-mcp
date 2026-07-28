@@ -146,3 +146,31 @@ def test_revoke_key_rejects_non_uuid():
         build_parser().parse_args(["revoke-key", "--key-id", "not-a-uuid"])
 
     assert exc_info.value.code == 2
+
+
+async def test_set_password_is_interactive_and_admin_commands(monkeypatch, capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "admin@example.com"]), container)
+    capsys.readouterr()
+    prompts = iter(["strong password", "strong password"])
+    monkeypatch.setattr("recallum.cli.getpass.getpass", lambda _prompt: next(prompts))
+
+    assert await _run(parse(["set-password", "--email", "admin@example.com"]), container) == 0
+    user = next(iter(fakes["users"].users.values()))
+    assert user.password_hash.startswith("$argon2id$")
+    assert await _run(parse(["grant-admin", "--email", user.email]), container) == 0
+    assert user.is_admin is True
+    assert await _run(parse(["revoke-admin", "--email", user.email]), container) == 0
+    assert user.is_admin is False
+
+
+async def test_web_admin_commands_reject_unknown_user(monkeypatch, capsys):
+    container, fakes = build_test_container()
+    monkeypatch.setattr(
+        "recallum.cli.getpass.getpass",
+        lambda _prompt: pytest.fail("unknown user must fail before prompting"),
+    )
+    for command in ("set-password", "grant-admin", "revoke-admin"):
+        assert await _run(parse([command, "--email", "ghost@example.com"]), container) == 1
+    assert not fakes["users"].users
+    assert capsys.readouterr().err.count("does not exist") == 3

@@ -250,3 +250,38 @@ docker compose exec recallum uv run recallum-admin list-keys  --email alice@smok
 docker compose exec recallum uv run recallum-admin revoke-key --key-id <uuid>
 # repeat for bob@smoke.test
 ```
+# Web access bootstrap
+
+Web access is enabled on an existing user; it does not create a second identity:
+
+```console
+recallum-admin set-password --email operator@example.com
+recallum-admin grant-admin --email operator@example.com
+```
+
+`set-password` reads and confirms the password interactively. Keep the UI and API
+under the same registrable domain so `SameSite=Lax` credentials work (the default
+pair is `memory.zozbit.com` and `recallum.zozbit.com`). The cookie remains host-only
+and is limited to `/api/v1`.
+
+Web settings use the standard nested environment convention:
+
+- `RECALLUM__WEB__ALLOWED_ORIGIN` (default `https://memory.zozbit.com`)
+- `RECALLUM__WEB__COOKIE_NAME` (default `recallum_session`)
+- `RECALLUM__WEB__IDLE_SECONDS` (default 604800)
+- `RECALLUM__WEB__ABSOLUTE_SECONDS` (default 2592000)
+- `RECALLUM__WEB__ROTATION_THRESHOLD` (default 0.5)
+- `RECALLUM__WEB__ARGON2_MEMORY_COST`, `ARGON2_TIME_COST`,
+  `ARGON2_PARALLELISM`, `ARGON2_HASH_LEN`, and `ARGON2_SALT_LEN`
+
+## Administration recovery and user removal
+
+The web console is not the recovery boundary. If no usable administrator
+session remains, run `recallum-admin set-password` and
+`recallum-admin grant-admin` inside the application container for an existing
+user.
+
+User deletion is deliberately absent from the web API. Deleting a `users` row
+cascades irreversibly into that person's memories and credentials; until there
+is an export/deactivation workflow, withdraw access by revoking API keys (and
+changing the web password from the CLI) without destroying content.

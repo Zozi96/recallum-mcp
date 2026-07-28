@@ -11,7 +11,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
 from pydantic import BaseModel
@@ -24,6 +25,8 @@ from recallum.mcp.server import (
     validate_no_user_inputs,
     validate_only_tools_are_exposed,
 )
+from recallum.web.admin import create_admin_router
+from recallum.web.auth import WebAuthenticator, create_auth_router
 
 
 class LivenessResponse(BaseModel):
@@ -105,5 +108,43 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     app.state.container = resolved_container
     app.state.mcp_server = mcp_server
     app.include_router(create_health_router(resolved_container))
+    web_app = FastAPI(title="Recallum Web API", docs_url=None, redoc_url=None)
+
+    @web_app.middleware("http")
+    async def reject_untrusted_write_origins(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and origin is not None
+            and origin != resolved_settings.web.allowed_origin
+        ):
+            return JSONResponse(
+                {"detail": "Origin not allowed"},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        return await call_next(request)
+
+    web_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[resolved_settings.web.allowed_origin],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Content-Type"],
+    )
+    web_authenticator = WebAuthenticator(
+        resolved_container.web_session_service(), resolved_settings.web.cookie_name
+    )
+    web_app.include_router(
+        create_auth_router(
+            resolved_container.password_service(),
+            resolved_container.web_session_service(),
+            resolved_settings.web.cookie_name,
+            web_authenticator,
+        )
+    )
+    web_app.include_router(
+        create_admin_router(resolved_container.admin_service(), web_authenticator)
+    )
+    app.mount("/api/v1", web_app)
     app.mount("/mcp", mcp_app)
     return app

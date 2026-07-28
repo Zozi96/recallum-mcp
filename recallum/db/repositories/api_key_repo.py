@@ -58,6 +58,31 @@ class ApiKeyRepository:
             )
             return result.rowcount == 1
 
+    async def revoke_for_user(self, user_id: uuid.UUID, key_id: uuid.UUID) -> bool:
+        async with self._sessions.admin() as session:
+            result = await session.execute(
+                update(ApiKey)
+                .where(
+                    ApiKey.id == key_id,
+                    ApiKey.user_id == user_id,
+                    ApiKey.revoked_at.is_(None),
+                )
+                .values(revoked_at=func.now())
+            )
+            return result.rowcount == 1
+
+    async def count_by_status(self) -> tuple[int, int]:
+        async with self._sessions.admin() as session:
+            active, revoked = (
+                await session.execute(
+                    select(
+                        func.count().filter(ApiKey.revoked_at.is_(None)),
+                        func.count().filter(ApiKey.revoked_at.is_not(None)),
+                    )
+                )
+            ).one()
+            return active, revoked
+
     async def list_for_user(self, user_id: uuid.UUID) -> Sequence[ApiKey]:
         async with self._sessions.admin() as session:
             stmt = (

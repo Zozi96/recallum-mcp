@@ -31,4 +31,13 @@ _Avoid_: Account, tenant
 **Identity Administration**:
 The user and API-key lifecycle used to create users and issue, list, or revoke their credentials.
 _Avoid_: User management, key management
+## Web identity
+
+A web session is a browser credential stored independently from API keys. Only
+its SHA-256 token hash is persisted; idle and absolute expirations bound its
+lifetime, and rotation reuse revokes its successor chain. An administrator is a
+user whose `is_admin` flag permits later administrative HTTP operations. It does
+not grant access to another user's memories: content remains protected by forced
+PostgreSQL RLS, while users, API keys, passwords, and web sessions are managed
+through admin-scoped identity repositories outside that content boundary.
 

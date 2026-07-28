@@ -14,14 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from recallum.auth.api_keys import ApiKeyService
 from recallum.auth.middleware import TokenAuthenticator
+from recallum.auth.passwords import PasswordService
+from recallum.auth.web_sessions import WebSessionService
 from recallum.config import Settings
 from recallum.db.readiness import DatabaseReadiness
 from recallum.db.repositories.api_key_repo import ApiKeyRepository
 from recallum.db.repositories.memory_repo import MemoryRepository
 from recallum.db.repositories.user_repo import UserRepository
+from recallum.db.repositories.web_session_repo import WebSessionRepository
 from recallum.db.session import SessionProvider
 from recallum.embeddings.ollama import OllamaEmbeddingClient
 from recallum.memory.service import MemoryService
+from recallum.web.admin_service import AdminService
 
 
 class Container(containers.DeclarativeContainer):
@@ -59,6 +63,7 @@ class Container(containers.DeclarativeContainer):
 
     user_repository = providers.Singleton(UserRepository, sessions=sessions)
     api_key_repository = providers.Singleton(ApiKeyRepository, sessions=sessions)
+    web_session_repository = providers.Singleton(WebSessionRepository, sessions=sessions)
     memory_repository = providers.Singleton(MemoryRepository, sessions=sessions)
     database_readiness = providers.Singleton(DatabaseReadiness, engine=engine)
 
@@ -78,6 +83,34 @@ class Container(containers.DeclarativeContainer):
         cache_ttl=providers.Callable(
             timedelta, seconds=config.auth.identity_cache_seconds.as_float()
         ),
+    )
+    password_service = providers.Singleton(
+        PasswordService,
+        users=user_repository,
+        memory_cost=config.web.argon2_memory_cost.as_int(),
+        time_cost=config.web.argon2_time_cost.as_int(),
+        parallelism=config.web.argon2_parallelism.as_int(),
+        hash_len=config.web.argon2_hash_len.as_int(),
+        salt_len=config.web.argon2_salt_len.as_int(),
+    )
+    web_session_service = providers.Singleton(
+        WebSessionService,
+        repository=web_session_repository,
+        idle_window=providers.Callable(timedelta, seconds=config.web.idle_seconds.as_int()),
+        absolute_window=providers.Callable(
+            timedelta, seconds=config.web.absolute_seconds.as_int()
+        ),
+        rotation_threshold=config.web.rotation_threshold.as_float(),
+    )
+    admin_service = providers.Singleton(
+        AdminService,
+        users=user_repository,
+        keys=api_key_repository,
+        memories=memory_repository,
+        api_keys=api_key_service,
+        passwords=password_service,
+        database=database_readiness,
+        embeddings=embedding_client,
     )
 
     memory_service = providers.Singleton(

@@ -242,7 +242,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0005_supersession"
+        assert version == "0006_web_session_auth"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -262,7 +262,8 @@ async def test_migrations_applied(container):
             await connection.execute(
                 text(
                     "SELECT relname, pg_get_userbyid(relowner) FROM pg_class "
-                    "WHERE relname IN ('users', 'api_keys', 'memories') ORDER BY relname"
+                    "WHERE relname IN ('users', 'api_keys', 'memories', 'web_sessions') "
+                    "ORDER BY relname"
                 )
             )
         ).all()
@@ -270,6 +271,7 @@ async def test_migrations_applied(container):
             ("api_keys", "recallum"),
             ("memories", "recallum"),
             ("users", "recallum"),
+            ("web_sessions", "recallum"),
         ]
         columns = (
             await connection.execute(
@@ -279,7 +281,7 @@ async def test_migrations_applied(container):
                 )
             )
         ).scalars().all()
-        assert columns == ["id", "email", "created_at"]
+        assert columns == ["id", "email", "created_at", "password_hash", "is_admin"]
         dims = (
             await connection.execute(
                 text(
