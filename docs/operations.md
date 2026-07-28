@@ -43,7 +43,17 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__OLLAMA__MODEL` | `embeddinggemma:300m-qat-q4_0` | Embedding model |
 | `RECALLUM__OLLAMA__TIMEOUT_SECONDS` | `30` | Embedding timeout |
 | `RECALLUM__AUTH__KEY_PREFIX` | `rcl_` | API key prefix |
+| `RECALLUM__TELEMETRY__BATCH_SIZE` | `100` | Pending tool events written per database batch |
+| `RECALLUM__TELEMETRY__FLUSH_INTERVAL_SECONDS` | `5` | Maximum delay before pending activity is flushed |
+| `RECALLUM__TELEMETRY__BUFFER_LIMIT` | `1000` | Maximum in-memory events; overflow drops the oldest |
+| `RECALLUM__TELEMETRY__RETENTION_DAYS` | `90` | Age after which persisted activity is purged |
 | `RECALLUM__LIMITS__*` | see `src/recallum/config.py` | Content/metadata/retrieval limits |
+
+The telemetry buffer must be at least as large as its batch. Tool calls enqueue
+only content-free metadata in memory; one lifecycle-owned worker performs batch
+writes and periodic retention purges. An orderly shutdown attempts a final
+flush. A process crash or prolonged database outage may lose the oldest pending
+events by design and never prevents an MCP tool call from completing.
 
 **Important:** the application database user owns Recallum's tables but must
 never be a superuser or have `BYPASSRLS`. On a fresh volume,

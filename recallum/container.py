@@ -25,6 +25,8 @@ from recallum.db.repositories.web_session_repo import WebSessionRepository
 from recallum.db.session import SessionProvider
 from recallum.embeddings.ollama import OllamaEmbeddingClient
 from recallum.memory.service import MemoryService
+from recallum.telemetry.buffer import TelemetryBuffer
+from recallum.telemetry.repository import TelemetryRepository
 from recallum.web.admin_service import AdminService
 
 
@@ -65,6 +67,7 @@ class Container(containers.DeclarativeContainer):
     api_key_repository = providers.Singleton(ApiKeyRepository, sessions=sessions)
     web_session_repository = providers.Singleton(WebSessionRepository, sessions=sessions)
     memory_repository = providers.Singleton(MemoryRepository, sessions=sessions)
+    telemetry_repository = providers.Singleton(TelemetryRepository, sessions=sessions)
     database_readiness = providers.Singleton(DatabaseReadiness, engine=engine)
 
     api_key_service = providers.Singleton(
@@ -118,6 +121,14 @@ class Container(containers.DeclarativeContainer):
         repository=memory_repository,
         embeddings=embedding_client,
         limits=config.limits,
+    )
+    telemetry_buffer = providers.Singleton(
+        TelemetryBuffer,
+        repository=telemetry_repository,
+        batch_size=config.telemetry.batch_size.as_int(),
+        flush_interval_seconds=config.telemetry.flush_interval_seconds.as_float(),
+        buffer_limit=config.telemetry.buffer_limit.as_int(),
+        retention_days=config.telemetry.retention_days.as_int(),
     )
 
 def create_container(settings: Settings) -> Container:

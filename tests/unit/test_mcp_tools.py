@@ -7,6 +7,7 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import uvicorn
@@ -31,6 +32,8 @@ class ServerInfo:
     alice_token: str
     bob_token: str
     alice_revoked_token: str
+    telemetry: Any
+    buffer: Any
 
 
 def _free_port() -> int:
@@ -46,7 +49,7 @@ def mcp_client(base_url: str, token: str | None = None) -> Client:
 
 @pytest.fixture
 async def server() -> ServerInfo:
-    container, _ = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    container, fakes = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
     key_service = container.api_key_service()
     alice = await key_service.create_user("alice@example.com")
     bob = await key_service.create_user("bob@example.com")
@@ -68,6 +71,8 @@ async def server() -> ServerInfo:
             alice_token=alice_token,
             bob_token=bob_token,
             alice_revoked_token=revoked.plaintext,
+            telemetry=fakes["telemetry"],
+            buffer=container.telemetry_buffer(),
         )
     finally:
         uv_server.should_exit = True
@@ -99,7 +104,7 @@ class _ExplodingMemoryService:
 @asynccontextmanager
 async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
     """Serve a container whose memory module always raises ``exc``."""
-    container, _ = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    container, fakes = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
     key_service = container.api_key_service()
     alice = await key_service.create_user("alice@example.com")
     token = (await key_service.issue_key(alice.id)).plaintext
@@ -119,6 +124,8 @@ async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
             alice_token=token,
             bob_token=token,
             alice_revoked_token=token,
+            telemetry=fakes["telemetry"],
+            buffer=container.telemetry_buffer(),
         )
     finally:
         uv_server.should_exit = True
@@ -185,18 +192,24 @@ async def test_missing_token_is_rejected(server: ServerInfo):
     async with mcp_client(server.url) as client:
         with pytest.raises(ToolError):
             await client.call_tool("remember", {"content": "x", "category": "fact"})
+    assert server.telemetry.events == []
+    assert server.buffer.pending_count == 0
 
 
 async def test_invalid_token_is_rejected(server: ServerInfo):
     async with mcp_client(server.url, "rcl_not-a-real-key") as client:
         with pytest.raises(ToolError):
             await client.call_tool("list_memories", {})
+    assert server.telemetry.events == []
+    assert server.buffer.pending_count == 0
 
 
 async def test_revoked_token_is_rejected(server: ServerInfo):
     async with mcp_client(server.url, server.alice_revoked_token) as client:
         with pytest.raises(ToolError):
             await client.call_tool("list_memories", {})
+    assert server.telemetry.events == []
+    assert server.buffer.pending_count == 0
 
 
 async def test_valid_token_full_flow(server: ServerInfo):
@@ -229,6 +242,22 @@ async def test_valid_token_full_flow(server: ServerInfo):
 
         after = await client.call_tool("list_memories", {})
         assert after.structured_content["total"] == 0
+    while await server.buffer.flush():
+        if server.buffer.pending_count == 0:
+            break
+    events = server.telemetry.events
+    assert [event.tool_name for event in events] == [
+        "remember",
+        "recall",
+        "context",
+        "list_memories",
+        "forget",
+        "list_memories",
+    ]
+    recall_event = events[1]
+    assert recall_event.project == "recallum"
+    assert recall_event.result_count == 1
+    assert recall_event.degraded is False
 
 
 async def test_no_cross_user_access(server: ServerInfo):

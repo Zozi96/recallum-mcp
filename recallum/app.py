@@ -97,8 +97,13 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         # Bearer auth only guards on_call_tool, so any other surface would be
         # unauthenticated. Fail closed at startup rather than in production.
         await validate_only_tools_are_exposed(mcp_server)
-        yield
-        await shutdown_container(resolved_container)
+        telemetry = resolved_container.telemetry_buffer()
+        await telemetry.start()
+        try:
+            yield
+        finally:
+            await telemetry.stop()
+            await shutdown_container(resolved_container)
 
     app = FastAPI(
         title="Recallum",
@@ -153,7 +158,9 @@ def create_app(settings: Settings | None = None, container: Container | None = N
             resolved_container.api_key_service(),
             resolved_container.api_key_repository(),
             resolved_container.password_service(),
+            resolved_container.telemetry_repository(),
             web_authenticator,
+            resolved_settings.telemetry.retention_days,
         )
     )
     app.mount("/api/v1", web_app)

@@ -23,6 +23,7 @@ from recallum.db.repositories.memory_repo import (
 )
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryVisibility
+from recallum.telemetry.repository import ActivityAggregate, project_bucket_label
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -323,9 +324,7 @@ class FakeMemoryRepository:
             embedding=embedding,
             embedding_model=embedding_model,
             importance=importance if importance is not None else original.importance,
-            source_client=(
-                source_client if source_client is not None else original.source_client
-            ),
+            source_client=(source_client if source_client is not None else original.source_client),
             metadata_=metadata if metadata is not None else dict(original.metadata_ or {}),
             created_at=datetime.now(UTC),
             deleted_at=None,
@@ -357,9 +356,7 @@ class FakeMemoryRepository:
     async def count_active(self, user_id: uuid.UUID) -> int:
         return len(self._active(user_id))
 
-    async def history(
-        self, user_id: uuid.UUID, memory_id: uuid.UUID
-    ) -> Sequence[Memory] | None:
+    async def history(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Sequence[Memory] | None:
         anchor = self.rows.get(memory_id)
         if anchor is None or anchor.user_id != user_id:
             return None
@@ -603,6 +600,47 @@ class FakeDatabaseReadiness:
         return self.ready
 
 
+class FakeTelemetryRepository:
+    def __init__(self) -> None:
+        self.events = []
+        self.insert_calls = 0
+        self.purged_before: list[datetime] = []
+
+    async def insert_batch(self, events) -> None:
+        self.insert_calls += 1
+        self.events.extend(events)
+
+    async def aggregate(self, user_id, start, end) -> ActivityAggregate:
+        rows = [
+            event
+            for event in self.events
+            if event.user_id == user_id and start <= event.created_at < end
+        ]
+
+        def counts(values):
+            result = {}
+            for value in values:
+                key = str(value) if value is not None else "none"
+                result[key] = result.get(key, 0) + 1
+            return result
+
+        return ActivityAggregate(
+            total_calls=len(rows),
+            total_results=sum(event.result_count for event in rows),
+            failed_calls=sum(event.failed for event in rows),
+            degraded_calls=sum(event.degraded for event in rows),
+            by_day=counts(event.created_at.date().isoformat() for event in rows),
+            by_tool=counts(event.tool_name for event in rows),
+            by_project=counts(project_bucket_label(event.project) for event in rows),
+        )
+
+    async def purge_before(self, cutoff) -> int:
+        self.purged_before.append(cutoff)
+        before = len(self.events)
+        self.events = [event for event in self.events if event.created_at >= cutoff]
+        return before - len(self.events)
+
+
 def build_test_container(
     embedder: FakeEmbeddingClient | ScriptedEmbeddingClient | None = None,
     engine: FakeEngine | None = None,
@@ -613,11 +651,13 @@ def build_test_container(
     keys = FakeApiKeyRepository(users)
     web_sessions = FakeWebSessionRepository(users)
     memories = FakeMemoryRepository()
+    telemetry = FakeTelemetryRepository()
     embedder = embedder if embedder is not None else FakeEmbeddingClient()
     container.user_repository.override(providers.Object(users))
     container.api_key_repository.override(providers.Object(keys))
     container.web_session_repository.override(providers.Object(web_sessions))
     container.memory_repository.override(providers.Object(memories))
+    container.telemetry_repository.override(providers.Object(telemetry))
     container.embedding_client.override(providers.Object(embedder))
     if engine is not None:
         container.engine.override(providers.Object(engine))
@@ -627,5 +667,6 @@ def build_test_container(
         "web_sessions": web_sessions,
         "memories": memories,
         "embedder": embedder,
+        "telemetry": telemetry,
     }
     return container, fakes

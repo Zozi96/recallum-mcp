@@ -22,6 +22,7 @@ from recallum.memory.schemas import (
     RememberResult,
     UpdateResult,
 )
+from recallum.telemetry.middleware import UsageTelemetryMiddleware
 
 if TYPE_CHECKING:
     from recallum.container import Container
@@ -43,7 +44,10 @@ another. All identity comes from the API key; tools never accept a user id.
 def build_mcp_server(container: Container) -> FastMCP:
     """Create the FastMCP server wired to the given DI container."""
     mcp = FastMCP(name="recallum", instructions=INSTRUCTIONS)
+    # FastMCP 3.4 preserves registration order for inbound middleware. Auth
+    # therefore rejects first and binds the identity around telemetry.
     mcp.add_middleware(BearerAuthMiddleware(container.authenticator()))
+    mcp.add_middleware(UsageTelemetryMiddleware(container.telemetry_buffer()))
 
     def service():
         return container.memory_service()

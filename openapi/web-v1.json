@@ -1,6 +1,80 @@
 {
   "components": {
     "schemas": {
+      "ActivityResponse": {
+        "properties": {
+          "by_day": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Day",
+            "type": "object"
+          },
+          "by_project": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Project",
+            "type": "object"
+          },
+          "by_tool": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Tool",
+            "type": "object"
+          },
+          "degradation_rate": {
+            "title": "Degradation Rate",
+            "type": "number"
+          },
+          "degraded_calls": {
+            "title": "Degraded Calls",
+            "type": "integer"
+          },
+          "end": {
+            "format": "date-time",
+            "title": "End",
+            "type": "string"
+          },
+          "failed_calls": {
+            "title": "Failed Calls",
+            "type": "integer"
+          },
+          "failure_rate": {
+            "title": "Failure Rate",
+            "type": "number"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          },
+          "total_calls": {
+            "title": "Total Calls",
+            "type": "integer"
+          },
+          "total_results": {
+            "title": "Total Results",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "total_calls",
+          "total_results",
+          "failed_calls",
+          "failure_rate",
+          "degraded_calls",
+          "degradation_rate",
+          "by_day",
+          "by_tool",
+          "by_project"
+        ],
+        "title": "ActivityResponse",
+        "type": "object"
+      },
       "AdminStatusResponse": {
         "properties": {
           "database": {
@@ -1591,6 +1665,73 @@
         "summary": "Me",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/me/activity": {
+      "get": {
+        "operationId": "own_activity_me_activity_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Own Activity",
+        "tags": [
+          "self-service"
         ]
       }
     },

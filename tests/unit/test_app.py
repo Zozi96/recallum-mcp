@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import uuid
+
 from dependency_injector import providers
 from fastapi.testclient import TestClient
 
 from recallum.app import create_app
 from recallum.config import Settings
 from recallum.db.readiness import DatabaseReadiness
+from recallum.telemetry.events import ToolActivityEvent
 from tests.fakes import (
     FakeDatabaseReadiness,
     FakeEmbeddingClient,
@@ -18,7 +21,7 @@ from tests.fakes import (
 
 def test_lifespan_health_and_clean_shutdown():
     engine = FakeEngine(available=True)
-    container, _ = build_test_container(embedder=FakeEmbeddingClient(available=True))
+    container, fakes = build_test_container(embedder=FakeEmbeddingClient(available=True))
     container.engine.override(providers.Object(engine))
     container.database_readiness.override(providers.Object(FakeDatabaseReadiness(True)))
     app = create_app(Settings(), container)
@@ -37,9 +40,22 @@ def test_lifespan_health_and_clean_shutdown():
 
         # MCP mount is present.
         assert app.state.mcp_server is not None
+        client.portal.call(
+            client.app.state.container.telemetry_buffer().record,
+            ToolActivityEvent(
+                user_id=uuid.uuid4(),
+                tool_name="context",
+                project=None,
+                duration_ms=1,
+                result_count=0,
+                degraded=False,
+                failed=False,
+            ),
+        )
 
     # Shutdown disposed the engine (resource cleanup verified).
     assert engine.disposed is True
+    assert len(fakes["telemetry"].events) == 1
 
 
 def test_readiness_reports_unavailable_with_503_and_no_secrets():

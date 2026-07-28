@@ -43,14 +43,15 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_admin: Mapped[bool] = mapped_column(
-        Boolean, server_default=text("false"), nullable=False
-    )
+    is_admin: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
     api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     memories: Mapped[list[Memory]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    tool_activity: Mapped[list[ToolActivity]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     web_sessions: Mapped[list[WebSession]] = relationship(
@@ -177,3 +178,32 @@ class Memory(Base):
     @property
     def is_deleted(self) -> bool:
         return self.deleted_at is not None
+
+
+class ToolActivity(Base):
+    """Content-free operational metadata for one authenticated MCP tool call."""
+
+    __tablename__ = "tool_activity"
+    __table_args__ = (
+        CheckConstraint("duration_ms >= 0", name="ck_tool_activity_duration_ms"),
+        CheckConstraint("result_count >= 0", name="ck_tool_activity_result_count"),
+        Index(
+            "ix_tool_activity_user_created_at",
+            "user_id",
+            text("created_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    project: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(nullable=False)
+    result_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    degraded: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    failed: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped[User] = relationship(back_populates="tool_activity")

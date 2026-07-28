@@ -41,3 +41,13 @@ not grant access to another user's memories: content remains protected by forced
 PostgreSQL RLS, while users, API keys, passwords, and web sessions are managed
 through admin-scoped identity repositories outside that content boundary.
 
+## Operational telemetry boundary
+
+Memory content remains protected by forced PostgreSQL Row-Level Security.
+Tool-usage telemetry is operational data and deliberately does not use RLS so
+operators can aggregate it. Consequently, `tool_activity` may contain only
+identity and operation metadata: tool name, project, timing, counts and
+failure/degradation flags. Queries, memory content, tool arguments, result
+fragments and any other user-authored text must never be added to that table.
+Self-service activity reads enforce isolation with an explicit application-layer
+`user_id` filter.

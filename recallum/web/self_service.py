@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,6 +23,7 @@ from recallum.memory.schemas import (
     RememberResult,
 )
 from recallum.memory.service import MemoryService
+from recallum.telemetry.repository import TelemetryRepository
 from recallum.web.auth import WebAuthenticator, WebIdentity
 
 Category = Literal["preference", "decision", "constraint", "fact"]
@@ -70,9 +71,7 @@ class CreateMemoryRequest(BaseModel):
     def validate_scope(self):
         if self.scope == "global" and self.project is not None:
             raise ValueError("global scope cannot include a project")
-        if self.scope == "project" and (
-            self.project is None or not self.project.strip()
-        ):
+        if self.scope == "project" and (self.project is None or not self.project.strip()):
             raise ValueError("project scope requires a project")
         return self
 
@@ -149,6 +148,20 @@ class StatisticsResponse(BaseModel):
     volume_bytes: int
 
 
+class ActivityResponse(BaseModel):
+    start: datetime
+    end: datetime
+    total_calls: int
+    total_results: int
+    failed_calls: int
+    failure_rate: float
+    degraded_calls: int
+    degradation_rate: float
+    by_day: dict[str, int]
+    by_tool: dict[str, int]
+    by_project: dict[str, int]
+
+
 def _memory(row: Memory) -> MemoryOut:
     return MemoryOut(
         id=row.id,
@@ -179,7 +192,9 @@ def create_self_service_router(
     api_keys: ApiKeyService,
     key_repository: ApiKeyRepository,
     passwords: PasswordService,
+    activity: TelemetryRepository,
     authenticate: WebAuthenticator,
+    activity_retention_days: int,
 ) -> APIRouter:
     identity = Annotated[WebIdentity, Depends(authenticate)]
     router = APIRouter(
@@ -227,9 +242,7 @@ def create_self_service_router(
 
     @router.post("/memories", response_model=RememberResult, status_code=201)
     async def create_memory(body: CreateMemoryRequest, current: identity) -> RememberResult:
-        result = await memories.remember(
-            current.user.id, **body.model_dump(exclude={"scope"})
-        )
+        result = await memories.remember(current.user.id, **body.model_dump(exclude={"scope"}))
         if not result.created:
             raise HTTPException(status_code=409, detail="Memory already exists")
         return result
@@ -311,6 +324,39 @@ def create_self_service_router(
     @router.get("/stats", response_model=StatisticsResponse)
     async def statistics(current: identity) -> StatisticsResponse:
         return StatisticsResponse.model_validate(await repository.statistics(current.user.id))
+
+    @router.get("/activity", response_model=ActivityResponse)
+    async def own_activity(
+        current: identity,
+        start: Annotated[datetime | None, Query()] = None,
+        end: Annotated[datetime | None, Query()] = None,
+    ) -> ActivityResponse:
+        resolved_end = end or datetime.now(UTC)
+        resolved_start = start or (resolved_end - timedelta(days=min(30, activity_retention_days)))
+        if resolved_start.tzinfo is None or resolved_end.tzinfo is None:
+            raise HTTPException(status_code=422, detail="activity range must include a timezone")
+        if resolved_start >= resolved_end:
+            raise HTTPException(status_code=422, detail="activity start must be before end")
+        if resolved_end - resolved_start > timedelta(days=activity_retention_days):
+            raise HTTPException(
+                status_code=422,
+                detail=f"activity range cannot exceed {activity_retention_days} days",
+            )
+        aggregate = await activity.aggregate(current.user.id, resolved_start, resolved_end)
+        total = aggregate.total_calls
+        return ActivityResponse(
+            start=resolved_start,
+            end=resolved_end,
+            total_calls=total,
+            total_results=aggregate.total_results,
+            failed_calls=aggregate.failed_calls,
+            failure_rate=aggregate.failed_calls / total if total else 0.0,
+            degraded_calls=aggregate.degraded_calls,
+            degradation_rate=aggregate.degraded_calls / total if total else 0.0,
+            by_day=aggregate.by_day,
+            by_tool=aggregate.by_tool,
+            by_project=aggregate.by_project,
+        )
 
     return router
 

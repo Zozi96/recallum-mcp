@@ -62,6 +62,21 @@ class AuthSettings(BaseModel):
     identity_cache_seconds: float = Field(default=0.0, ge=0.0, le=300.0)
 
 
+class TelemetrySettings(BaseModel):
+    """Bounded, deferred tool-activity collection settings."""
+
+    batch_size: int = Field(default=100, ge=1, le=10_000)
+    flush_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    buffer_limit: int = Field(default=1_000, ge=1, le=100_000)
+    retention_days: int = Field(default=90, ge=1, le=366)
+
+    @model_validator(mode="after")
+    def validate_buffer_capacity(self) -> TelemetrySettings:
+        if self.buffer_limit < self.batch_size:
+            raise ValueError("buffer_limit must be greater than or equal to batch_size")
+        return self
+
+
 class WebSettings(BaseModel):
     """Browser-session and password settings."""
 
@@ -104,6 +119,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = DatabaseSettings()
     ollama: OllamaSettings = OllamaSettings()
     auth: AuthSettings = AuthSettings()
+    telemetry: TelemetrySettings = TelemetrySettings()
     web: WebSettings = WebSettings()
     limits: MemoryLimits = MemoryLimits()
 
@@ -127,6 +143,7 @@ class Settings(BaseSettings):
                 "key_entropy_bytes": self.auth.key_entropy_bytes,
                 "identity_cache_seconds": self.auth.identity_cache_seconds,
             },
+            "telemetry": self.telemetry.model_dump(),
             "web": self.web.model_dump(),
             "limits": self.limits,
         }
