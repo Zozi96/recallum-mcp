@@ -1,7 +1,7 @@
 {
   "name": "recallum-memory",
   "displayName": "Recallum Memory",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Persistent, project-aware memory for Claude Code through Recallum. Loads concise project context at session start, recalls prior decisions on demand, and preserves newly settled preferences, constraints, decisions, and facts.",
   "author": {
     "name": "Zozi"
@@ -19,13 +19,13 @@
     "mcp_url": {
       "type": "string",
       "title": "Recallum endpoint",
-      "description": "Streamable HTTP MCP endpoint for your Recallum server. Keep the trailing slash: without it the server answers 307 to a plain-HTTP URL, and the redirect either leaks the bearer token in cleartext or drops it.",
-      "default": "https://recallum.zozbit.com/mcp/"
+      "description": "Streamable HTTP MCP endpoint of your own Recallum server, e.g. https://recallum.example.com/mcp/ . Keep the trailing slash: without it the server answers 307 to a plain-HTTP URL, and the redirect either leaks the bearer token in cleartext or drops it.",
+      "required": true
     },
     "api_token": {
       "type": "string",
       "title": "Recallum API key",
-      "description": "Fallback API key used when RECALLUM_API_KEY is unset. Stored by Claude Code and masked in the UI.",
+      "description": "API key for your Recallum server. Leave empty only if RECALLUM_API_KEY is exported in the environment that launches the client; with neither set, every tool call fails authentication.",
       "sensitive": true
     }
   }

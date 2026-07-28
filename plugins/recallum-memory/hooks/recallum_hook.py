@@ -96,16 +96,20 @@ def _project(payload: dict[str, object]) -> str:
 def _tool(name: str) -> str:
     """Name a Recallum tool the way the running client exposes it.
 
-    Claude Code exports CLAUDE_PLUGIN_ROOT and never a bare PLUGIN_ROOT; Codex
-    exports PLUGIN_ROOT. When the signal is ambiguous, name both spellings
-    rather than guess, so the model can pick whichever tool actually exists.
+    PLUGIN_ROOT is the discriminator, not CLAUDE_PLUGIN_ROOT. Codex sets
+    PLUGIN_ROOT *and* also sets CLAUDE_PLUGIN_ROOT for compatibility with
+    hooks written against Claude Code, so presence of CLAUDE_PLUGIN_ROOT says
+    nothing about which client is running. Only Codex sets PLUGIN_ROOT.
+
+    Testing CLAUDE_PLUGIN_ROOT first would make every Codex session look
+    ambiguous and emit both spellings, which is noise the model has to
+    disambiguate on every single turn. Naming both is the fallback for when
+    neither variable is set, not the normal Codex path.
     """
-    claude = bool(os.environ.get("CLAUDE_PLUGIN_ROOT"))
-    codex = bool(os.environ.get("PLUGIN_ROOT"))
-    if claude and not codex:
-        prefixes = [CLAUDE_TOOL_PREFIX]
-    elif codex and not claude:
+    if os.environ.get("PLUGIN_ROOT"):
         prefixes = [CODEX_TOOL_PREFIX]
+    elif os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        prefixes = [CLAUDE_TOOL_PREFIX]
     else:
         prefixes = [CODEX_TOOL_PREFIX, CLAUDE_TOOL_PREFIX]
     return " or ".join(prefix + name for prefix in prefixes)

@@ -97,7 +97,13 @@ class HookTests(unittest.TestCase):
         self.assertIn(f"{CODEX_PREFIX}context with project='local:", context)
 
     def test_codex_is_told_the_bare_server_tool_name(self) -> None:
-        context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
+        # Codex sets CLAUDE_PLUGIN_ROOT alongside PLUGIN_ROOT for compatibility
+        # with hooks written against Claude Code, so this is what a real Codex
+        # hook process sees -- not PLUGIN_ROOT on its own.
+        context = self._session_context(
+            {"PLUGIN_ROOT": "/plugins/recallum-memory",
+             "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"}
+        )
         self.assertIn(f"{CODEX_PREFIX}context", context)
         self.assertNotIn(CLAUDE_PREFIX, context)
 
@@ -109,14 +115,13 @@ class HookTests(unittest.TestCase):
         self.assertNotIn(f"call {CODEX_PREFIX}context", context)
 
     def test_ambiguous_client_names_both_tool_spellings(self) -> None:
-        for client_env in (
-            {},
-            {"PLUGIN_ROOT": "/p", "CLAUDE_PLUGIN_ROOT": "/p"},
-        ):
-            with self.subTest(client_env=client_env):
-                context = self._session_context(client_env)
-                self.assertIn(f"{CODEX_PREFIX}context", context)
-                self.assertIn(f"{CLAUDE_PREFIX}context", context)
+        """Only a hook process with neither variable set is genuinely ambiguous.
+
+        Both variables set is Codex, not ambiguity -- see the Codex case above.
+        """
+        context = self._session_context({})
+        self.assertIn(f"{CODEX_PREFIX}context", context)
+        self.assertIn(f"{CLAUDE_PREFIX}context", context)
 
     def test_same_basename_in_different_paths_gets_distinct_local_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -359,9 +364,17 @@ class SharedInstallerTests(InstallerTestCase):
             unescaped = result.stdout.replace("\\", "")
             self.assertIn(f"--config mcp_url={DEFAULT_URL}", unescaped)
 
-    def test_default_url_agrees_with_the_manifest_default(self) -> None:
+    def test_manifest_endpoint_is_required_with_no_default(self) -> None:
+        """A published marketplace must not pre-fill someone else's server.
+
+        The installer keeps a default because you invoke it deliberately and it
+        prints the URL; enabling the plugin from the marketplace is a different
+        act, and there the endpoint has to be an answer, not an inherited value.
+        """
         manifest = json.loads(CLAUDE_MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["userConfig"]["mcp_url"]["default"], DEFAULT_URL)
+        mcp_url = manifest["userConfig"]["mcp_url"]
+        self.assertNotIn("default", mcp_url)
+        self.assertIs(mcp_url["required"], True)
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn(f'DEFAULT_URL="{DEFAULT_URL}"', installer)
 

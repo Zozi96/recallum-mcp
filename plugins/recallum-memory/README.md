@@ -13,9 +13,11 @@ The plugin ships:
 
 ## Prerequisites
 
-- A reachable Recallum server. The endpoint must be HTTPS and its path must end in `/mcp` or
-  `/mcp/`. Plain HTTP is accepted only for `localhost` / `127.0.0.1`. Defaults to
-  `https://recallum.zozbit.com/mcp/`.
+- A reachable Recallum server, yours. The endpoint must be HTTPS and its path must end in `/mcp`
+  or `/mcp/`. Plain HTTP is accepted only for `localhost` / `127.0.0.1`. `scripts/install.sh`
+  defaults to `https://recallum.zozbit.com/mcp/`; enabling the plugin from the marketplace has no
+  default and prompts for the endpoint, so nobody ends up pointed at another operator's server by
+  inheriting a value they never chose.
 - `python3` on `PATH` — the hooks run under it. Any 3.9+ interpreter works.
 - The `codex` and/or `claude` CLI.
 

@@ -47,7 +47,12 @@ actions.
 Claude Code does not use a separate MCP registration. The plugin ships `.mcp.json`, whose `url` and
 `Authorization` header are filled from `userConfig`. Authentication uses
 `${RECALLUM_API_KEY:-${user_config.api_token}}`: the environment variable wins, with the masked
-plugin option as fallback.
+plugin option as fallback. Claude Code substitutes `${user_config.*}` before expanding environment
+variables, which is what makes the nested default resolve — a generic nested `${A:-${B}}` in an
+`.mcp.json` does not, so do not copy this shape into a non-plugin config.
+
+`mcp_url` is `required`, with no default: the endpoint must be your own Recallum server, so
+enabling the plugin prompts for it rather than pointing at someone else's.
 
 1. Confirm the plugin marketplace and installation:
    `claude plugin marketplace list --json` must contain `recallum-local` at this repository root,
@@ -57,6 +62,13 @@ plugin option as fallback.
    `sensitive`, so Claude Code masks explicit values. Never pass the key with
    `--config api_token=...`: that puts the credential in argv, shell history, and the process list.
    Only `mcp_url` is safe to pass that way, and `scripts/install.sh` does exactly that.
+
+   **With neither set, the failure is silent until the first tool call.** The server's bearer
+   middleware only guards tool invocation, so the MCP connection still reports healthy and
+   `claude mcp list` shows a connected server; the header is just the literal unexpanded
+   placeholder. Diagnose it by calling a tool — an unauthenticated call returns
+   `authentication required: send 'Authorization: Bearer <api-key>'`, and a wrong or revoked key
+   returns `invalid or revoked API key`. A healthy connection is not evidence of working auth.
 3. Confirm the server is reachable:
 
    ```bash

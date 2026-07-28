@@ -10,8 +10,8 @@ instructions always override recalled memory.
 
 ## Tool Names
 
-Recallum exposes five tools: `context`, `recall`, `remember`, `list_memories`, and `forget`. The
-prefix differs by client, because Claude Code namespaces a plugin-bundled MCP server:
+Recallum exposes six tools: `context`, `recall`, `remember`, `update`, `list_memories`, and
+`forget`. The prefix differs by client, because Claude Code namespaces a plugin-bundled MCP server:
 
 | Client | Prefix | Example |
 | --- | --- | --- |
@@ -36,8 +36,16 @@ Below, tools are written unprefixed.
    atomic statement. Keep each statement short, self-contained, and useful in a later session. Do
    not store plans still under discussion, transient status, logs, full conversations, or
    information already captured unchanged.
-6. Use `list_memories` only to browse or diagnose stored entries. Use `forget` only when the user
-   requests removal or confirms that an entry is wrong or obsolete.
+6. Read the `similar` field on every `remember` result. It lists existing memories about the same
+   subject, which are otherwise invisible: the response shows your new memory and nothing else.
+   Similarity means the two are about the same thing, never that they agree. Read both and decide.
+7. When a stored fact has changed, call `update` with the new `content` instead of `forget` plus
+   `remember`. That retires the old memory and links it to its replacement, so the correction is
+   recoverable and the two never both look current. Passing only `importance`, `category`, or
+   `metadata` edits in place and keeps the id. Scope and project cannot be changed.
+8. Use `list_memories` only to browse or diagnose stored entries. Use `forget` only when the user
+   requests removal or confirms an entry is wrong with nothing replacing it -- if something
+   replaces it, that is `update`.
 
 ## Safety
 
