@@ -1,7 +1,7 @@
 {
   "name": "recallum-memory",
   "displayName": "Recallum Memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Persistent, project-aware memory for Claude Code through Recallum. Loads concise project context at session start, recalls prior decisions on demand, and preserves newly settled preferences, constraints, decisions, and facts.",
   "author": {
     "name": "Zozi"

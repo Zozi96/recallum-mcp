@@ -123,6 +123,24 @@ class HookTests(unittest.TestCase):
         self.assertIn(f"{CODEX_PREFIX}context", context)
         self.assertIn(f"{CLAUDE_PREFIX}context", context)
 
+    def test_claude_is_told_how_to_find_an_unlisted_tool(self) -> None:
+        """Naming the tool is not enough on Claude Code.
+
+        Plugin-bundled MCP tools are not always in the model's tool list; they
+        sit behind ToolSearch. Without this hint the model calls the name it
+        was given and gets `No such tool available` from a server that is
+        connected and working.
+        """
+        context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
+        self.assertIn("ToolSearch", context)
+
+    def test_codex_is_not_told_about_a_lookup_step_it_does_not_have(self) -> None:
+        context = self._session_context(
+            {"PLUGIN_ROOT": "/plugins/recallum-memory",
+             "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"}
+        )
+        self.assertNotIn("ToolSearch", context)
+
     def test_same_basename_in_different_paths_gets_distinct_local_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory, "one", "api")

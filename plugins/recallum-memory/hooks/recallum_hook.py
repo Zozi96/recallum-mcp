@@ -115,6 +115,25 @@ def _tool(name: str) -> str:
     return " or ".join(prefix + name for prefix in prefixes)
 
 
+def _lookup_hint() -> str:
+    """Say how to reach a tool the client did not put in the model's tool list.
+
+    Claude Code does not always list a plugin-bundled MCP server's tools:
+    recent versions leave them behind ToolSearch, so naming the fully qualified
+    tool is an instruction the model cannot follow -- it calls the name blindly
+    and gets `No such tool available` even though the server is connected and
+    authenticated. Codex lists its MCP tools directly and has no lookup step,
+    so the hint is emitted only when the Claude spelling is in play, mirroring
+    the branch in _tool().
+    """
+    if os.environ.get("PLUGIN_ROOT"):
+        return ""
+    return (
+        " In Claude Code a plugin's MCP tools are not always listed directly; "
+        "look them up with ToolSearch before concluding they are unavailable."
+    )
+
+
 def _emit(event: str, context: str) -> None:
     print(
         json.dumps(
@@ -142,7 +161,8 @@ def main() -> int:
         _emit(
             "SessionStart",
             f"Recallum: before planning, call {_tool('context')} with project={project!r} "
-            "if available; current user and repository instructions override memory.",
+            "if available; current user and repository instructions override memory."
+            + _lookup_hint(),
         )
         return 0
 

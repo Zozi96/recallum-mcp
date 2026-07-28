@@ -62,6 +62,39 @@ plugins/recallum-memory/scripts/install.sh --target both --remote
 GitHub SSH access must already work. The checkout used to launch the script can be removed after
 installation.
 
+### Declarative install (Claude Code global settings)
+
+`install.sh --claude-scope user` writes the plugin into `~/.claude/settings.json`. To skip the
+script and declare it by hand, merge these three keys into that file:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "recallum-local": { "source": { "source": "github", "repo": "Zozi96/recallum-mcp" } }
+  },
+  "enabledPlugins": { "recallum-memory@recallum-local": true },
+  "pluginConfigs": {
+    "recallum-memory@recallum-local": {
+      "options": { "mcp_url": "https://recallum.example.com/mcp/" }
+    }
+  }
+}
+```
+
+Two constraints, neither cosmetic:
+
+- **The marketplace key must be `recallum-local`.** It is not free-form: the installer checks for
+  the literal id `recallum-memory@recallum-local` when deciding whether the plugin is already
+  present. Declared under any other name, a later `install.sh` run reads it as missing and installs
+  a second copy on top.
+- **`api_token` cannot live here.** It is `sensitive` in `plugin.json`, so it goes to secure storage
+  via `/plugin configure recallum-memory@recallum-local`, or to `RECALLUM_API_KEY` in the
+  environment that launches Claude. Only the non-sensitive `mcp_url` is declarable.
+
+Replace the `github` source with `{ "source": "directory", "path": "/abs/path/to/recallum-mcp" }`
+to track a local checkout instead of the published repository. `enabledPlugins` resolves
+user < project < local, so a `false` in a project's settings overrides the global `true`.
+
 ### The trailing slash is not cosmetic
 
 `--url` is normalized to end in `/mcp/`. Observed against the deployed server:
@@ -174,6 +207,8 @@ claude plugin uninstall recallum-memory@recallum-local
 | --- | --- |
 | Tools missing after install | Start a **new** session; both clients discover MCP tools only at session start |
 | Tools missing in `claude -p` | A restricted `agent` in `settings.json` can pin a tool allowlist that excludes MCP tools. Check the `agent` key and its `tools:` frontmatter |
+| `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code leaves plugin-bundled MCP tools behind `ToolSearch` instead of listing them, so a blind call to the fully qualified name fails while the server is connected. Search for the tool, then call it. `permissions.allow` does **not** make them load eagerly |
+| Stale plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Run `claude plugin marketplace update recallum-local && claude plugin update recallum-memory@recallum-local`, then start a new session |
 | Claude authentication failure | Export `RECALLUM_API_KEY` before launching Claude, or run `/plugin configure recallum-memory@recallum-local`; the environment variable wins when both exist |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |
