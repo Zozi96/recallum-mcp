@@ -6,7 +6,11 @@ are generated locally with Ollama, storage is PostgreSQL with pgvector.
 
 ## Features
 
-- **Five MCP tools**: `remember`, `recall`, `context`, `list_memories`, `forget`.
+- **Six MCP tools**: `remember`, `recall`, `context`, `list_memories`, `update`,
+  `forget`.
+- **Explicit supersession**: `update` retires a memory and links it to its
+  replacement; `remember` reports similar existing memories so contradictions
+  surface where they are created, and are never resolved automatically.
 - **Hybrid retrieval**: pgvector cosine similarity + PostgreSQL full-text
   ranking fused with Reciprocal Rank Fusion; graceful textual-only degradation
   when Ollama is down.

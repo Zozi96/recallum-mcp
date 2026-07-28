@@ -1,4 +1,4 @@
-"""FastMCP server exposing exactly five tools, none accepting a user id.
+"""FastMCP server exposing exactly six tools, none accepting a user id.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
 ``BearerAuthMiddleware``); tools fail closed when the identity is missing.
@@ -20,6 +20,7 @@ from recallum.memory.schemas import (
     ListResult,
     RecallResult,
     RememberResult,
+    UpdateResult,
 )
 
 if TYPE_CHECKING:
@@ -29,8 +30,13 @@ INSTRUCTIONS = """\
 Recallum stores atomic memories (preferences, decisions, constraints, facts)
 for this user only. Save short, self-contained statements — never full
 conversations. Use recall to search by meaning or exact terms, context to
-bootstrap a session, list_memories to browse, and forget to remove.
-All identity comes from the API key; tools never accept a user id.
+bootstrap a session, list_memories to browse, update to correct or replace a
+memory whose fact changed, and forget to remove.
+
+remember reports pre-existing memories about the same subject in its `similar`
+field. It never resolves them: read them and decide whether the new memory
+restates, refines or contradicts them, and call update when one replaces
+another. All identity comes from the API key; tools never accept a user id.
 """
 
 
@@ -128,6 +134,34 @@ def build_mcp_server(container: Container) -> FastMCP:
             category=category,
             limit=limit,
             offset=offset,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
+    async def update(
+        memory_id: uuid.UUID,
+        content: str | None = None,
+        category: Literal["preference", "decision", "constraint", "fact"] | None = None,
+        importance: int | None = None,
+        metadata: dict[str, str | int | float | bool | None] | None = None,
+        source_client: str | None = None,
+    ) -> UpdateResult:
+        """Correct a memory, or replace one whose fact has changed.
+
+        Pass content when the memory is now wrong or out of date: the old one
+        is retired and a new one replaces it, so use this instead of forget
+        plus remember. Passing only importance, category or metadata edits the
+        memory in place and keeps its id. Scope and project cannot be changed.
+        Unknown ids return updated=false.
+        """
+        return await service().update(
+            require_identity().user_id,
+            memory_id,
+            content=content,
+            category=category,
+            importance=importance,
+            metadata=metadata,
+            source_client=source_client,
         )
 
     @mcp.tool

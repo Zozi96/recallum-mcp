@@ -41,6 +41,9 @@ You have persistent memory via the recallum MCP server.
 - remember: store durable preferences, decisions, constraints, facts (atomic statements only).
 - recall: search memory by meaning or exact terms before asking again.
 - context: call at the start of a session on a project.
+- update: when a stored fact changes, replace it instead of forgetting and
+  re-adding; remember reports similar existing memories in its `similar` field,
+  so read those and decide whether the new one supersedes them.
 - list_memories / forget: browse and remove your own memories.
 Never store full conversations; store the distilled fact.
 ```

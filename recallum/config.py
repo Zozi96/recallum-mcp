@@ -16,6 +16,18 @@ from recallum.memory.limits import MemoryLimits
 
 EMBEDDING_DIMENSIONS = 768
 
+# PostgreSQL text-search configuration used for BOTH the stored ``content_tsv``
+# generated column and the query built in the memory repository. The two must
+# agree: a mismatch silently stops text retrieval from matching anything, so
+# ``tests/integration/test_db.py`` asserts the live column expression uses this
+# value. Changing it requires a migration that rebuilds the column and its GIN
+# index (see ``0003_text_search_provenance``).
+#
+# ``english`` (rather than ``simple``) buys stemming and stopword removal. It
+# is not accent-insensitive: that would need the ``unaccent`` extension, which
+# a non-superuser migration role cannot create on every deployment.
+TEXT_SEARCH_CONFIG = "english"
+
 
 class DatabaseSettings(BaseModel):
     """PostgreSQL connection settings."""
@@ -42,6 +54,11 @@ class AuthSettings(BaseModel):
 
     key_prefix: str = "rcl_"
     key_entropy_bytes: int = Field(default=32, ge=16, le=64)
+    # Seconds a successful authentication is reused before PostgreSQL is asked
+    # again, saving a round trip on every tool call. This is also exactly the
+    # worst-case delay before a revoked key stops working, so it defaults to 0
+    # (no caching, revocation is immediate) and is capped at five minutes.
+    identity_cache_seconds: float = Field(default=0.0, ge=0.0, le=300.0)
 
 
 class Settings(BaseSettings):
@@ -76,6 +93,7 @@ class Settings(BaseSettings):
             "auth": {
                 "key_prefix": self.auth.key_prefix,
                 "key_entropy_bytes": self.auth.key_entropy_bytes,
+                "identity_cache_seconds": self.auth.identity_cache_seconds,
             },
             "limits": self.limits,
         }

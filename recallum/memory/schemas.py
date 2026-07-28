@@ -29,11 +29,50 @@ class MemoryOut(BaseModel):
     created_at: datetime
 
 
+class SimilarMemory(BaseModel):
+    """An existing memory close enough to a new one to be about the same thing.
+
+    ``similarity`` is cosine similarity between embeddings, so it measures
+    overlap of subject, not agreement. Two memories can be near-identical and
+    say opposite things. Deciding whether this is a restatement, a refinement
+    or a contradiction requires reading both, which is the agent's job.
+    """
+
+    id: uuid.UUID
+    content: str
+    category: Literal["preference", "decision", "constraint", "fact"]
+    importance: int
+    similarity: float
+    created_at: datetime
+
+
 class RememberResult(BaseModel):
-    """Outcome of ``remember``; ``created`` is False for deduplicated stores."""
+    """Outcome of ``remember``; ``created`` is False for deduplicated stores.
+
+    ``similar`` lists pre-existing memories about the same subject. They are
+    surfaced here, at the moment the potential conflict is created, because
+    this is the only point where they are otherwise invisible: the caller sees
+    its own new memory and nothing else. Nothing is resolved automatically --
+    superseding one memory with another is always an explicit ``update``.
+    """
 
     memory: MemoryOut
     created: bool
+    similar: list[SimilarMemory] = Field(default_factory=list)
+
+
+class UpdateResult(BaseModel):
+    """Outcome of ``update``.
+
+    ``superseded_id`` is set only when the content changed: that retires the
+    old memory and returns a new one with a new id. Editing only importance,
+    category or metadata keeps the same id and leaves ``superseded_id`` unset.
+    ``updated`` is False for unknown and foreign ids alike.
+    """
+
+    updated: bool
+    memory: MemoryOut | None = None
+    superseded_id: uuid.UUID | None = None
 
 
 class RecalledMemory(MemoryOut):

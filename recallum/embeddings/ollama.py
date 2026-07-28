@@ -30,6 +30,15 @@ class OllamaEmbeddingClient:
         self._timeout = timeout_seconds
         self._dimensions = dimensions
 
+    @property
+    def model(self) -> str:
+        """The model id recorded alongside every vector this client produces.
+
+        Vectors from different models share no coordinate space, so callers
+        persist this to detect a silent model swap later.
+        """
+        return self._model
+
     async def embed(self, text: str) -> list[float]:
         """Return the embedding vector for ``text`` or raise ``EmbeddingError``."""
         try:

@@ -185,6 +185,292 @@ async def test_recall_degrades_to_textual_when_embeddings_fail():
     assert [r.content for r in result.results] == ["la base de datos es postgres"]
 
 
+async def test_recall_warns_when_ranked_vectors_came_from_another_model(caplog):
+    """A silent model swap must leave a trace where it actually distorts results."""
+    repo = FakeMemoryRepository()
+    before = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="new-model")
+    )
+    await before.remember(USER, content="written by the old model", category="fact")
+
+    after_rotation = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8, model="rotated-model"),
+    )
+    with caplog.at_level("WARNING", logger="recallum.memory"):
+        result = await after_rotation.recall(USER, query="old model")
+
+    assert result.results, "drift must degrade ranking, never hide memories"
+    assert "rotated-model" in caplog.text
+    assert "new-model" in caplog.text
+
+
+async def test_recall_is_quiet_when_the_embedding_model_is_unchanged(caplog):
+    service, _, _ = make_service()
+    await service.remember(USER, content="stable model content", category="fact")
+
+    with caplog.at_level("WARNING", logger="recallum.memory"):
+        await service.recall(USER, query="stable model content")
+
+    assert "unreliable" not in caplog.text
+
+
+async def test_recall_is_quiet_for_rows_predating_provenance_tracking(caplog):
+    """Unknown provenance is not evidence of drift.
+
+    Every row in a database migrated from an earlier version has a NULL model.
+    Warning on those would fire on every single recall until the whole corpus
+    was rewritten, which is alarm fatigue rather than a signal.
+    """
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="current")
+    )
+    await service.remember(USER, content="legacy row without provenance", category="fact")
+    for row in repo.rows.values():
+        row.embedding_model = None
+
+    with caplog.at_level("WARNING", logger="recallum.memory"):
+        result = await service.recall(USER, query="legacy row without provenance")
+
+    assert result.results
+    assert "unreliable" not in caplog.text
+
+
+async def test_recall_importance_breaks_near_ties_without_overriding_relevance():
+    """Importance reorders comparable matches; it cannot outrank a better one."""
+    service, _, _ = make_service()
+    trivial = _scored("trivial", age_days=0)
+    trivial.memory.importance = 10
+    relevant = _scored("relevant", age_days=0)
+    relevant.memory.importance = 0
+
+    # Same rank in both signals: relevance says these are equally good, so the
+    # importance vote is free to decide.
+    tied = service._reciprocal_rank_fusion([trivial, relevant], [trivial, relevant])
+    assert tied[0][0].memory.id == trivial.memory.id
+
+    # Relevance clearly prefers the unimportant one in both signals; a maximal
+    # importance gap must not be able to overturn that.
+    decisive = service._reciprocal_rank_fusion([relevant, trivial], [relevant, trivial])
+    assert decisive[0][0].memory.id == relevant.memory.id
+
+
+async def test_recall_importance_weight_zero_restores_pure_relevance():
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        limits=MemoryLimits(recall_importance_weight=0.0),
+    )
+    low = _scored("low", age_days=0)
+    low.memory.importance = 0
+    high = _scored("high", age_days=0)
+    high.memory.importance = 10
+
+    fused = service._reciprocal_rank_fusion([low, high], [high, low])
+    assert fused[0][1] == fused[1][1], "importance must carry no weight at 0.0"
+
+
+async def test_recall_runs_both_signals_in_one_repository_call():
+    """One recall must not hold two connections; the seam is a single call."""
+    repo = FakeMemoryRepository()
+    service = MemoryService(repository=repo, embeddings=FakeEmbeddingClient(dimensions=8))
+    await service.remember(USER, content="single round trip", category="fact")
+
+    calls: list[dict] = []
+    original = repo.search_candidates
+
+    async def counting(user_id, **kwargs):
+        calls.append(kwargs)
+        return await original(user_id, **kwargs)
+
+    repo.search_candidates = counting
+    await service.recall(USER, query="single round trip")
+
+    assert len(calls) == 1
+    assert calls[0]["embedding"] is not None
+
+
+async def test_recall_asks_for_no_embedding_when_ollama_is_down():
+    repo = FakeMemoryRepository()
+    seeded = MemoryService(repository=repo, embeddings=FakeEmbeddingClient(dimensions=8))
+    await seeded.remember(USER, content="degraded path content", category="fact")
+
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, available=False)
+    )
+    calls: list[dict] = []
+    original = repo.search_candidates
+
+    async def counting(user_id, **kwargs):
+        calls.append(kwargs)
+        return await original(user_id, **kwargs)
+
+    repo.search_candidates = counting
+    result = await service.recall(USER, query="degraded path content")
+
+    assert len(calls) == 1
+    assert calls[0]["embedding"] is None
+    assert result.mode == "degraded_textual"
+    assert result.results
+
+
+async def test_remember_reports_similar_existing_memories_without_resolving_them():
+    """The contradiction is surfaced where it is created, and nothing is deleted."""
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo, embeddings=ScriptedEmbeddingClient(vectors={}), limits=MemoryLimits()
+    )
+    shared = [1.0] + [0.0] * 7
+    service._embeddings.vectors = {
+        "I use pnpm as package manager": shared,
+        "I use bun as package manager": [0.999, 0.0447] + [0.0] * 6,
+    }
+
+    first = await service.remember(
+        USER, content="I use pnpm as package manager", category="preference"
+    )
+    assert first.similar == []
+
+    second = await service.remember(
+        USER, content="I use bun as package manager", category="preference"
+    )
+
+    assert second.created is True
+    assert [s.id for s in second.similar] == [first.memory.id]
+    assert second.similar[0].content == "I use pnpm as package manager"
+    # Flagging must never resolve: both memories are still active.
+    listed = await service.list_memories(USER)
+    assert {m.id for m in listed.items} == {first.memory.id, second.memory.id}
+
+
+async def test_remember_does_not_flag_unrelated_or_other_category_memories():
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo, embeddings=ScriptedEmbeddingClient(vectors={}), limits=MemoryLimits()
+    )
+    service._embeddings.vectors = {
+        "a preference about editors": [1.0] + [0.0] * 7,
+        "a fact with the same vector": [1.0] + [0.0] * 7,
+        "something entirely different": [0.0, 1.0] + [0.0] * 6,
+    }
+
+    await service.remember(USER, content="a preference about editors", category="preference")
+    same_vector_other_category = await service.remember(
+        USER, content="a fact with the same vector", category="fact"
+    )
+    unrelated = await service.remember(
+        USER, content="something entirely different", category="preference"
+    )
+
+    assert same_vector_other_category.similar == []
+    assert unrelated.similar == []
+
+
+async def test_remember_survives_a_failing_similarity_check():
+    """The memory is already committed; losing the advisory must not fail the write."""
+    repo = FakeMemoryRepository()
+    service = MemoryService(repository=repo, embeddings=FakeEmbeddingClient(dimensions=8))
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("similarity backend exploded")
+
+    repo.similar_active = boom
+    result = await service.remember(USER, content="still stored", category="fact")
+
+    assert result.created is True
+    assert result.similar == []
+
+
+async def test_remember_again_now_applies_the_new_importance_and_metadata():
+    """Re-stating a memory used to silently discard the new attributes."""
+    service, _, _ = make_service()
+    first = await service.remember(
+        USER, content="same content", category="fact", importance=2
+    )
+    second = await service.remember(
+        USER,
+        content="same content",
+        category="fact",
+        importance=9,
+        metadata={"why": "escalated"},
+    )
+
+    assert second.created is False
+    assert second.memory.id == first.memory.id
+    assert second.memory.importance == 9
+    assert second.memory.metadata == {"why": "escalated"}
+
+
+async def test_update_content_supersedes_and_returns_a_new_memory():
+    service, _, _ = make_service()
+    original = await service.remember(
+        USER, content="I deploy on fridays", category="decision", importance=7
+    )
+
+    result = await service.update(USER, original.memory.id, content="I deploy on tuesdays")
+
+    assert result.updated is True
+    assert result.superseded_id == original.memory.id
+    assert result.memory is not None
+    assert result.memory.id != original.memory.id
+    assert result.memory.content == "I deploy on tuesdays"
+    # Unspecified attributes are inherited from what was replaced.
+    assert result.memory.importance == 7
+    assert result.memory.category == "decision"
+
+    listed = await service.list_memories(USER)
+    assert [m.id for m in listed.items] == [result.memory.id]
+
+
+async def test_update_without_content_edits_in_place_and_keeps_the_id():
+    service, _, _ = make_service()
+    original = await service.remember(USER, content="stable fact", category="fact")
+
+    result = await service.update(USER, original.memory.id, importance=10)
+
+    assert result.updated is True
+    assert result.superseded_id is None
+    assert result.memory is not None
+    assert result.memory.id == original.memory.id
+    assert result.memory.importance == 10
+
+
+async def test_update_reports_not_updated_for_unknown_and_forgotten_ids():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="to be forgotten", category="fact")
+
+    assert (await service.update(USER, uuid.uuid4(), importance=3)).updated is False
+    assert (
+        await service.update(USER, uuid.uuid4(), content="new content")
+    ).updated is False
+
+    await service.forget(USER, stored.memory.id)
+    assert (await service.update(USER, stored.memory.id, importance=3)).updated is False
+
+
+async def test_update_rejects_content_that_another_active_memory_already_has():
+    service, _, _ = make_service()
+    await service.remember(USER, content="taken content", category="fact")
+    other = await service.remember(USER, content="other content", category="fact")
+
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, other.memory.id, content="taken content")
+
+
+async def test_update_validates_content_and_importance_like_remember():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="valid content", category="fact")
+
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, stored.memory.id, content="   ")
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, stored.memory.id, importance=99)
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, stored.memory.id, category="nonsense")
+
+
 async def test_recall_category_filter():
     service, _, _ = make_service()
     await service.remember(USER, content="decisión de api rest", category="decision")

@@ -16,19 +16,46 @@ from sqlalchemy.exc import IntegrityError
 from recallum.config import EMBEDDING_DIMENSIONS, Settings
 from recallum.container import Container, create_container
 from recallum.db.models import ApiKey, Memory, User
-from recallum.db.repositories.memory_repo import MAX_CANDIDATES, ScoredMemory
+from recallum.db.repositories.memory_repo import (
+    MAX_CANDIDATES,
+    CandidatePools,
+    ScoredMemory,
+)
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryVisibility
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+# Stopwords carry no weight, matching what PostgreSQL's TEXT_SEARCH_CONFIG
+# does. Only words that are uncontroversially stopwords in both this list and
+# PostgreSQL's are exercised by the contract.
+#
+# Deliberately absent: a stemmer. Collapsing inflections is a capability of the
+# Postgres adapter's Snowball dictionary, not a promise the interface can make
+# portably, and a toy stemmer here would make this fake claim behaviour it does
+# not have -- the exact class of fake/adapter divergence that let the old AND
+# semantics ship unnoticed. Stemming is pinned in the Postgres integration
+# tests instead.
+_STOPWORDS = frozenset(
+    """a an and are as at be by do does for from had has have how i if in is it
+    its me my no not of on or our so than that the their them then there these
+    they this to too very was we were what when where which who why will with
+    you your""".split()
+)
+
 
 class FakeEmbeddingClient:
     """Deterministic hash-seeded vectors; availability is configurable."""
 
-    def __init__(self, dimensions: int = EMBEDDING_DIMENSIONS, available: bool = True) -> None:
+    def __init__(
+        self,
+        dimensions: int = EMBEDDING_DIMENSIONS,
+        available: bool = True,
+        model: str = "fake-embedding-model",
+    ) -> None:
         self.dimensions = dimensions
         self.available = available
+        self.model = model
         self.embedded_texts: list[str] = []
 
     async def embed(self, text: str) -> list[float]:
@@ -48,9 +75,15 @@ class FakeEmbeddingClient:
 class ScriptedEmbeddingClient:
     """Returns preset vectors per exact text; unknown texts raise."""
 
-    def __init__(self, vectors: dict[str, list[float]], available: bool = True) -> None:
+    def __init__(
+        self,
+        vectors: dict[str, list[float]],
+        available: bool = True,
+        model: str = "scripted-embedding-model",
+    ) -> None:
         self.vectors = vectors
         self.available = available
+        self.model = model
         self.embedded_texts: list[str] = []
 
     async def embed(self, text: str) -> list[float]:
@@ -152,13 +185,32 @@ class FakeMemoryRepository:
         rows.sort(key=lambda m: m.created_at, reverse=True)
         return rows[offset : offset + limit], len(rows)
 
-    async def search_vector(
+    async def search_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        query: str,
+        embedding: list[float] | None,
+        visibility: MemoryVisibility,
+        category: str | None = None,
+        limit: int,
+    ) -> CandidatePools:
+        capped = min(limit, MAX_CANDIDATES)
+        return CandidatePools(
+            vector=(
+                self._vector_pool(user_id, embedding, visibility, category, capped)
+                if embedding is not None
+                else []
+            ),
+            text=self._text_pool(user_id, query, visibility, category, capped),
+        )
+
+    def _vector_pool(
         self,
         user_id: uuid.UUID,
         embedding: list[float],
-        *,
         visibility: MemoryVisibility,
-        category: str | None = None,
+        category: str | None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
         scored = [
@@ -166,28 +218,122 @@ class FakeMemoryRepository:
             for m in self._filtered(user_id, visibility, category)
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
-        return scored[: min(limit, MAX_CANDIDATES)]
+        return scored[:limit]
 
-    async def search_text(
+    def _text_pool(
         self,
         user_id: uuid.UUID,
         query: str,
-        *,
         visibility: MemoryVisibility,
-        category: str | None = None,
+        category: str | None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
-        # Whole-word matching (like Postgres' tsvector/tsquery), not
-        # substring matching: "cat" must not match "concatenate".
-        words = {w for w in _WORD_RE.findall(query.lower()) if len(w) > 1}
+        # Models the promise the textual signal makes at the seam, not
+        # Postgres' implementation of it: whole-word matching ("cat" must not
+        # match "concatenate"), ANY query term counts rather than all of them,
+        # and stopwords carry no weight. Score is term coverage, so a row
+        # sharing more query terms outranks one sharing fewer.
+        words = set(_WORD_RE.findall(query.lower())) - _STOPWORDS
         scored = []
         for memory in self._filtered(user_id, visibility, category):
-            tokens = set(_WORD_RE.findall(memory.content.lower()))
+            tokens = set(_WORD_RE.findall(memory.content.lower())) - _STOPWORDS
             score = float(len(words & tokens))
             if score > 0:
                 scored.append(ScoredMemory(memory=memory, score=score))
         scored.sort(key=lambda s: s.score, reverse=True)
-        return scored[: min(limit, MAX_CANDIDATES)]
+        return scored[:limit]
+
+    async def similar_active(
+        self,
+        user_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        scope: str,
+        project: str | None,
+        category: str,
+        min_similarity: float,
+        limit: int,
+        exclude_id: uuid.UUID | None = None,
+    ) -> Sequence[ScoredMemory]:
+        scored = [
+            ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
+            for m in self._active(user_id)
+            if m.scope == scope
+            and (m.project or "") == (project or "")
+            and m.category == category
+            and m.id != exclude_id
+        ]
+        scored = [s for s in scored if s.score >= min_similarity]
+        scored.sort(key=lambda s: s.score, reverse=True)
+        return scored[:limit]
+
+    async def update_attributes(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        importance: int | None,
+        category: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> Memory | None:
+        memory = self.rows.get(memory_id)
+        if memory is None or memory.user_id != user_id or memory.is_deleted:
+            return None
+        if importance is not None:
+            memory.importance = importance
+        if category is not None:
+            memory.category = category
+        if metadata is not None:
+            memory.metadata_ = metadata
+        return memory
+
+    async def supersede(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        content: str,
+        content_hash: str,
+        embedding: list[float],
+        embedding_model: str | None,
+        category: str | None,
+        importance: int | None,
+        metadata: dict[str, Any] | None,
+        source_client: str | None,
+    ) -> Memory | None:
+        original = self.rows.get(memory_id)
+        if original is None or original.user_id != user_id or original.is_deleted:
+            return None
+        for other in self._active(user_id):
+            if (
+                other.id != original.id
+                and other.scope == original.scope
+                and (other.project or "") == (original.project or "")
+                and other.content_hash == content_hash
+            ):
+                raise IntegrityError("supersede", {}, Exception("duplicate key"))
+        replacement = Memory(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            scope=original.scope,
+            project=original.project,
+            category=category if category is not None else original.category,
+            content=content,
+            content_hash=content_hash,
+            embedding=embedding,
+            embedding_model=embedding_model,
+            importance=importance if importance is not None else original.importance,
+            source_client=(
+                source_client if source_client is not None else original.source_client
+            ),
+            metadata_=metadata if metadata is not None else dict(original.metadata_ or {}),
+            created_at=datetime.now(UTC),
+            deleted_at=None,
+        )
+        self.rows[replacement.id] = replacement
+        original.deleted_at = datetime.now(UTC)
+        original.superseded_by = replacement.id
+        return replacement
 
     async def most_important_active(
         self,

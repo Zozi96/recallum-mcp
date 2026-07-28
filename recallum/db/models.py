@@ -27,7 +27,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from recallum.config import EMBEDDING_DIMENSIONS
+from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
 from recallum.db.base import Base
 
 
@@ -92,6 +92,15 @@ class Memory(Base):
             text("created_at DESC"),
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # Serves most_important_active, which drives every ``context`` call.
+        Index(
+            "ix_memories_user_importance",
+            "user_id",
+            text("importance DESC"),
+            text("created_at DESC"),
+            "id",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -104,6 +113,11 @@ class Memory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=False)
+    # Which model produced ``embedding``. NULL means "written before provenance
+    # was tracked". Vectors from different models are not comparable, so a
+    # mismatch makes cosine similarity meaningless; startup warns rather than
+    # hiding rows, because silently dropping memories is the worse failure.
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     importance: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=5)
     source_client: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict[str, Any]] = mapped_column(
@@ -113,8 +127,18 @@ class Memory(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The memory that replaced this one. Superseding also sets ``deleted_at``,
+    # so a replaced row leaves every active query through the filter that
+    # already exists; this column only records *why* it left, distinguishing
+    # "the user forgot it" from "the fact changed". ON DELETE SET NULL so the
+    # purge job can hard-delete a replacement without stranding its ancestor.
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memories.id", ondelete="SET NULL"), nullable=True
+    )
     content_tsv: Mapped[str] = mapped_column(
-        TSVECTOR, Computed("to_tsvector('simple', content)", persisted=True), nullable=False
+        TSVECTOR,
+        Computed(f"to_tsvector('{TEXT_SEARCH_CONFIG}', content)", persisted=True),
+        nullable=False,
     )
 
     user: Mapped[User] = relationship(back_populates="memories")

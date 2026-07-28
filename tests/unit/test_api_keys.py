@@ -176,10 +176,15 @@ class CountingApiKeyRepository(FakeApiKeyRepository):
     def __init__(self, users: FakeUserRepository) -> None:
         super().__init__(users)
         self.touches = 0
+        self.lookups = 0
 
     async def touch(self, key_id) -> None:
         self.touches += 1
         await super().touch(key_id)
+
+    async def find_active_by_hash(self, key_hash):
+        self.lookups += 1
+        return await super().find_active_by_hash(key_hash)
 
 
 async def _issue(keys: CountingApiKeyRepository, users: FakeUserRepository) -> str:
@@ -218,6 +223,92 @@ async def test_authentication_refreshes_last_used_once_the_interval_elapses():
 
     await auth.authenticate(token)
     assert keys.touches == 2
+
+
+async def test_identity_cache_is_off_by_default_so_revocation_is_immediate():
+    """The default must not trade the revocation guarantee for a round trip."""
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    auth = TokenAuthenticator(api_key_repository=keys)
+
+    assert await auth.authenticate(token) is not None
+    key = next(iter(keys.keys.values()))
+    await keys.revoke(key.id)
+    assert await auth.authenticate(token) is None
+
+
+async def test_identity_cache_serves_repeat_calls_without_touching_the_database():
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    now = [1000.0]
+    auth = TokenAuthenticator(
+        api_key_repository=keys,
+        cache_ttl=timedelta(seconds=30),
+        clock=lambda: now[0],
+    )
+
+    assert await auth.authenticate(token) is not None
+    lookups_after_first = keys.lookups
+
+    for _ in range(20):
+        assert await auth.authenticate(token) is not None
+    assert keys.lookups == lookups_after_first, "cached calls must not query"
+
+    now[0] += 31
+    assert await auth.authenticate(token) is not None
+    assert keys.lookups == lookups_after_first + 1, "the entry must expire"
+
+
+async def test_identity_cache_lets_a_revoked_key_live_until_its_entry_expires():
+    """The exact cost of enabling the cache, pinned so it cannot drift silently."""
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    now = [1000.0]
+    auth = TokenAuthenticator(
+        api_key_repository=keys,
+        cache_ttl=timedelta(seconds=30),
+        clock=lambda: now[0],
+    )
+
+    assert await auth.authenticate(token) is not None
+    await keys.revoke(next(iter(keys.keys.values())).id)
+
+    assert await auth.authenticate(token) is not None, "documented revocation window"
+    now[0] += 31
+    assert await auth.authenticate(token) is None, "and it must close"
+
+
+async def test_identity_cache_never_caches_failures():
+    """Otherwise a key issued after a failed probe would stay rejected."""
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    auth = TokenAuthenticator(
+        api_key_repository=keys, cache_ttl=timedelta(seconds=30)
+    )
+
+    assert await auth.authenticate("rcl_not_a_key") is None
+    assert await auth.authenticate("") is None
+    token = await _issue(keys, users)
+    assert await auth.authenticate(token) is not None
+
+
+async def test_identity_cache_stays_bounded():
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    auth = TokenAuthenticator(
+        api_key_repository=keys, cache_ttl=timedelta(seconds=300), max_cached=4
+    )
+
+    service = ApiKeyService(user_repository=users, api_key_repository=keys)
+    user = await service.create_user("many-keys@example.com")
+    for _ in range(12):
+        issued = await service.issue_key(user.id)
+        assert await auth.authenticate(issued.plaintext) is not None
+
+    assert len(auth._cache) <= 4  # noqa: SLF001 - the bound is the point
 
 
 async def test_authentication_still_rejects_invalid_and_revoked_keys_without_writing():

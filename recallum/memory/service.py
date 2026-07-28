@@ -36,6 +36,8 @@ from recallum.memory.schemas import (
     RecalledMemory,
     RecallResult,
     RememberResult,
+    SimilarMemory,
+    UpdateResult,
 )
 
 logger = logging.getLogger("recallum.memory")
@@ -89,7 +91,29 @@ class MemoryService:
             user_id, scope=scope, project=normalized_project, content_hash=digest
         )
         if existing is not None:
-            return RememberResult(memory=_to_memory_out(existing), created=False)
+            # Re-stating a memory used to silently drop the new importance and
+            # metadata, so raising the importance of something already stored
+            # did nothing at all. The content is identical by construction
+            # here, so this is bookkeeping, not a new claim: no supersession.
+            refreshed = await self._repo.update_attributes(
+                user_id,
+                existing.id,
+                importance=(
+                    validated_importance if validated_importance != existing.importance else None
+                ),
+                category=(
+                    validated_category if validated_category != existing.category else None
+                ),
+                metadata=(
+                    validated_metadata
+                    if validated_metadata != dict(existing.metadata_ or {})
+                    else None
+                ),
+            )
+            return RememberResult(
+                memory=_to_memory_out(refreshed if refreshed is not None else existing),
+                created=False,
+            )
 
         # Embed before persisting: a memory without a vector is never stored.
         embedding = await self._embeddings.embed(normalized)
@@ -103,6 +127,7 @@ class MemoryService:
                 content=normalized,
                 content_hash=digest,
                 embedding=embedding,
+                embedding_model=self._embeddings.model,
                 importance=validated_importance,
                 source_client=source_client,
                 metadata=validated_metadata,
@@ -115,7 +140,136 @@ class MemoryService:
             if racing is not None:
                 return RememberResult(memory=_to_memory_out(racing), created=False)
             raise
-        return RememberResult(memory=_to_memory_out(memory), created=True)
+        return RememberResult(
+            memory=_to_memory_out(memory),
+            created=True,
+            similar=await self._similar_to(
+                user_id,
+                embedding,
+                scope=scope,
+                project=normalized_project,
+                category=validated_category,
+                exclude_id=memory.id,
+            ),
+        )
+
+    async def _similar_to(
+        self,
+        user_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        scope: str,
+        project: str | None,
+        category: str,
+        exclude_id: uuid.UUID,
+    ) -> list[SimilarMemory]:
+        """Pre-existing memories about the same subject as the one just stored.
+
+        Advisory only. A failure here must not fail the write: the memory is
+        already committed, and losing the warning is far cheaper than telling
+        the caller its memory was not stored when it was.
+        """
+        if self._limits.similar_max_results == 0:
+            return []
+        try:
+            neighbours = await self._repo.similar_active(
+                user_id,
+                embedding,
+                scope=scope,
+                project=project,
+                category=category,
+                min_similarity=self._limits.similar_min_similarity,
+                limit=self._limits.similar_max_results,
+                exclude_id=exclude_id,
+            )
+        except Exception:
+            logger.warning("similar-memory check failed; the memory was stored", exc_info=True)
+            return []
+        return [
+            SimilarMemory(
+                id=n.memory.id,
+                content=n.memory.content,
+                category=n.memory.category,
+                importance=n.memory.importance,
+                similarity=n.score,
+                created_at=n.memory.created_at,
+            )
+            for n in neighbours
+        ]
+
+    # ------------------------------------------------------------------
+    # update
+    # ------------------------------------------------------------------
+
+    async def update(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        content: str | None = None,
+        category: str | None = None,
+        importance: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_client: str | None = None,
+    ) -> UpdateResult:
+        """Correct a memory, superseding it when the claim itself changed.
+
+        Two different things wear the same word "update". Changing importance,
+        category or metadata is filing: the fact is unchanged, so the row is
+        edited and keeps its id. Changing content is a new claim retiring an
+        old one, so the original is retired and a new memory takes its place
+        with a new id and a fresh embedding, linked back to what it replaced.
+
+        Scope and project are deliberately not editable: moving a memory
+        between projects changes its deduplication key, which is a migration
+        rather than a correction. Unknown and foreign ids are indistinguishable.
+        """
+        validated_category = self._validate_category(category) if category is not None else None
+        validated_importance = (
+            self._validate_importance(importance) if importance is not None else None
+        )
+        validated_metadata = self._validate_metadata(metadata) if metadata is not None else None
+
+        if content is None:
+            updated = await self._repo.update_attributes(
+                user_id,
+                memory_id,
+                importance=validated_importance,
+                category=validated_category,
+                metadata=validated_metadata,
+            )
+            if updated is None:
+                return UpdateResult(updated=False)
+            return UpdateResult(updated=True, memory=_to_memory_out(updated))
+
+        normalized = self._normalize_content(content)
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        embedding = await self._embeddings.embed(normalized)
+        try:
+            replacement = await self._repo.supersede(
+                user_id,
+                memory_id,
+                content=normalized,
+                content_hash=digest,
+                embedding=embedding,
+                embedding_model=self._embeddings.model,
+                category=validated_category,
+                importance=validated_importance,
+                metadata=validated_metadata,
+                source_client=source_client,
+            )
+        except IntegrityError as exc:
+            raise MemoryValidationError(
+                "another active memory already has that content; forget it first "
+                "or update that one instead"
+            ) from exc
+        if replacement is None:
+            return UpdateResult(updated=False)
+        return UpdateResult(
+            updated=True,
+            memory=_to_memory_out(replacement),
+            superseded_id=memory_id,
+        )
 
     # ------------------------------------------------------------------
     # recall
@@ -141,35 +295,26 @@ class MemoryService:
         )
         candidate_limit = min(MAX_CANDIDATES, max(effective_limit * 3, 10))
 
-        vector_candidates: list[ScoredMemory] = []
         mode = "hybrid"
+        query_embedding: list[float] | None = None
         try:
             query_embedding = await self._embeddings.embed(normalized_query)
         except EmbeddingError:
             logger.warning("embedding unavailable for recall; using textual fallback")
             mode = "degraded_textual"
-        else:
-            vector_candidates = list(
-                await self._repo.search_vector(
-                    user_id,
-                    query_embedding,
-                    visibility=visibility,
-                    category=validated_category,
-                    limit=candidate_limit,
-                )
-            )
 
-        text_candidates = list(
-            await self._repo.search_text(
-                user_id,
-                normalized_query,
-                visibility=visibility,
-                category=validated_category,
-                limit=candidate_limit,
-            )
+        pools = await self._repo.search_candidates(
+            user_id,
+            query=normalized_query,
+            embedding=query_embedding,
+            visibility=visibility,
+            category=validated_category,
+            limit=candidate_limit,
         )
+        vector_candidates = list(pools.vector)
+        self._warn_on_embedding_model_drift(vector_candidates)
 
-        fused = self._reciprocal_rank_fusion(vector_candidates, text_candidates)
+        fused = self._reciprocal_rank_fusion(vector_candidates, list(pools.text))
         results = [
             RecalledMemory(**_to_memory_out(scored.memory).model_dump(), score=score)
             for scored, score in fused[:effective_limit]
@@ -181,13 +326,44 @@ class MemoryService:
         vector_candidates: list[ScoredMemory],
         text_candidates: list[ScoredMemory],
     ) -> list[tuple[ScoredMemory, float]]:
-        """Merge ranked candidate lists with RRF (k=60)."""
+        """Merge ranked candidate lists with RRF (k=60), importance included.
+
+        Importance enters as a third weighted voter over the candidates the
+        retrieval signals already found, never as a way in: a memory nobody
+        matched cannot be surfaced by being marked important. Expressing it as a
+        rank rather than a score is what keeps it bounded -- RRF only ever reads
+        positions, so a 0-to-10 field cannot overpower relevance no matter how
+        it is filled in, and ``recall_importance_weight`` sets how much a full
+        sweep of the importance ranking is worth against one retrieval signal.
+
+        Recency deliberately does not get a vote. Newer memories superseding
+        older ones is a statement about truth, not about relevance, and paying
+        for it here would quietly bury long-standing constraints. It stays what
+        it was: the tie-break.
+        """
         scores: dict[uuid.UUID, float] = defaultdict(float)
         entries: dict[uuid.UUID, ScoredMemory] = {}
         for candidates in (vector_candidates, text_candidates):
             for rank, scored in enumerate(candidates, start=1):
                 scores[scored.memory.id] += 1.0 / (RRF_K + rank)
                 entries.setdefault(scored.memory.id, scored)
+
+        weight = self._limits.recall_importance_weight
+        if weight:
+            # Competition ranking: equally important candidates must land on the
+            # same rank and so contribute equally. Ordering ties by anything
+            # else -- recency being the tempting choice -- would smuggle a
+            # second signal in through the tie-break and turn scores that ought
+            # to tie into scores that do not.
+            by_importance = sorted(entries.values(), key=lambda s: -s.memory.importance)
+            rank = 0
+            previous_importance: int | None = None
+            for position, scored in enumerate(by_importance, start=1):
+                if scored.memory.importance != previous_importance:
+                    rank = position
+                    previous_importance = scored.memory.importance
+                scores[scored.memory.id] += weight / (RRF_K + rank)
+
         ranked = sorted(
             scores.items(), key=lambda item: entries[item[0]].memory.created_at, reverse=True
         )
@@ -283,6 +459,44 @@ class MemoryService:
         """Logical delete; unknown and foreign ids both report not forgotten."""
         forgotten = await self._repo.soft_delete(user_id, memory_id)
         return ForgetResult(id=memory_id, forgotten=forgotten)
+
+    # ------------------------------------------------------------------
+
+    def _warn_on_embedding_model_drift(self, candidates: list[ScoredMemory]) -> None:
+        """Warn when ranked vectors came from a model that is no longer configured.
+
+        Embeddings from different models share no coordinate space, so after
+        ``RECALLUM__OLLAMA__MODEL`` changes, cosine similarity over older rows
+        is noise -- with nothing to notice it by.
+
+        Checked here rather than at startup because ``memories`` has RLS forced
+        and the app role is NOBYPASSRLS: there is deliberately no way to
+        aggregate across users, so the only place holding both a user's rows and
+        the configured model is a request. Reading the already-fetched rows
+        keeps it free of extra queries, and it fires exactly when a stale vector
+        actually influences a ranking. It warns rather than filtering, because
+        silently hiding a user's memories is the worse failure.
+
+        A NULL model means the row predates provenance tracking, which is not
+        evidence of a mismatch -- every row in a database migrated from an
+        earlier version looks like this. Treating unknown as stale would fire on
+        every recall until the whole corpus is rewritten, so only a positively
+        different model counts.
+        """
+        configured = self._embeddings.model
+        stale = {
+            candidate.memory.embedding_model
+            for candidate in candidates
+            if candidate.memory.embedding_model not in (None, configured)
+        }
+        if not stale:
+            return
+        logger.warning(
+            "recall ranked vectors produced by %s but %r is configured; their "
+            "similarity scores are unreliable until re-embedded",
+            ", ".join(sorted(stale)),
+            configured,
+        )
 
     # ------------------------------------------------------------------
 

@@ -22,7 +22,7 @@ from recallum.mcp.server import build_mcp_server, validate_only_tools_are_expose
 from recallum.memory import MemoryValidationError
 from tests.fakes import FakeEmbeddingClient, build_test_container
 
-EXPECTED_TOOLS = {"remember", "recall", "context", "list_memories", "forget"}
+EXPECTED_TOOLS = {"remember", "recall", "context", "list_memories", "update", "forget"}
 
 
 @dataclass
@@ -170,7 +170,7 @@ async def test_validate_only_tools_are_exposed_rejects_a_prompt():
         await validate_only_tools_are_exposed(mcp)
 
 
-async def test_discovery_announces_exactly_five_tools_without_user_inputs(server: ServerInfo):
+async def test_discovery_announces_exactly_six_tools_without_user_inputs(server: ServerInfo):
     async with mcp_client(server.url, server.alice_token) as client:
         tools = await client.list_tools()
     names = {tool.name for tool in tools}

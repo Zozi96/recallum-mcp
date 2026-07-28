@@ -6,6 +6,8 @@ PostgreSQL and Ollama; production paths resolve the same graph.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import httpx
 from dependency_injector import containers, providers
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -69,7 +71,13 @@ class Container(containers.DeclarativeContainer):
     )
 
     authenticator = providers.Singleton(
-        TokenAuthenticator, api_key_repository=api_key_repository
+        TokenAuthenticator,
+        api_key_repository=api_key_repository,
+        # Singleton on purpose: the identity cache lives on the instance, so a
+        # per-call authenticator would cache nothing.
+        cache_ttl=providers.Callable(
+            timedelta, seconds=config.auth.identity_cache_seconds.as_float()
+        ),
     )
 
     memory_service = providers.Singleton(
