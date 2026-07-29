@@ -107,7 +107,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     app = FastAPI(
         title="Recallum",
-        version="0.3.0",
+        version="0.4.0",
         summary="Private persistent memory for AI coding agents over MCP.",
         lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
     )
