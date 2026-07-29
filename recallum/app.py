@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
 from pydantic import BaseModel
 
+from recallum import __version__
 from recallum.config import Settings, get_settings
 from recallum.container import Container, create_container, shutdown_container
 from recallum.logging_setup import setup_logging
@@ -107,7 +108,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     app = FastAPI(
         title="Recallum",
-        version="0.4.0",
+        version=__version__,
         summary="Private persistent memory for AI coding agents over MCP.",
         lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
     )

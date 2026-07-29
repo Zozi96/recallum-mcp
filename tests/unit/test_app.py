@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from importlib.metadata import version as package_version
 
 from dependency_injector import providers
 from fastapi.testclient import TestClient
@@ -56,6 +57,11 @@ def test_lifespan_health_and_clean_shutdown():
     # Shutdown disposed the engine (resource cleanup verified).
     assert engine.disposed is True
     assert len(fakes["telemetry"].events) == 1
+
+
+def test_public_version_matches_package_metadata():
+    container, _ = build_test_container()
+    assert create_app(Settings(), container).version == package_version("recallum")
 
 
 def test_readiness_reports_unavailable_with_503_and_no_secrets():
