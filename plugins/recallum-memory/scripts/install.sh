@@ -289,6 +289,9 @@ PY
     run_action codex plugin marketplace add "$codex_marketplace_source"
   else
     echo "Codex marketplace '$marketplace_name' already points to this repository."
+    if ((remote_marketplace)); then
+      run_action codex plugin marketplace upgrade "$marketplace_name"
+    fi
   fi
   run_action codex plugin add "recallum-memory@recallum-local"
 
@@ -414,6 +417,9 @@ PY
     run_action claude plugin marketplace add "$claude_marketplace_source" --scope "$claude_scope"
   else
     echo "Claude Code marketplace '$marketplace_name' already points to this repository."
+    if ((remote_marketplace)); then
+      run_action claude plugin marketplace update "$marketplace_name"
+    fi
   fi
 
   if [[ "$plugin_state" == "installed" ]]; then

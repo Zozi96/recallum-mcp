@@ -5,10 +5,10 @@ MCP server.
 
 The plugin ships:
 
-- two skills — `recallum-memory` (when and how to use memory) and `recallum-setup` (install and
-  diagnose);
-- two hooks — `SessionStart` injects the canonical project key, `UserPromptSubmit` nudges recall
-  when a prompt mentions memory. Both fail open;
+- two skills — `recallum-memory` (load context and capture verified reusable knowledge) and
+  `recallum-setup` (install and diagnose);
+- two hooks — `SessionStart` injects the canonical project key and a completion capture reminder;
+  `UserPromptSubmit` nudges recall when a prompt mentions memory. Both fail open;
 - the MCP wiring for each client.
 
 ## Prerequisites
@@ -208,7 +208,8 @@ claude plugin uninstall recallum-memory@recallum-local
 | Tools missing after install | Start a **new** session; both clients discover MCP tools only at session start |
 | Tools missing in `claude -p` | A restricted `agent` in `settings.json` can pin a tool allowlist that excludes MCP tools. Check the `agent` key and its `tools:` frontmatter |
 | `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code leaves plugin-bundled MCP tools behind `ToolSearch` instead of listing them, so a blind call to the fully qualified name fails while the server is connected. Search for the tool, then call it. `permissions.allow` does **not** make them load eagerly |
-| Stale plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Run `claude plugin marketplace update recallum-local && claude plugin update recallum-memory@recallum-local`, then start a new session |
+| Stale Codex plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target codex`, then start a new session |
+| Stale Claude Code plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Rerun `plugins/recallum-memory/scripts/install.sh --target claude --force-mcp`, then start a new session |
 | Claude authentication failure | Export `RECALLUM_API_KEY` before launching Claude, or run `/plugin configure recallum-memory@recallum-local`; the environment variable wins when both exist |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |

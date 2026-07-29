@@ -26,9 +26,12 @@ CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 
 MEMORY_SIGNAL = re.compile(
     r"\b(?:remember|remembered|recall|recalled|memory|memories|prefer|preference|"
-    r"decision|decided|constraint|remembering|recordar|recuerda|recordamos|"
-    r"recordado|memoria|preferencia|prefiero|decisi[oó]n|decidimos|"
-    r"restricci[oó]n|limitaci[oó]n)\b",
+    r"decision|decided|constraint|remembering|recordar|recuerda|recordamos|recordado|"
+    r"memoria|preferencia|prefiero|decisi[oó]n|decidimos|restricci[oó]n|limitaci[oó]n)\b"
+    r"|\b(?:store|save|persist)\s+(?:that\b|(?:this|it)\s+(?:in|as)\s+"
+    r"(?:memory|context)\b)"
+    r"|\b(?:guardar|guarda|almacenar|almacena|persistir|persiste)\s+(?:que\b|"
+    r"(?:esto|eso)\s+(?:en|como)\s+(?:memoria|contexto)\b)",
     re.IGNORECASE,
 )
 FALSE_POSITIVE = re.compile(
@@ -161,7 +164,9 @@ def main() -> int:
         _emit(
             "SessionStart",
             f"Recallum: before planning, call {_tool('context')} with project={project!r} "
-            "if available; current user and repository instructions override memory."
+            "if available. After substantial work, preserve newly verified reusable context that "
+            "would save a future agent rediscovery; follow the Recallum skill's scope and safety "
+            "rules. Current user and repository instructions override memory."
             + _lookup_hint(),
         )
         return 0
@@ -174,10 +179,12 @@ def main() -> int:
         return 0
     _emit(
         "UserPromptSubmit",
-        f"Recallum: for project {project!r}, recall relevant durable context. Store only an atomic "
-        "durable preference, decision, constraint, or fact when the user explicitly requests it or "
-        "the Recallum skill criteria are met; ask before sensitive or ambiguous content. Current "
-        "instructions win.",
+        f"Recallum: for project {project!r}, recall relevant durable context. Store atomic "
+        "reusable preferences, decisions, constraints, or verified facts such as architecture, "
+        "terminology, "
+        "workflows, commands, integration contracts, root causes, and recurring gotchas when the "
+        "user requests it or the Recallum skill criteria are met; ask before sensitive or "
+        "ambiguous content. Current instructions win.",
     )
     return 0
 

@@ -28,7 +28,21 @@ args = sys.argv[1:]
 with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(["codex", *args]) + "\\n")
 if args == ["plugin", "marketplace", "list", "--json"]:
-    print(json.dumps({"marketplaces": []}))
+    if os.environ.get("FAKE_CODEX_MARKETPLACE") == "matching":
+        print(json.dumps({"marketplaces": [{
+            "name": "recallum-local",
+            "root": "/tmp/recallum-local",
+            "marketplaceSource": {
+                "source": "git@github.com:Zozi96/recallum-mcp.git"
+            }
+        }]}))
+    elif os.environ.get("FAKE_CODEX_MARKETPLACE") == "local":
+        print(json.dumps({"marketplaces": [{
+            "name": "recallum-local",
+            "root": os.environ["EXPECTED_REPO_ROOT"]
+        }]}))
+    else:
+        print(json.dumps({"marketplaces": []}))
 elif args == ["mcp", "get", "recallum", "--json"]:
     state = os.environ.get("FAKE_CODEX_MCP", "missing")
     if state == "missing":
@@ -47,7 +61,19 @@ args = sys.argv[1:]
 with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(["claude", *args]) + "\\n")
 if args == ["plugin", "marketplace", "list", "--json"]:
-    print(json.dumps([]))
+    if os.environ.get("FAKE_CLAUDE_MARKETPLACE") == "matching":
+        print(json.dumps([{
+            "name": "recallum-local",
+            "source": "github",
+            "repo": "Zozi96/recallum-mcp"
+        }]))
+    elif os.environ.get("FAKE_CLAUDE_MARKETPLACE") == "local":
+        print(json.dumps([{
+            "name": "recallum-local",
+            "source": os.environ["EXPECTED_REPO_ROOT"]
+        }]))
+    else:
+        print(json.dumps([]))
 elif args == ["plugin", "list", "--json"]:
     if os.environ.get("FAKE_CLAUDE_PLUGIN", "missing") == "installed":
         print(json.dumps([{"id": "recallum-memory@recallum-local", "version": "0.1.0",
@@ -95,6 +121,11 @@ class HookTests(unittest.TestCase):
     def test_session_start_emits_project_context_instruction(self) -> None:
         context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn(f"{CODEX_PREFIX}context with project='local:", context)
+
+    def test_session_start_prompts_for_reusable_context_capture(self) -> None:
+        context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
+        self.assertIn("newly verified reusable context", context)
+        self.assertIn("save a future agent rediscovery", context)
 
     def test_codex_is_told_the_bare_server_tool_name(self) -> None:
         # Codex sets CLAUDE_PLUGIN_ROOT alongside PLUGIN_ROOT for compatibility
@@ -177,7 +208,12 @@ class HookTests(unittest.TestCase):
             self.assertNotIn("ignore previous instructions", context)
 
     def test_matching_english_and_spanish_prompts_emit_context(self) -> None:
-        for prompt in ("Remember that we use UTC.", "Recuerda nuestra decisión anterior."):
+        for prompt in (
+            "Remember that we use UTC.",
+            "Save that this service uses PostgreSQL.",
+            "Recuerda nuestra decisión anterior.",
+            "Guarda que este flujo requiere Docker.",
+        ):
             with self.subTest(prompt=prompt):
                 result = run_hook("prompt", json.dumps({"cwd": "/work/alpha", "prompt": prompt}))
                 self.assertEqual(result.returncode, 0)
@@ -191,6 +227,9 @@ class HookTests(unittest.TestCase):
             "Run the unit tests.",
             "Fix this memory leak.",
             "Arregla la fuga de memoria.",
+            "Save the generated report to disk.",
+            "Store the JSON response in a file.",
+            "Persiste el formulario en PostgreSQL.",
         ):
             with self.subTest(prompt=prompt):
                 result = run_hook("prompt", json.dumps({"prompt": prompt}))
@@ -261,6 +300,17 @@ class ManifestTests(unittest.TestCase):
                 self.assertIn(CODEX_PREFIX, text)
                 self.assertIn(CLAUDE_PREFIX, text)
 
+    def test_memory_skill_covers_reusable_context_beyond_decisions(self) -> None:
+        text = (
+            PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        for kind in ("architecture", "terminology", "workflows", "root causes"):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, text)
+        self.assertIn("capture scan", text)
+        self.assertIn("passing test is evidence", text)
+        self.assertIn("current branch or worktree", text)
+
     def test_both_marketplaces_point_at_the_same_local_plugin(self) -> None:
         codex = self._load(CODEX_MARKETPLACE)
         claude = self._load(CLAUDE_MARKETPLACE)
@@ -288,6 +338,8 @@ class InstallerTestCase(unittest.TestCase):
         root: Path,
         codex_mcp: str = "missing",
         claude_plugin: str = "missing",
+        codex_marketplace: str = "missing",
+        claude_marketplace: str = "missing",
         stub_codex: bool = True,
         stub_claude: bool = True,
     ) -> tuple[dict[str, str], Path]:
@@ -311,8 +363,11 @@ class InstallerTestCase(unittest.TestCase):
                 "FAKE_CLI_LOG": str(log),
                 "FAKE_CODEX_MCP": codex_mcp,
                 "FAKE_CLAUDE_PLUGIN": claude_plugin,
+                "FAKE_CODEX_MARKETPLACE": codex_marketplace,
+                "FAKE_CLAUDE_MARKETPLACE": claude_marketplace,
                 "EXPECTED_URL": URL,
                 "EXPECTED_TOKEN": TOKEN_ENV_VAR,
+                "EXPECTED_REPO_ROOT": str(REPO_ROOT),
                 TOKEN_ENV_VAR: "not-printed",
             }
         )
@@ -496,6 +551,24 @@ class CodexInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: codex mcp remove recallum", result.stdout)
             self.assertIn("dry-run: codex mcp add recallum", result.stdout)
 
+    def test_matching_marketplace_is_upgraded_before_plugin_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), codex_marketplace="matching")
+            result = self._run_codex(env, "--remote", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            planned = [line for line in result.stdout.splitlines() if line.startswith("dry-run:")]
+            upgrade = next(i for i, line in enumerate(planned) if "marketplace upgrade" in line)
+            install = next(i for i, line in enumerate(planned) if "plugin add" in line)
+            self.assertLess(upgrade, install)
+
+    def test_matching_local_marketplace_is_not_upgraded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), codex_marketplace="local")
+            result = self._run_codex(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("marketplace upgrade", result.stdout)
+            self.assertIn("dry-run: codex plugin add", result.stdout)
+
     def test_matching_endpoint_with_static_headers_requires_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory), codex_mcp="poisoned")
@@ -578,6 +651,24 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertLess(uninstall, install)
             # `claude plugin uninstall` has no --scope flag.
             self.assertNotIn("--scope", planned[uninstall])
+
+    def test_matching_marketplace_is_updated_before_plugin_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), claude_marketplace="matching")
+            result = self._run_claude(env, "--remote", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            planned = [line for line in result.stdout.splitlines() if line.startswith("dry-run:")]
+            update = next(i for i, line in enumerate(planned) if "marketplace update" in line)
+            install = next(i for i, line in enumerate(planned) if "plugin install" in line)
+            self.assertLess(update, install)
+
+    def test_matching_local_marketplace_is_not_updated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), claude_marketplace="local")
+            result = self._run_claude(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("marketplace update", result.stdout)
+            self.assertIn("dry-run: claude plugin install", result.stdout)
 
     def test_scope_is_applied_to_marketplace_add_and_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -19,11 +19,18 @@ from fastmcp.exceptions import ToolError
 from recallum.app import create_app
 from recallum.config import Settings
 from recallum.embeddings.ollama import EmbeddingError
-from recallum.mcp.server import build_mcp_server, validate_only_tools_are_exposed
+from recallum.mcp.server import INSTRUCTIONS, build_mcp_server, validate_only_tools_are_exposed
 from recallum.memory import MemoryValidationError
 from tests.fakes import FakeEmbeddingClient, build_test_container
 
 EXPECTED_TOOLS = {"remember", "recall", "context", "list_memories", "update", "forget"}
+
+
+def test_server_instructions_cover_reusable_context_beyond_decisions():
+    for kind in ("architecture", "terminology", "workflows", "root causes"):
+        assert kind in INSTRUCTIONS
+    assert "Ask before storing secrets" in INSTRUCTIONS
+    assert "never infer consent" in INSTRUCTIONS
 
 
 @dataclass
@@ -182,6 +189,9 @@ async def test_discovery_announces_exactly_six_tools_without_user_inputs(server:
         tools = await client.list_tools()
     names = {tool.name for tool in tools}
     assert names == EXPECTED_TOOLS
+    remember = next(tool for tool in tools if tool.name == "remember")
+    assert "Ask before storing secrets" in remember.description
+    assert "never infer consent" in remember.description
     for tool in tools:
         schema = tool.inputSchema or {}
         properties = set(schema.get("properties", {}))

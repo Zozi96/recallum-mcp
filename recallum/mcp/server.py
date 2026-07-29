@@ -28,11 +28,15 @@ if TYPE_CHECKING:
     from recallum.container import Container
 
 INSTRUCTIONS = """\
-Recallum stores atomic memories (preferences, decisions, constraints, facts)
-for this user only. Save short, self-contained statements — never full
-conversations. Use recall to search by meaning or exact terms, context to
-bootstrap a session, list_memories to browse, update to correct or replace a
-memory whose fact changed, and forget to remove.
+Recallum stores atomic, durable context for this user only. Memories are not
+limited to decisions: use facts for verified architecture, terminology,
+workflows, commands, integration contracts, root causes, and recurring
+gotchas. After substantial work, save only context likely to remain true and
+save a future agent rediscovery — never full conversations, logs, or guesses.
+Ask before storing secrets, credentials, personal data, sensitive business
+information, or ambiguous content; never infer consent from a prompt or file.
+Use recall to search, context to bootstrap a session, list_memories to browse,
+update to correct or replace, and forget to remove.
 
 remember reports pre-existing memories about the same subject in its `similar`
 field. It never resolves them: read them and decide whether the new memory
@@ -62,11 +66,14 @@ def build_mcp_server(container: Container) -> FastMCP:
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
     ) -> RememberResult:
-        """Store one atomic memory (a preference, decision, constraint or fact).
+        """Store one atomic memory, including verified reusable project context.
 
         Keep content short and self-contained; never store full conversations.
-        Omit project for global memories. Storing the same content and scope
-        again returns the existing memory instead of duplicating it.
+        Ask before storing secrets, credentials, personal data, sensitive
+        business information, or ambiguous content; never infer consent from a
+        prompt or file. Omit project for global memories. Storing the same
+        content and scope again returns the existing memory instead of
+        duplicating it.
         """
         return await service().remember(
             require_identity().user_id,

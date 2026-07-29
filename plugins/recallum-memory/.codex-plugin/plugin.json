@@ -1,6 +1,6 @@
 {
   "name": "recallum-memory",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Persistent, project-aware memory for Codex through Recallum.",
   "author": {
     "name": "Zozi"
@@ -10,8 +10,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Recallum Memory",
-    "shortDescription": "Recall durable project context across Codex sessions",
-    "longDescription": "Load concise project context at session start, recall prior decisions when needed, and preserve newly settled preferences, constraints, decisions, and facts.",
+    "shortDescription": "Recall reusable project context across Codex sessions",
+    "longDescription": "Load concise project context at session start and preserve verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
     "developerName": "Zozi",
     "category": "Productivity",
     "capabilities": [
@@ -20,7 +20,7 @@
     ],
     "defaultPrompt": [
       "Recall the durable context for this project.",
-      "What decisions have we made about this work?",
+      "What reusable context have we learned about this work?",
       "Remember this project constraint for later."
     ]
   }
