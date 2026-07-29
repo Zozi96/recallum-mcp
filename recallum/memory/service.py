@@ -32,6 +32,9 @@ from recallum.memory.schemas import (
     ContextResult,
     ForgetResult,
     ListResult,
+    MemoryGraphEdge,
+    MemoryGraphNode,
+    MemoryGraphResponse,
     MemoryOut,
     RecalledMemory,
     RecallResult,
@@ -449,6 +452,69 @@ class MemoryService:
             total=total,
             limit=effective_limit,
             offset=offset,
+        )
+
+    async def memory_graph(
+        self,
+        user_id: uuid.UUID,
+        *,
+        scope: str | None = None,
+        project: str | None = None,
+        category: str | None = None,
+        limit: int | None = None,
+    ) -> MemoryGraphResponse:
+        """Build a bounded graph while preserving nodes without strong edges."""
+        normalized_project = self._normalize_project(project)
+        visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
+        validated_category = self._validate_category(category) if category else None
+        effective_limit = self._clamp_limit(
+            limit, self._limits.graph_max_nodes, self._limits.graph_max_nodes
+        )
+        snapshot = await self._repo.graph_snapshot(
+            user_id,
+            visibility=visibility,
+            category=validated_category,
+            limit=effective_limit,
+            min_similarity=self._limits.graph_min_similarity,
+        )
+        degree: defaultdict[uuid.UUID, int] = defaultdict(int)
+        edges: list[MemoryGraphEdge] = []
+        for pair in sorted(
+            snapshot.pairs,
+            key=lambda pair: (-pair.similarity, str(pair.source_id), str(pair.target_id)),
+        ):
+            if (
+                degree[pair.source_id] >= self._limits.graph_max_neighbours
+                or degree[pair.target_id] >= self._limits.graph_max_neighbours
+            ):
+                continue
+            source_id, target_id = sorted((pair.source_id, pair.target_id), key=str)
+            edges.append(
+                MemoryGraphEdge(
+                    source_id=source_id,
+                    target_id=target_id,
+                    similarity=pair.similarity,
+                )
+            )
+            degree[source_id] += 1
+            degree[target_id] += 1
+        return MemoryGraphResponse(
+            nodes=[
+                MemoryGraphNode(
+                    id=memory.id,
+                    scope=memory.scope,
+                    project=memory.project,
+                    category=memory.category,
+                    content=memory.content,
+                    importance=memory.importance,
+                    created_at=memory.created_at,
+                )
+                for memory in snapshot.memories
+            ],
+            edges=edges,
+            total=snapshot.total,
+            truncated=snapshot.total > len(snapshot.memories),
+            model_mismatch=snapshot.model_mismatch,
         )
 
     # ------------------------------------------------------------------

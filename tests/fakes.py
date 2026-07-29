@@ -19,6 +19,8 @@ from recallum.db.models import ApiKey, Memory, User, WebSession
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
     CandidatePools,
+    GraphPair,
+    GraphSnapshot,
     ScoredMemory,
 )
 from recallum.embeddings.ollama import EmbeddingError
@@ -205,6 +207,39 @@ class FakeMemoryRepository:
             ),
             text=self._text_pool(user_id, query, visibility, category, capped),
         )
+
+    async def graph_snapshot(
+        self,
+        user_id: uuid.UUID,
+        *,
+        visibility: MemoryVisibility,
+        category: str | None,
+        limit: int,
+        min_similarity: float,
+    ) -> GraphSnapshot:
+        rows = sorted(
+            self._filtered(user_id, visibility, category),
+            key=lambda memory: str(memory.id),
+        )
+        rows.sort(key=lambda memory: memory.created_at, reverse=True)
+        rows.sort(key=lambda memory: memory.importance, reverse=True)
+        selected = rows[:limit]
+        pairs = []
+        for index, left in enumerate(selected):
+            for right in selected[index + 1 :]:
+                if (
+                    left.embedding_model is None
+                    or left.embedding_model != right.embedding_model
+                ):
+                    continue
+                similarity = _cosine(left.embedding, right.embedding)
+                if similarity >= min_similarity:
+                    source_id, target_id = sorted((left.id, right.id), key=str)
+                    pairs.append(GraphPair(source_id, target_id, similarity))
+        pairs.sort(key=lambda pair: (-pair.similarity, str(pair.source_id), str(pair.target_id)))
+        models = {memory.embedding_model for memory in selected if memory.embedding_model}
+        mismatch = any(memory.embedding_model is None for memory in selected) or len(models) > 1
+        return GraphSnapshot(selected, pairs, len(rows), mismatch)
 
     def _vector_pool(
         self,

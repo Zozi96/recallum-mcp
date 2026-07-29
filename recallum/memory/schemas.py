@@ -126,6 +126,36 @@ class ListResult(BaseModel):
     offset: int
 
 
+class MemoryGraphNode(BaseModel):
+    """One active memory in a graph snapshot."""
+
+    id: uuid.UUID
+    scope: Literal["global", "project"]
+    project: str | None = None
+    category: Literal["preference", "decision", "constraint", "fact"]
+    content: str
+    importance: int
+    created_at: datetime
+
+
+class MemoryGraphEdge(BaseModel):
+    """One canonical undirected semantic relation."""
+
+    source_id: uuid.UUID
+    target_id: uuid.UUID
+    similarity: float
+
+
+class MemoryGraphResponse(BaseModel):
+    """A bounded graph projection that never contains stored embeddings."""
+
+    nodes: list[MemoryGraphNode]
+    edges: list[MemoryGraphEdge]
+    total: int
+    truncated: bool
+    model_mismatch: bool
+
+
 class ForgetResult(BaseModel):
     """Outcome of ``forget``; missing and foreign ids look identical."""
 

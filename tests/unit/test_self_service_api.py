@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from recallum.app import create_app
 from recallum.config import Settings
 from recallum.telemetry.events import ToolActivityEvent
-from tests.fakes import FakeEmbeddingClient, build_test_container
+from tests.fakes import FakeEmbeddingClient, ScriptedEmbeddingClient, build_test_container
 
 
 def _login(client: TestClient, email: str, password: str = "secret") -> None:
@@ -104,6 +104,7 @@ def test_memories_are_session_scoped_and_responses_are_filtered():
         assert client.get(f"/api/v1/me/memories/{memory_id}").status_code == 404
         assert client.delete(f"/api/v1/me/memories/{memory_id}").status_code == 404
         assert client.get("/api/v1/me/memories").json()["total"] == 0
+        assert client.get("/api/v1/me/memory-graph").json()["total"] == 0
 
 
 def test_supersession_history_duplicate_and_statistics():
@@ -226,7 +227,15 @@ def test_router_requires_session_and_empty_statistics_are_zeroed():
     app = create_app(Settings(), container)
     with TestClient(app, base_url="https://recallum.test") as client:
         assert client.get("/api/v1/me/memories").status_code == 401
+        assert client.get("/api/v1/me/memory-graph").status_code == 401
         _login(client, user.email)
+        assert client.get("/api/v1/me/memory-graph").json() == {
+            "nodes": [],
+            "edges": [],
+            "total": 0,
+            "truncated": False,
+            "model_mismatch": False,
+        }
         assert client.get("/api/v1/me/stats").json() == {
             "active": 0,
             "superseded": 0,
@@ -244,6 +253,70 @@ def test_router_requires_session_and_empty_statistics_are_zeroed():
         assert activity.json()["failure_rate"] == 0.0
         assert activity.json()["degradation_rate"] == 0.0
         assert activity.json()["by_day"] == {}
+
+
+def test_memory_graph_contract_filters_and_omits_vectors():
+    vectors = {
+        "global graph": [1.0, 0.0],
+        "project graph": [1.0, 0.0],
+        "other project": [1.0, 0.0],
+    }
+    container, fakes = build_test_container(embedder=ScriptedEmbeddingClient(vectors))
+    user = _user(container, "graph@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        client.post(
+            "/api/v1/me/memories",
+            json={"content": "global graph", "category": "fact", "importance": 8},
+        )
+        client.post(
+            "/api/v1/me/memories",
+            json={
+                "content": "project graph",
+                "category": "preference",
+                "project": "alpha",
+                "importance": 7,
+            },
+        )
+        other = client.post(
+            "/api/v1/me/memories",
+            json={"content": "other project", "category": "fact", "project": "beta"},
+        )
+        fakes["memories"].rows[uuid.UUID(other.json()["memory"]["id"])].embedding_model = (
+            "legacy-model"
+        )
+
+        response = client.get(
+            "/api/v1/me/memory-graph",
+            params={"project": "alpha", "limit": 10_000},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert {node["content"] for node in body["nodes"]} == {
+            "global graph",
+            "project graph",
+        }
+        assert len(body["edges"]) == 1
+        assert body["edges"][0]["source_id"] < body["edges"][0]["target_id"]
+        assert body["total"] == 2
+        assert body["truncated"] is False
+        assert body["model_mismatch"] is False
+        assert "embedding" not in response.text
+        assert "metadata" not in response.text
+
+        whole_graph = client.get("/api/v1/me/memory-graph").json()
+        connected_ids = {
+            edge["source_id"] for edge in whole_graph["edges"]
+        } | {edge["target_id"] for edge in whole_graph["edges"]}
+        assert other.json()["memory"]["id"] not in connected_ids
+        assert whole_graph["model_mismatch"] is True
+
+        truncated = client.get("/api/v1/me/memory-graph", params={"limit": 1}).json()
+        assert len(truncated["nodes"]) == 1
+        assert truncated["total"] == 3
+        assert truncated["truncated"] is True
 
 
 def test_activity_endpoint_is_authenticated_and_user_scoped():

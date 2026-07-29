@@ -18,6 +18,7 @@ from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
 from recallum.memory.schemas import (
     ListResult,
+    MemoryGraphResponse,
     MemoryOut,
     RecallResult,
     RememberResult,
@@ -220,6 +221,22 @@ def create_self_service_router(
             category=category,
             limit=limit,
             offset=offset,
+        )
+
+    @router.get("/memory-graph", response_model=MemoryGraphResponse)
+    async def memory_graph(
+        current: identity,
+        scope: Annotated[Scope | None, Query()] = None,
+        project: Annotated[str | None, Query()] = None,
+        category: Annotated[Category | None, Query()] = None,
+        limit: Annotated[int | None, Query()] = None,
+    ) -> MemoryGraphResponse:
+        return await memories.memory_graph(
+            current.user.id,
+            scope=scope,
+            project=project,
+            category=category,
+            limit=limit,
         )
 
     @router.get("/memories/search", response_model=RecallResult)

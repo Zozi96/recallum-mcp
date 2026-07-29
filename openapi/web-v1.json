@@ -730,6 +730,134 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "MemoryGraphEdge": {
+        "description": "One canonical undirected semantic relation.",
+        "properties": {
+          "similarity": {
+            "title": "Similarity",
+            "type": "number"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "target_id": {
+            "format": "uuid",
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "target_id",
+          "similarity"
+        ],
+        "title": "MemoryGraphEdge",
+        "type": "object"
+      },
+      "MemoryGraphNode": {
+        "description": "One active memory in a graph snapshot.",
+        "properties": {
+          "category": {
+            "enum": [
+              "preference",
+              "decision",
+              "constraint",
+              "fact"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "importance": {
+            "title": "Importance",
+            "type": "integer"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "category",
+          "content",
+          "importance",
+          "created_at"
+        ],
+        "title": "MemoryGraphNode",
+        "type": "object"
+      },
+      "MemoryGraphResponse": {
+        "description": "A bounded graph projection that never contains stored embeddings.",
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryGraphEdge"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "model_mismatch": {
+            "title": "Model Mismatch",
+            "type": "boolean"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryGraphNode"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "nodes",
+          "edges",
+          "total",
+          "truncated",
+          "model_mismatch"
+        ],
+        "title": "MemoryGraphResponse",
+        "type": "object"
+      },
       "MemoryOut": {
         "description": "A stored memory as returned to agents.",
         "properties": {
@@ -2327,6 +2455,113 @@
           }
         },
         "summary": "Supersede Memory",
+        "tags": [
+          "self-service"
+        ]
+      }
+    },
+    "/me/memory-graph": {
+      "get": {
+        "operationId": "memory_graph_me_memory_graph_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "global",
+                    "project"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "preference",
+                    "decision",
+                    "constraint",
+                    "fact"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryGraphResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Memory Graph",
         "tags": [
           "self-service"
         ]

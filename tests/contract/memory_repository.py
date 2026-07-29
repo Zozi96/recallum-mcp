@@ -688,6 +688,116 @@ class MemoryRepositoryContract:
             {itself.id, other_category.id, other_project.id, deleted.id}
         )
 
+    # -- graph_snapshot --------------------------------------------------
+
+    async def test_graph_snapshot_crosses_buckets_but_not_users_or_models(
+        self, repo, user_id, other_user_id
+    ):
+        target = _embedding(1717)
+        global_fact = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="global graph fact",
+                content_hash=_hash("graph-global"),
+                embedding=target,
+                category="fact",
+            ),
+        )
+        project_preference = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="project graph preference",
+                content_hash=_hash("graph-project"),
+                embedding=target,
+                scope="project",
+                project="alpha",
+                category="preference",
+            ),
+        )
+        incompatible = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="incompatible graph model",
+                content_hash=_hash("graph-model"),
+                embedding=target,
+                embedding_model="other-model",
+            ),
+        )
+        foreign = await repo.create_memory(
+            other_user_id,
+            **self._kwargs(
+                content="foreign graph memory",
+                content_hash=_hash("graph-foreign"),
+                embedding=target,
+            ),
+        )
+
+        graph = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.9,
+        )
+
+        assert {memory.id for memory in graph.memories} == {
+            global_fact.id,
+            project_preference.id,
+            incompatible.id,
+        }
+        assert foreign.id not in {memory.id for memory in graph.memories}
+        assert {(pair.source_id, pair.target_id) for pair in graph.pairs} == {
+            tuple(sorted((global_fact.id, project_preference.id), key=str))
+        }
+        assert graph.total == 3
+        assert graph.model_mismatch is True
+
+    async def test_graph_snapshot_is_deterministically_bounded(self, repo, user_id):
+        low = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="low graph importance",
+                content_hash=_hash("graph-low"),
+                importance=1,
+            ),
+        )
+        high = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="high graph importance",
+                content_hash=_hash("graph-high"),
+                importance=9,
+            ),
+        )
+        middle = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="middle graph importance",
+                content_hash=_hash("graph-middle"),
+                importance=5,
+            ),
+        )
+
+        first = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=2,
+            min_similarity=0.9,
+        )
+        second = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=2,
+            min_similarity=0.9,
+        )
+
+        assert [memory.id for memory in first.memories] == [high.id, middle.id]
+        assert [memory.id for memory in second.memories] == [high.id, middle.id]
+        assert low.id not in {memory.id for memory in first.memories}
+        assert first.total == 3
+
     # -- most_important_active ------------------------------------------
 
     async def test_most_important_active_orders_by_importance_then_recency(self, repo, user_id):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -683,3 +684,128 @@ async def test_context_is_not_truncated_when_everything_fits():
 
     assert result.total_items == 3
     assert result.truncated is False
+
+
+async def test_memory_graph_crosses_projects_and_categories_and_keeps_isolated_nodes():
+    vectors = {
+        "alpha theme": [1.0, 0.0],
+        "beta theme": [0.0, 1.0],
+        "bridge theme": [0.8, 0.8],
+        "unrelated same project": [-1.0, 0.0],
+        "foreign close memory": [1.0, 0.0],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(graph_min_similarity=0.7),
+    )
+    alpha = await service.remember(
+        USER, content="alpha theme", category="decision", project="alpha"
+    )
+    beta = await service.remember(
+        USER, content="beta theme", category="constraint", project="beta"
+    )
+    bridge = await service.remember(USER, content="bridge theme", category="fact")
+    isolated = await service.remember(
+        USER,
+        content="unrelated same project",
+        category="decision",
+        project="alpha",
+    )
+    other_user = uuid.uuid4()
+    await service.remember(
+        other_user, content="foreign close memory", category="decision", project="alpha"
+    )
+
+    graph = await service.memory_graph(USER)
+
+    assert {node.id for node in graph.nodes} == {
+        alpha.memory.id,
+        beta.memory.id,
+        bridge.memory.id,
+        isolated.memory.id,
+    }
+    assert {
+        frozenset((edge.source_id, edge.target_id)) for edge in graph.edges
+    } == {
+        frozenset((alpha.memory.id, bridge.memory.id)),
+        frozenset((beta.memory.id, bridge.memory.id)),
+    }
+    assert all(edge.source_id.int < edge.target_id.int for edge in graph.edges)
+    assert graph.total == 4
+    assert graph.truncated is False
+    assert graph.model_mismatch is False
+
+
+async def test_memory_graph_caps_strongest_edges_and_reports_truncation_and_models():
+    vectors = {
+        "centre": [1.0, 0.0],
+        "exact": [1.0, 0.0],
+        "near": [0.99, 0.1],
+        "truncated": [-1.0, 0.0],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(
+            graph_max_nodes=3,
+            graph_max_neighbours=1,
+            graph_min_similarity=0.7,
+        ),
+    )
+    centre = await service.remember(USER, content="centre", category="fact", importance=10)
+    exact = await service.remember(USER, content="exact", category="fact", importance=9)
+    near = await service.remember(USER, content="near", category="fact", importance=8)
+    await service.remember(USER, content="truncated", category="fact", importance=1)
+    repo.rows[near.memory.id].embedding_model = "rotated-model"
+
+    graph = await service.memory_graph(USER, limit=999)
+
+    assert [node.id for node in graph.nodes] == [
+        centre.memory.id,
+        exact.memory.id,
+        near.memory.id,
+    ]
+    assert len(graph.edges) == 1
+    assert {graph.edges[0].source_id, graph.edges[0].target_id} == {
+        centre.memory.id,
+        exact.memory.id,
+    }
+    assert graph.total == 4
+    assert graph.truncated is True
+    assert graph.model_mismatch is True
+
+
+async def test_memory_graph_representative_default_bound_stays_capped():
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=2),
+    )
+    for index in range(201):
+        await repo.create_memory(
+            USER,
+            scope="global",
+            project=None,
+            category="fact",
+            content=f"bounded graph memory {index}",
+            content_hash=f"{index:064x}",
+            embedding=[1.0, 0.0],
+            embedding_model="representative-model",
+            importance=index % 11,
+            source_client=None,
+            metadata={},
+        )
+
+    graph = await service.memory_graph(USER)
+    degree: defaultdict[uuid.UUID, int] = defaultdict(int)
+    for edge in graph.edges:
+        degree[edge.source_id] += 1
+        degree[edge.target_id] += 1
+
+    assert len(graph.nodes) == MemoryLimits().graph_max_nodes == 200
+    assert graph.total == 201
+    assert graph.truncated is True
+    assert max(degree.values()) <= MemoryLimits().graph_max_neighbours

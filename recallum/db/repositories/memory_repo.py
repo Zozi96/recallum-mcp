@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import cast, func, literal, select, text, update
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
+from sqlalchemy.orm import aliased, defer
 
 from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
 from recallum.db.models import Memory
@@ -83,6 +83,21 @@ class CandidatePools:
 
     vector: Sequence[ScoredMemory]
     text: Sequence[ScoredMemory]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphPair:
+    source_id: uuid.UUID
+    target_id: uuid.UUID
+    similarity: float
+
+
+@dataclass(frozen=True, slots=True)
+class GraphSnapshot:
+    memories: Sequence[Memory]
+    pairs: Sequence[GraphPair]
+    total: int
+    model_mismatch: bool
 
 
 class MemoryRepository:
@@ -295,6 +310,61 @@ class MemoryRepository:
             )
             rows = (await session.execute(stmt)).scalars().all()
             return rows, total
+
+    async def graph_snapshot(
+        self,
+        user_id: uuid.UUID,
+        *,
+        visibility: MemoryVisibility,
+        category: str | None,
+        limit: int,
+        min_similarity: float,
+    ) -> GraphSnapshot:
+        """Select bounded active nodes and comparable semantic pairs under RLS."""
+        async with self._sessions.for_user(user_id) as session:
+            filters = self._filters(user_id, visibility=visibility, category=category)
+            total = (
+                await session.execute(select(func.count()).select_from(Memory).where(*filters))
+            ).scalar_one()
+            stmt = (
+                select(Memory)
+                .options(*_light())
+                .where(*filters)
+                .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
+                .limit(limit)
+            )
+            memories = (await session.execute(stmt)).scalars().all()
+            models = {memory.embedding_model for memory in memories if memory.embedding_model}
+            model_mismatch = any(memory.embedding_model is None for memory in memories) or (
+                len(models) > 1
+            )
+            if len(memories) < 2:
+                return GraphSnapshot(memories, [], total, model_mismatch)
+
+            selected_ids = [memory.id for memory in memories]
+            left = aliased(Memory, name="graph_left")
+            right = aliased(Memory, name="graph_right")
+            distance = left.embedding.cosine_distance(right.embedding)
+            score = (literal(1.0) - distance).label("similarity")
+            pair_stmt = (
+                select(left.id.label("source_id"), right.id.label("target_id"), score)
+                .where(
+                    left.id.in_(selected_ids),
+                    right.id.in_(selected_ids),
+                    left.id < right.id,
+                    left.user_id == user_id,
+                    right.user_id == user_id,
+                    left.embedding_model.is_not(None),
+                    left.embedding_model == right.embedding_model,
+                    distance <= (1.0 - min_similarity),
+                )
+                .order_by(score.desc(), left.id, right.id)
+            )
+            pairs = [
+                GraphPair(row.source_id, row.target_id, float(row.similarity))
+                for row in (await session.execute(pair_stmt)).all()
+            ]
+            return GraphSnapshot(memories, pairs, total, model_mismatch)
 
     async def search_candidates(
         self,

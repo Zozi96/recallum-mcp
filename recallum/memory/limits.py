@@ -25,6 +25,13 @@ class MemoryLimits(BaseModel):
     similar_min_similarity: float = Field(default=0.85, ge=0.0, le=1.0)
     similar_max_results: int = Field(default=3, ge=0, le=10)
 
+    # The graph is an intentionally bounded projection. Pairwise comparison is
+    # quadratic, so these conservative server-owned ceilings are part of the
+    # safety boundary rather than client preferences.
+    graph_max_nodes: int = Field(default=200, gt=0, le=500)
+    graph_max_neighbours: int = Field(default=4, gt=0, le=10)
+    graph_min_similarity: float = Field(default=0.72, ge=0.5, le=1.0)
+
     max_content_chars: int = Field(default=4000, gt=0)
     max_project_chars: int = Field(default=200, gt=0)
     max_metadata_bytes: int = Field(default=2048, gt=0)
