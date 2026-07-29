@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Recallum" width="132" height="132" />
+</p>
+
 # Recallum Memory plugin
 
 Durable, project-aware memory for **Codex** and **Claude Code**, backed by a self-hosted Recallum
