@@ -107,6 +107,16 @@ With the user's approval, store one harmless, uniquely worded sentinel as a proj
 Start a new session, load project context, and verify the exact sentinel is returned. Remove the
 sentinel afterward with `mcp__recallum__forget` if the user does not want to retain it.
 
+## Optional: Session Context Digest
+
+The session hook can inject a compact memory digest at session start without waiting for the model
+to call any tool. It activates only when both `RECALLUM_MCP_URL` (the same URL configured for the
+MCP server) and `RECALLUM_API_KEY` are exported in the environment that launches the client. The
+fetch runs under a ~2.5 s budget and fails open: if either variable is missing or the server is
+slow, unreachable, or returns anything unexpected, the hook emits the standard instruction-only
+hint and the session continues unaffected. Configure it only when the user asks for it, and never
+echo the key while doing so.
+
 ## Diagnostics
 
 - Missing tools after install: start a new session, then inspect plugin installation and MCP

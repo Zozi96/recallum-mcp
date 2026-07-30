@@ -346,7 +346,7 @@ async def test_remember_reports_similar_existing_memories_without_resolving_them
     assert {m.id for m in listed.items} == {first.memory.id, second.memory.id}
 
 
-async def test_remember_does_not_flag_unrelated_or_other_category_memories():
+async def test_remember_flags_same_subject_across_categories_but_not_unrelated():
     repo = FakeMemoryRepository()
     service = MemoryService(
         repository=repo, embeddings=ScriptedEmbeddingClient(vectors={}), limits=MemoryLimits()
@@ -357,7 +357,9 @@ async def test_remember_does_not_flag_unrelated_or_other_category_memories():
         "something entirely different": [0.0, 1.0] + [0.0] * 6,
     }
 
-    await service.remember(USER, content="a preference about editors", category="preference")
+    first = await service.remember(
+        USER, content="a preference about editors", category="preference"
+    )
     same_vector_other_category = await service.remember(
         USER, content="a fact with the same vector", category="fact"
     )
@@ -365,7 +367,11 @@ async def test_remember_does_not_flag_unrelated_or_other_category_memories():
         USER, content="something entirely different", category="preference"
     )
 
-    assert same_vector_other_category.similar == []
+    # A near-duplicate filed under another category is the common way
+    # contradictions accumulate unseen, so it must be reported -- with its
+    # category visible so the filing mismatch is readable.
+    assert [s.id for s in same_vector_other_category.similar] == [first.memory.id]
+    assert same_vector_other_category.similar[0].category == "preference"
     assert unrelated.similar == []
 
 

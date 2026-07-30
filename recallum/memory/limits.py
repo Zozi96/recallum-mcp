@@ -45,3 +45,24 @@ class MemoryLimits(BaseModel):
     context_max_items_cap: int = Field(default=50, gt=0)
     context_default_max_chars: int = Field(default=6000, gt=0)
     context_max_chars_cap: int = Field(default=20000, gt=0)
+
+    # How many focus-relevant memories a task-focused ``context`` call may add
+    # on top of the importance-ranked snapshot. The focus only ever adds
+    # candidates; it never displaces preferences or constraints.
+    context_focus_limit: int = Field(default=10, gt=0, le=30)
+
+    # Minimum leftover character budget worth filling with a clipped item.
+    # Below this, clipping would produce a fragment too short to act on, so
+    # assembly stops instead -- keeping strict importance order rather than
+    # skipping long items and back-filling with shorter, less important ones.
+    context_truncate_floor: int = Field(default=200, gt=0)
+
+    # Upper bound on ``remember_batch`` items. Small on purpose: a capture scan
+    # should be a few high-signal atoms, not a session recap.
+    batch_max_items: int = Field(default=10, gt=0, le=20)
+
+    # Usage's vote in recall fusion, same competition-ranking mechanism as
+    # importance. Ships at 0.0 (no effect) so ``recall_count`` accumulates real
+    # data before it is allowed to influence ranking -- a non-zero weight is a
+    # rich-get-richer loop and must be a deliberate, measured choice.
+    recall_usage_weight: float = Field(default=0.0, ge=0.0, le=1.0)

@@ -20,6 +20,7 @@ from recallum.memory.schemas import (
     ListResult,
     MemoryGraphResponse,
     MemoryOut,
+    ReassignResult,
     RecallResult,
     RememberResult,
 )
@@ -75,6 +76,12 @@ class CreateMemoryRequest(BaseModel):
         if self.scope == "project" and (self.project is None or not self.project.strip()):
             raise ValueError("project scope requires a project")
         return self
+
+
+class ReassignProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    from_project: str = Field(min_length=1)
+    to_project: str = Field(min_length=1)
 
 
 class MemoryLocationImmutableRequest(BaseModel):
@@ -174,6 +181,9 @@ def _memory(row: Memory) -> MemoryOut:
         source_client=row.source_client,
         metadata=dict(row.metadata_ or {}),
         created_at=row.created_at,
+        reconfirmed_at=row.reconfirmed_at,
+        last_recalled_at=row.last_recalled_at,
+        recall_count=row.recall_count,
     )
 
 
@@ -263,6 +273,18 @@ def create_self_service_router(
         if not result.created:
             raise HTTPException(status_code=409, detail="Memory already exists")
         return result
+
+    @router.post("/memories/reassign-project", response_model=ReassignResult)
+    async def reassign_project(
+        body: ReassignProjectRequest, current: identity
+    ) -> ReassignResult:
+        # Registered before the ``{memory_id}`` routes so the literal path can
+        # never be captured by the parametrized ones.
+        return await memories.reassign_project(
+            current.user.id,
+            from_project=body.from_project,
+            to_project=body.to_project,
+        )
 
     @router.get("/memories/{memory_id}", response_model=MemoryOut)
     async def get_memory(memory_id: uuid.UUID, current: identity) -> MemoryOut:

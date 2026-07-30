@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     SmallInteger,
     String,
     Text,
@@ -158,6 +159,16 @@ class Memory(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Freshness and usage signals. ``reconfirmed_at`` is the last time identical
+    # content was re-stored (exact dedup); ``last_recalled_at``/``recall_count``
+    # track being served in recall/context results. NULL / 0 mean "no signal".
+    reconfirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_recalled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    recall_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The memory that replaced this one. Superseding also sets ``deleted_at``,
     # so a replaced row leaves every active query through the filter that

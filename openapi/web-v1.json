@@ -859,7 +859,7 @@
         "type": "object"
       },
       "MemoryOut": {
-        "description": "A stored memory as returned to agents.",
+        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory was served in recall or\ncontext results, as of before the response carrying them was produced.\nNULL / 0 mean \"no signal yet\".",
         "properties": {
           "category": {
             "enum": [
@@ -889,6 +889,18 @@
             "title": "Importance",
             "type": "integer"
           },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
           "metadata": {
             "additionalProperties": true,
             "title": "Metadata",
@@ -904,6 +916,23 @@
               }
             ],
             "title": "Project"
+          },
+          "recall_count": {
+            "default": 0,
+            "title": "Recall Count",
+            "type": "integer"
+          },
+          "reconfirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconfirmed At"
           },
           "scope": {
             "enum": [
@@ -953,6 +982,59 @@
           "count"
         ],
         "title": "MemoryVolume",
+        "type": "object"
+      },
+      "ReassignProjectRequest": {
+        "properties": {
+          "from_project": {
+            "minLength": 1,
+            "title": "From Project",
+            "type": "string"
+          },
+          "to_project": {
+            "minLength": 1,
+            "title": "To Project",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_project",
+          "to_project"
+        ],
+        "title": "ReassignProjectRequest",
+        "type": "object"
+      },
+      "ReassignResult": {
+        "description": "Outcome of a project-key migration.\n\n``conflicts`` are memories whose content already exists active under the\ntarget key: they stayed in place, and resolving the duplication is the\nowner's decision.",
+        "properties": {
+          "conflicts": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "from_project": {
+            "title": "From Project",
+            "type": "string"
+          },
+          "moved": {
+            "title": "Moved",
+            "type": "integer"
+          },
+          "to_project": {
+            "title": "To Project",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_project",
+          "to_project",
+          "moved",
+          "conflicts"
+        ],
+        "title": "ReassignResult",
         "type": "object"
       },
       "RecallResult": {
@@ -1017,6 +1099,18 @@
             "title": "Importance",
             "type": "integer"
           },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
           "metadata": {
             "additionalProperties": true,
             "title": "Metadata",
@@ -1032,6 +1126,23 @@
               }
             ],
             "title": "Project"
+          },
+          "recall_count": {
+            "default": 0,
+            "title": "Recall Count",
+            "type": "integer"
+          },
+          "reconfirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconfirmed At"
           },
           "scope": {
             "enum": [
@@ -1124,6 +1235,18 @@
           "importance": {
             "title": "Importance",
             "type": "integer"
+          },
+          "reconfirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconfirmed At"
           },
           "similarity": {
             "title": "Similarity",
@@ -2114,6 +2237,47 @@
           }
         },
         "summary": "Create Memory",
+        "tags": [
+          "self-service"
+        ]
+      }
+    },
+    "/me/memories/reassign-project": {
+      "post": {
+        "operationId": "reassign_project_me_memories_reassign_project_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReassignProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReassignResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reassign Project",
         "tags": [
           "self-service"
         ]

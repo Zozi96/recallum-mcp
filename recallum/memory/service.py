@@ -18,6 +18,7 @@ import re
 import unicodedata
 import uuid
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any, Literal, get_args
 
 from sqlalchemy.exc import IntegrityError
@@ -36,8 +37,12 @@ from recallum.memory.schemas import (
     MemoryGraphNode,
     MemoryGraphResponse,
     MemoryOut,
+    ReassignResult,
     RecalledMemory,
     RecallResult,
+    RememberBatchItem,
+    RememberBatchItemOutcome,
+    RememberBatchResult,
     RememberResult,
     SimilarMemory,
     UpdateResult,
@@ -113,10 +118,13 @@ class MemoryService:
                     else None
                 ),
             )
-            return RememberResult(
-                memory=_to_memory_out(refreshed if refreshed is not None else existing),
-                created=False,
+            # It IS a reconfirmation, though: the claim was just observed to
+            # still hold, and readers use that stamp to judge freshness.
+            reconfirmed = await self._repo.mark_reconfirmed(user_id, existing.id)
+            current = next(
+                row for row in (reconfirmed, refreshed, existing) if row is not None
             )
+            return RememberResult(memory=_to_memory_out(current), created=False)
 
         # Embed before persisting: a memory without a vector is never stored.
         embedding = await self._embeddings.embed(normalized)
@@ -141,7 +149,15 @@ class MemoryService:
                 user_id, scope=scope, project=normalized_project, content_hash=digest
             )
             if racing is not None:
-                return RememberResult(memory=_to_memory_out(racing), created=False)
+                # A concurrent insert of identical content is a reconfirmation
+                # from this caller's point of view: stamp it like the dedup path.
+                reconfirmed = await self._repo.mark_reconfirmed(user_id, racing.id)
+                return RememberResult(
+                    memory=_to_memory_out(
+                        reconfirmed if reconfirmed is not None else racing
+                    ),
+                    created=False,
+                )
             raise
         return RememberResult(
             memory=_to_memory_out(memory),
@@ -151,7 +167,6 @@ class MemoryService:
                 embedding,
                 scope=scope,
                 project=normalized_project,
-                category=validated_category,
                 exclude_id=memory.id,
             ),
         )
@@ -163,10 +178,13 @@ class MemoryService:
         *,
         scope: str,
         project: str | None,
-        category: str,
         exclude_id: uuid.UUID,
     ) -> list[SimilarMemory]:
         """Pre-existing memories about the same subject as the one just stored.
+
+        Deliberately blind to category: agents miscategorize, and a fact that
+        near-duplicates a decision is exactly the conflict worth surfacing.
+        Each hit carries its category so a filing mismatch is readable.
 
         Advisory only. A failure here must not fail the write: the memory is
         already committed, and losing the warning is far cheaper than telling
@@ -180,7 +198,6 @@ class MemoryService:
                 embedding,
                 scope=scope,
                 project=project,
-                category=category,
                 min_similarity=self._limits.similar_min_similarity,
                 limit=self._limits.similar_max_results,
                 exclude_id=exclude_id,
@@ -196,9 +213,63 @@ class MemoryService:
                 importance=n.memory.importance,
                 similarity=n.score,
                 created_at=n.memory.created_at,
+                reconfirmed_at=n.memory.reconfirmed_at,
             )
             for n in neighbours
         ]
+
+    async def remember_batch(
+        self,
+        user_id: uuid.UUID,
+        *,
+        items: Sequence[RememberBatchItem],
+        source_client: str | None = None,
+    ) -> RememberBatchResult:
+        """Store up to ``batch_max_items`` memories with per-item outcomes.
+
+        Exists so the end-of-session capture scan costs one round trip instead
+        of N. Every item goes through exactly the same validation, dedup and
+        similar-advisory path as ``remember``. Items succeed or fail alone
+        (partial success), but an empty or oversized batch is rejected whole
+        before anything persists. Domain and embedding failures stay per-item;
+        infrastructure failures propagate and fail the call.
+        """
+        if not items:
+            raise MemoryValidationError("batch must contain at least one item")
+        if len(items) > self._limits.batch_max_items:
+            raise MemoryValidationError(
+                f"batch exceeds {self._limits.batch_max_items} items"
+            )
+        outcomes: list[RememberBatchItemOutcome] = []
+        for item in items:
+            try:
+                result = await self.remember(
+                    user_id,
+                    content=item.content,
+                    category=item.category,
+                    project=item.project,
+                    importance=item.importance,
+                    metadata=item.metadata,
+                    source_client=source_client,
+                )
+            except (MemoryValidationError, EmbeddingError) as exc:
+                outcomes.append(RememberBatchItemOutcome(error=str(exc)))
+                continue
+            outcomes.append(
+                RememberBatchItemOutcome(
+                    created=result.created,
+                    memory=result.memory,
+                    similar=result.similar,
+                )
+            )
+        return RememberBatchResult(
+            results=outcomes,
+            stored=sum(1 for o in outcomes if o.memory is not None and o.created),
+            deduplicated=sum(
+                1 for o in outcomes if o.memory is not None and not o.created
+            ),
+            failed=sum(1 for o in outcomes if o.error is not None),
+        )
 
     # ------------------------------------------------------------------
     # update
@@ -275,6 +346,47 @@ class MemoryService:
         )
 
     # ------------------------------------------------------------------
+    # reassign project
+    # ------------------------------------------------------------------
+
+    async def reassign_project(
+        self,
+        user_id: uuid.UUID,
+        *,
+        from_project: str,
+        to_project: str,
+    ) -> ReassignResult:
+        """Move every active memory from one project key to another.
+
+        Deliberately absent from the MCP surface: changing a memory's project
+        changes its deduplication key, which makes this a person-supervised
+        migration (fixing key fragmentation after a move, fork or rename), not
+        an agent correction. Contents that already exist active under the
+        target key are skipped and reported as conflicts.
+        """
+        normalized_from = self._normalize_project(from_project)
+        normalized_to = self._normalize_project(to_project)
+        if normalized_from is None or normalized_to is None:
+            raise MemoryValidationError("both project keys are required")
+        if normalized_from == normalized_to:
+            raise MemoryValidationError("source and target project keys are identical")
+        try:
+            moved, conflicts = await self._repo.reassign_project(
+                user_id, from_project=normalized_from, to_project=normalized_to
+            )
+        except IntegrityError as exc:
+            raise MemoryValidationError(
+                "a concurrent write created a conflicting memory in the target "
+                "project; retry the migration"
+            ) from exc
+        return ReassignResult(
+            from_project=normalized_from,
+            to_project=normalized_to,
+            moved=moved,
+            conflicts=list(conflicts),
+        )
+
+    # ------------------------------------------------------------------
     # recall
     # ------------------------------------------------------------------
 
@@ -322,6 +434,7 @@ class MemoryService:
             RecalledMemory(**_to_memory_out(scored.memory).model_dump(), score=score)
             for scored, score in fused[:effective_limit]
         ]
+        await self._record_usage(user_id, [result.id for result in results])
         return RecallResult(query=normalized_query, mode=mode, results=results)
 
     def _reciprocal_rank_fusion(
@@ -343,6 +456,11 @@ class MemoryService:
         older ones is a statement about truth, not about relevance, and paying
         for it here would quietly bury long-standing constraints. It stays what
         it was: the tie-break.
+
+        Usage (``recall_count``) is wired as a fourth voter under the same
+        competition-ranking rules, but ships with ``recall_usage_weight`` at
+        0.0: being served often is a feedback loop (rich get richer), so it
+        may only influence ranking after real usage data justifies a weight.
         """
         scores: dict[uuid.UUID, float] = defaultdict(float)
         entries: dict[uuid.UUID, ScoredMemory] = {}
@@ -367,6 +485,17 @@ class MemoryService:
                     previous_importance = scored.memory.importance
                 scores[scored.memory.id] += weight / (RRF_K + rank)
 
+        usage_weight = self._limits.recall_usage_weight
+        if usage_weight:
+            by_usage = sorted(entries.values(), key=lambda s: -s.memory.recall_count)
+            rank = 0
+            previous_count: int | None = None
+            for position, scored in enumerate(by_usage, start=1):
+                if scored.memory.recall_count != previous_count:
+                    rank = position
+                    previous_count = scored.memory.recall_count
+                scores[scored.memory.id] += usage_weight / (RRF_K + rank)
+
         ranked = sorted(
             scores.items(), key=lambda item: entries[item[0]].memory.created_at, reverse=True
         )
@@ -382,11 +511,24 @@ class MemoryService:
         user_id: uuid.UUID,
         *,
         project: str | None = None,
+        focus: str | None = None,
         max_items: int | None = None,
         max_chars: int | None = None,
     ) -> ContextResult:
-        """Compact, category-grouped context: global memories plus project ones."""
+        """Compact, category-grouped context: global memories plus project ones.
+
+        ``focus`` biases the snapshot toward the task at hand: memories found
+        by the same hybrid retrieval as ``recall`` are added to the
+        importance-ranked pools -- never displacing them -- before budgeting.
+        The focused leg degrades to textual matching when embeddings are down;
+        a focused call must not fail because of its focus.
+        """
         normalized_project = self._normalize_project(project)
+        normalized_focus = (
+            self._normalize_content(focus)
+            if focus is not None and focus.strip()
+            else None
+        )
         effective_max_items = self._clamp_limit(
             max_items, self._limits.context_default_max_items, self._limits.context_max_items_cap
         )
@@ -411,12 +553,81 @@ class MemoryService:
             if normalized_project is not None
             else []
         )
+        # The request's full visibility: what "everything" means for this call.
+        visibility = (
+            MemoryVisibility.global_only()
+            if normalized_project is None
+            else MemoryVisibility.from_filters(scope=None, project=normalized_project)
+        )
+        focus_memories = (
+            await self._focus_matches(
+                user_id, query=normalized_focus, visibility=visibility
+            )
+            if normalized_focus is not None
+            else []
+        )
+        total_available = await self._repo.count_active_visible(
+            user_id, visibility=visibility
+        )
         budget = SessionContextBudget(
-            max_items=effective_max_items, max_chars=effective_max_chars
+            max_items=effective_max_items,
+            max_chars=effective_max_chars,
+            truncate_floor=self._limits.context_truncate_floor,
         )
-        return budget.assemble(
-            global_memories, project_memories, project=normalized_project
+        result = budget.assemble(
+            global_memories,
+            project_memories,
+            focus_memories,
+            project=normalized_project,
+            total_available=total_available,
+            focus=normalized_focus,
         )
+        await self._record_usage(
+            user_id, [item.id for group in result.groups for item in group.items]
+        )
+        return result
+
+    async def _focus_matches(
+        self,
+        user_id: uuid.UUID,
+        *,
+        query: str,
+        visibility: MemoryVisibility,
+    ) -> list[Memory]:
+        """Focus-relevant memories via the same hybrid retrieval as ``recall``.
+
+        Returns at most ``context_focus_limit`` rows. Degrades to textual
+        matching when the embedding service is down instead of failing.
+        """
+        embedding: list[float] | None = None
+        try:
+            embedding = await self._embeddings.embed(query)
+        except EmbeddingError:
+            logger.warning("embedding unavailable for context focus; using textual fallback")
+        limit = self._limits.context_focus_limit
+        pools = await self._repo.search_candidates(
+            user_id,
+            query=query,
+            embedding=embedding,
+            visibility=visibility,
+            category=None,
+            limit=min(MAX_CANDIDATES, max(limit * 3, 10)),
+        )
+        vector_candidates = list(pools.vector)
+        self._warn_on_embedding_model_drift(vector_candidates)
+        fused = self._reciprocal_rank_fusion(vector_candidates, list(pools.text))
+        return [scored.memory for scored, _ in fused[:limit]]
+
+    async def _record_usage(
+        self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]
+    ) -> None:
+        """Record served memories; a failure here never fails the read."""
+        if not memory_ids:
+            return
+        try:
+            await self._repo.mark_recalled(user_id, memory_ids)
+        except Exception:
+            logger.warning("usage recording failed; the result is unaffected", exc_info=True)
 
     # ------------------------------------------------------------------
     # list_memories
@@ -644,4 +855,7 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         source_client=memory.source_client,
         metadata=dict(memory.metadata_ or {}),
         created_at=memory.created_at,
+        reconfirmed_at=memory.reconfirmed_at,
+        last_recalled_at=memory.last_recalled_at,
+        recall_count=memory.recall_count,
     )

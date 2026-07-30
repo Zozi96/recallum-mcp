@@ -10,8 +10,9 @@ instructions always override recalled memory.
 
 ## Tool Names
 
-Recallum exposes six tools: `context`, `recall`, `remember`, `update`, `list_memories`, and
-`forget`. The prefix differs by client, because Claude Code namespaces a plugin-bundled MCP server:
+Recallum exposes seven tools: `context`, `recall`, `remember`, `remember_batch`, `update`,
+`list_memories`, and `forget`. The prefix differs by client, because Claude Code namespaces a
+plugin-bundled MCP server:
 
 | Client | Prefix | Example |
 | --- | --- | --- |
@@ -27,12 +28,20 @@ Below, tools are written unprefixed.
    context, hash the credential-free Git `origin`; if no origin exists, hash the repository root.
    The only scopes are `global` and `project`: use `global` only for durable information that truly
    applies across projects, such as a general user preference.
-2. At session start or resume, call `context` with `project`. Do this before planning when the tool
-   is available.
+2. At session start or resume, call `context` with `project` — unless the session hook already
+   injected the digest, in which case do not repeat the call. When the task is already known, pass
+   it as `focus` (a short task summary): the snapshot then also includes memories relevant to that
+   task. Do this before planning when the tool is available.
 3. When the user asks what was decided, preferred, constrained, remembered, or previously known,
-   call `recall` with a focused query and `project`.
+   call `recall` with a focused query and `project`. Also use `recall` whenever `context` reports
+   `omitted > 0` and the omitted material could matter, and to fetch the full text of items marked
+   `content_truncated`.
 4. Apply relevant results only after checking them against current instructions and current
    repository evidence. Treat stale or conflicting memory as historical context, not authority.
+   Use the freshness signals to judge: `reconfirmed_at` says when identical content was last
+   re-stored, `last_recalled_at`/`recall_count` say whether the memory is actually being used. An
+   old memory that was never reconfirmed deserves verification before being trusted; verifying one
+   is a good moment to re-store it unchanged, which stamps `reconfirmed_at`.
 5. After substantial work, run one capture scan: what newly verified context would save a future
    agent several minutes of rediscovery or prevent a likely mistake? Store only answers likely to
    remain true across sessions. Zero items is valid; prefer a few high-signal items over a recap,
@@ -46,13 +55,17 @@ Below, tools are written unprefixed.
    - `fact`: verified reusable context such as architecture, terminology, ownership, workflows,
      reusable commands that were verified, integration contracts, root causes, or recurring
      gotchas.
-7. Call `remember` once per atomic statement. Make it self-contained and specific enough to use
-   without this conversation. Do not store plans still under discussion, guesses, transient
-   status such as the current branch or worktree, temporary outages, logs, full conversations,
-   source-code inventories, or information already captured unchanged.
-8. Read the `similar` field on every `remember` result. It lists existing memories about the same
-   subject, which are otherwise invisible: the response shows your new memory and nothing else.
-   Similarity means the two are about the same thing, never that they agree. Read both and decide.
+7. Call `remember` once per atomic statement, or `remember_batch` when the capture scan produced
+   several (it applies the same rules per item and reports each outcome independently). Make each
+   statement self-contained and specific enough to use without this conversation. Do not store
+   plans still under discussion, guesses, transient status such as the current branch or worktree,
+   temporary outages, logs, full conversations, source-code inventories, or information already
+   captured unchanged.
+8. Read the `similar` field on every `remember` and `remember_batch` outcome. It lists existing
+   memories about the same subject — across every category, since a `fact` can contradict a
+   `decision` — which are otherwise invisible: the response shows your new memory and nothing
+   else. Similarity means the two are about the same thing, never that they agree. Read both and
+   decide.
 9. When a stored fact has changed, call `update` with the new `content` instead of `forget` plus
    `remember`. That retires the old memory and links it to its replacement, so the correction is
    recoverable and the two never both look current. Passing only `importance`, `category`, or
@@ -60,6 +73,15 @@ Below, tools are written unprefixed.
 10. Use `list_memories` only to browse or diagnose stored entries. Use `forget` only when the user
    requests removal or confirms an entry is wrong with nothing replacing it -- if something
    replaces it, that is `update`.
+
+## Delegation
+
+- When delegating work to a subagent, include the canonical project key and the relevant recalled
+  memories (or the context digest) directly in its prompt: subagents do not run the session hook
+  and may not have the Recallum tools at all.
+- Subagents do not write memories. They report durable findings back to the lead agent, which runs
+  the single capture scan at the end and consolidates before storing — parallel writers create
+  near-duplicate storms that exact dedup cannot catch.
 
 ## Safety
 
@@ -78,3 +100,5 @@ Below, tools are written unprefixed.
   approved.
 - Overlapping evidence was consolidated instead of stored as redundant memories.
 - No memory write was made when nothing durable was settled.
+- Delegated work carried the project key and relevant memories in the subagent prompt, and only the
+  lead agent wrote memories.

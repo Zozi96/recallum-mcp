@@ -39,12 +39,15 @@ def test_globals_come_before_project_memories_and_duplicates_collapse():
     shared = memory("shared")
     budget = SessionContextBudget(max_items=10, max_chars=1000)
 
-    result = budget.assemble([shared, memory("only global")], [shared], project="recallum")
+    result = budget.assemble(
+        [shared, memory("only global")], [shared], project="recallum", total_available=2
+    )
 
     assert flatten(result).count("shared") == 1
     assert result.total_items == 2
     assert result.project == "recallum"
     assert result.truncated is False
+    assert result.omitted == 0
 
 
 def test_groups_follow_the_declared_category_order():
@@ -59,6 +62,7 @@ def test_groups_follow_the_declared_category_order():
         ],
         [],
         project=None,
+        total_available=4,
     )
 
     assert [group.category for group in result.groups] == [
@@ -69,44 +73,125 @@ def test_groups_follow_the_declared_category_order():
     ]
 
 
-def test_item_budget_truncates_and_flags():
+def test_item_budget_truncates_flags_and_reports_omissions():
     budget = SessionContextBudget(max_items=2, max_chars=1000)
 
-    result = budget.assemble([memory(f"m{i}") for i in range(5)], [], project=None)
+    result = budget.assemble(
+        [memory(f"m{i}") for i in range(5)], [], project=None, total_available=5
+    )
 
     assert result.total_items == 2
     assert result.truncated is True
+    assert result.total_available == 5
+    assert result.omitted == 3
 
 
-def test_a_short_memory_after_an_oversized_one_is_still_kept():
-    """F2: an item that does not fit no longer abandons the rest of its category."""
+def test_an_oversized_item_stops_assembly_instead_of_back_filling():
+    """A long item no longer gets silently skipped in favour of shorter, less
+    important ones: with no room to clip (floor > leftover), assembly stops,
+    preserving strict importance order."""
     budget = SessionContextBudget(max_items=10, max_chars=20)
 
     result = budget.assemble(
         [memory("x" * 50, category="fact"), memory("short", category="fact")],
         [],
         project=None,
+        total_available=2,
     )
 
-    assert flatten(result) == ["short"]
+    assert flatten(result) == []
+    assert result.truncated is True
+    assert result.omitted == 2
+
+
+def test_an_oversized_item_is_clipped_and_marked_when_room_remains():
+    budget = SessionContextBudget(max_items=10, max_chars=30, truncate_floor=10)
+
+    result = budget.assemble(
+        [memory("y" * 50), memory("never reached")], [], project=None, total_available=2
+    )
+
+    items = [item for group in result.groups for item in group.items]
+    assert len(items) == 1
+    assert items[0].content_truncated is True
+    assert len(items[0].content) == 30
+    assert items[0].content.endswith("…")
     assert result.truncated is True
 
 
 def test_char_budget_is_never_exceeded():
     budget = SessionContextBudget(max_items=50, max_chars=30)
 
-    result = budget.assemble([memory("y" * 12) for _ in range(10)], [], project=None)
+    result = budget.assemble(
+        [memory("y" * 12) for _ in range(10)], [], project=None, total_available=10
+    )
 
     kept = flatten(result)
     assert sum(len(content) for content in kept) <= 30
     assert result.truncated is True
 
 
+def test_focus_memories_lead_their_category_and_collapse_duplicates():
+    important = memory("an important fact", importance=9)
+    focused_duplicate = important
+    focused_new = memory("a task-relevant fact", importance=1)
+    budget = SessionContextBudget(max_items=10, max_chars=1000)
+
+    result = budget.assemble(
+        [important],
+        [],
+        [focused_new, focused_duplicate],
+        project=None,
+        total_available=2,
+        focus="the task",
+    )
+
+    # Focus hits open their category in relevance order; the duplicate keeps
+    # its focused position instead of appearing twice.
+    assert flatten(result) == ["a task-relevant fact", "an important fact"]
+    assert result.focus == "the task"
+    assert result.omitted == 0
+
+
+def test_focus_memories_survive_a_tight_budget_and_keep_category_order():
+    generic_constraint = memory("generic constraint", category="constraint", importance=9)
+    generic_facts = [memory(f"generic fact {i}", importance=8) for i in range(3)]
+    focused_fact = memory("the fact this session is about", importance=1)
+    budget = SessionContextBudget(max_items=2, max_chars=1000)
+
+    result = budget.assemble(
+        [generic_constraint, *generic_facts],
+        [],
+        [focused_fact],
+        project=None,
+        total_available=5,
+        focus="the task",
+    )
+
+    # Categories still lead with constraints; within facts, the focused hit
+    # outranks generically important ones instead of being cut by the budget.
+    assert flatten(result) == ["generic constraint", "the fact this session is about"]
+    assert result.omitted == 3
+
+
+def test_omitted_reflects_totals_beyond_the_fetch_window():
+    """``total_available`` comes from a count, so omissions the fetch window
+    never saw are still reported."""
+    budget = SessionContextBudget(max_items=10, max_chars=1000)
+
+    result = budget.assemble([memory("only one")], [], project=None, total_available=80)
+
+    assert result.total_items == 1
+    assert result.omitted == 79
+    assert result.truncated is True
+
+
 def test_empty_input_produces_an_untruncated_empty_snapshot():
     budget = SessionContextBudget(max_items=10, max_chars=1000)
 
-    result = budget.assemble([], [], project=None)
+    result = budget.assemble([], [], project=None, total_available=0)
 
     assert result.groups == []
     assert result.total_items == 0
     assert result.truncated is False
+    assert result.omitted == 0

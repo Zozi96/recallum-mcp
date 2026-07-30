@@ -385,3 +385,46 @@ def test_versioned_openapi_matches_web_app_only():
     assert "content_hash" not in serialized
     assert "key_hash" not in serialized
     assert Path(OUTPUT).name == "web-v1.json"
+
+
+def test_reassign_project_moves_memories_and_reports_conflicts():
+    container, fakes = build_test_container()
+    alice = _user(container, "alice@example.com")
+    app = create_app(Settings(), container)
+
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, alice.email)
+
+        def create(content: str, project: str) -> str:
+            response = client.post(
+                "/api/v1/me/memories",
+                json={"content": content, "category": "fact", "project": project},
+            )
+            assert response.status_code == 201
+            return response.json()["memory"]["id"]
+
+        moved_id = create("only in the old key", "local:old")
+        conflict_id = create("present in both keys", "local:old")
+        create("present in both keys", "remote:new")
+
+        result = client.post(
+            "/api/v1/me/memories/reassign-project",
+            json={"from_project": "local:old", "to_project": "remote:new"},
+        )
+        assert result.status_code == 200
+        body = result.json()
+        assert body["moved"] == 1
+        assert body["conflicts"] == [conflict_id]
+        assert fakes["memories"].rows[uuid.UUID(moved_id)].project == "remote:new"
+
+        rejected = client.post(
+            "/api/v1/me/memories/reassign-project",
+            json={"from_project": "remote:new", "to_project": "remote:new"},
+        )
+        assert rejected.status_code == 422
+
+        # Freshness and usage signals are part of the memory payload now.
+        detail = client.get(f"/api/v1/me/memories/{moved_id}")
+        assert detail.status_code == 200
+        assert detail.json()["recall_count"] == 0
+        assert "reconfirmed_at" in detail.json()

@@ -1,34 +1,6 @@
-# Agent Memory Retrieval
+# Agent Memory Retrieval (delta)
 
-## Purpose
-
-Definir la recuperación híbrida, filtrada y compacta de memorias privadas para agentes.
-## Requirements
-### Requirement: Búsqueda híbrida de memorias
-El sistema MUST recuperar memorias mediante señales vectoriales y textuales, aplicando aislamiento de usuario antes de ordenar los resultados.
-
-#### Scenario: Recuperar por significado
-- **WHEN** un usuario llama `recall` con una consulta semánticamente relacionada pero con palabras diferentes
-- **THEN** el sistema puede devolver sus memorias vectorialmente relevantes dentro del límite solicitado
-
-#### Scenario: Recuperar término exacto
-- **WHEN** una consulta contiene un término técnico exacto presente en una memoria
-- **THEN** la señal textual participa en el orden de relevancia del resultado
-
-#### Scenario: Consulta sin resultados
-- **WHEN** ninguna memoria activa del usuario satisface la consulta y los filtros
-- **THEN** el sistema devuelve una lista vacía sin incluir memorias de otros usuarios
-
-### Requirement: Filtros de recuperación
-El sistema MUST permitir filtrar recuperación por ámbito global, proyecto y categoría sin aceptar un identificador de usuario proporcionado por el cliente.
-
-#### Scenario: Recuperar contexto de proyecto
-- **WHEN** un usuario consulta un proyecto concreto
-- **THEN** el sistema considera sus memorias globales y las memorias de ese proyecto, excluyendo las de proyectos distintos
-
-#### Scenario: Recuperar sólo decisiones
-- **WHEN** un usuario filtra `recall` por la categoría `decision`
-- **THEN** el sistema devuelve únicamente decisiones activas del ámbito solicitado
+## MODIFIED Requirements
 
 ### Requirement: Contexto compacto de sesión
 El sistema MUST generar contexto compacto con memorias globales y del proyecto respetando límites de
@@ -60,12 +32,7 @@ presupuesto, y MUST informar cuántas memorias activas visibles quedaron fuera d
 - **WHEN** un ítem no cabe completo en el presupuesto de caracteres restante pero queda espacio razonable
 - **THEN** el sistema incluye el ítem recortado marcándolo como truncado, en lugar de omitirlo y rellenar con ítems menos importantes
 
-### Requirement: Degradación textual
-El sistema MUST mantener búsquedas textuales disponibles cuando PostgreSQL funciona pero Ollama no puede generar el embedding de una consulta.
-
-#### Scenario: Ollama no disponible durante recall
-- **WHEN** el servicio de embeddings falla al procesar una consulta
-- **THEN** `recall` devuelve resultados textuales marcando el modo degradado en la respuesta
+## ADDED Requirements
 
 ### Requirement: Registro de uso al servir memorias
 El sistema MUST registrar por memoria cuántas veces y cuándo fue servida en resultados de `recall` o
@@ -87,4 +54,3 @@ lectura que lo origina.
 #### Scenario: Enumeración no cuenta como uso
 - **WHEN** una memoria aparece únicamente en `list_memories`
 - **THEN** su contador de uso no cambia
-

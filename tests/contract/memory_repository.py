@@ -628,7 +628,6 @@ class MemoryRepositoryContract:
             target,
             scope="global",
             project=None,
-            category="fact",
             min_similarity=0.9,
             limit=5,
         )
@@ -636,7 +635,7 @@ class MemoryRepositoryContract:
         assert near.id in ids
         assert far.id not in ids
 
-    async def test_similar_active_excludes_itself_other_buckets_and_deleted(
+    async def test_similar_active_crosses_categories_but_not_scope_or_deleted(
         self, repo, user_id
     ):
         target = _embedding(4242)
@@ -678,15 +677,150 @@ class MemoryRepositoryContract:
             target,
             scope="global",
             project=None,
-            category="fact",
             min_similarity=0.9,
             limit=5,
             exclude_id=itself.id,
         )
         ids = {r.memory.id for r in results}
-        assert ids.isdisjoint(
-            {itself.id, other_category.id, other_project.id, deleted.id}
+        # Category is a filing label, not a namespace: a near-duplicate stored
+        # under another category is exactly what must surface.
+        assert other_category.id in ids
+        assert ids.isdisjoint({itself.id, other_project.id, deleted.id})
+
+    # -- freshness, usage and reassignment -------------------------------
+
+    async def test_mark_reconfirmed_stamps_own_active_rows_only(
+        self, repo, user_id, other_user_id
+    ):
+        created = await repo.create_memory(
+            user_id, **self._kwargs(content="fresh claim", content_hash=_hash("fresh"))
         )
+        assert created.reconfirmed_at is None
+
+        stamped = await repo.mark_reconfirmed(user_id, created.id)
+        assert stamped is not None
+        assert stamped.reconfirmed_at is not None
+
+        assert await repo.mark_reconfirmed(other_user_id, created.id) is None
+        assert await repo.mark_reconfirmed(user_id, uuid.uuid4()) is None
+        await repo.soft_delete(user_id, created.id)
+        assert await repo.mark_reconfirmed(user_id, created.id) is None
+
+    async def test_mark_recalled_increments_usage_for_own_active_rows(
+        self, repo, user_id, other_user_id
+    ):
+        mine = await repo.create_memory(
+            user_id, **self._kwargs(content="usage mine", content_hash=_hash("usage-mine"))
+        )
+        foreign = await repo.create_memory(
+            other_user_id,
+            **self._kwargs(content="usage foreign", content_hash=_hash("usage-foreign")),
+        )
+
+        await repo.mark_recalled(user_id, [mine.id, foreign.id])
+        await repo.mark_recalled(user_id, [mine.id])
+        await repo.mark_recalled(user_id, [])
+
+        refreshed = await repo.get_active(user_id, mine.id)
+        assert refreshed.recall_count == 2
+        assert refreshed.last_recalled_at is not None
+        untouched = await repo.get_active(other_user_id, foreign.id)
+        assert untouched.recall_count == 0
+        assert untouched.last_recalled_at is None
+
+    async def test_count_active_visible_follows_the_visibility_filter(self, repo, user_id):
+        await repo.create_memory(
+            user_id, **self._kwargs(content="count global", content_hash=_hash("count-g"))
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="count alpha",
+                content_hash=_hash("count-a"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+        retired = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="count retired",
+                content_hash=_hash("count-r"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+        await repo.soft_delete(user_id, retired.id)
+
+        assert (
+            await repo.count_active_visible(
+                user_id, visibility=MemoryVisibility.global_only()
+            )
+            == 1
+        )
+        assert (
+            await repo.count_active_visible(
+                user_id,
+                visibility=MemoryVisibility.from_filters(scope=None, project="alpha"),
+            )
+            == 2
+        )
+        assert (
+            await repo.count_active_visible(
+                user_id, visibility=MemoryVisibility.project_only("beta")
+            )
+            == 0
+        )
+
+    async def test_reassign_project_moves_non_colliding_and_reports_conflicts(
+        self, repo, user_id, other_user_id
+    ):
+        movable = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="only in the old key",
+                content_hash=_hash("reassign-unique"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+        colliding = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="present in both keys",
+                content_hash=_hash("reassign-shared"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="present in both keys",
+                content_hash=_hash("reassign-shared"),
+                scope="project",
+                project="beta",
+            ),
+        )
+        foreign = await repo.create_memory(
+            other_user_id,
+            **self._kwargs(
+                content="foreign row",
+                content_hash=_hash("reassign-foreign"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+
+        moved, conflicts = await repo.reassign_project(
+            user_id, from_project="alpha", to_project="beta"
+        )
+
+        assert moved == 1
+        assert conflicts == [colliding.id]
+        assert (await repo.get_active(user_id, movable.id)).project == "beta"
+        assert (await repo.get_active(user_id, colliding.id)).project == "alpha"
+        assert (await repo.get_active(other_user_id, foreign.id)).project == "alpha"
 
     # -- graph_snapshot --------------------------------------------------
 

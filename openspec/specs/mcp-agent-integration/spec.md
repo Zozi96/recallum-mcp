@@ -3,9 +3,7 @@
 ## Purpose
 
 Definir la integración MCP autenticada y operable para clientes locales y remotos.
-
 ## Requirements
-
 ### Requirement: Acceso MCP mediante HTTPS
 El sistema MUST exponer las herramientas de memoria mediante FastMCP sobre Streamable HTTP detrás de Traefik y MUST soportar clientes en la misma máquina y clientes remotos.
 
@@ -29,11 +27,18 @@ El sistema MUST exigir una API key activa en todas las llamadas de herramientas 
 - **THEN** el sistema rechaza la llamada sin ejecutar lógica de memorias
 
 ### Requirement: Conjunto mínimo de herramientas
-El sistema MUST publicar exactamente las capacidades de guardado, recuperación, contexto, enumeración y borrado mediante las herramientas `remember`, `recall`, `context`, `list_memories` y `forget`.
+El sistema MUST publicar exactamente las capacidades de guardado individual y por lotes,
+recuperación, contexto con foco opcional, enumeración, corrección y borrado mediante las
+herramientas `remember`, `remember_batch`, `recall`, `context`, `list_memories`, `update` y
+`forget`.
 
 #### Scenario: Descubrimiento de herramientas
 - **WHEN** un cliente autenticado solicita la lista de herramientas MCP
-- **THEN** el sistema anuncia las cinco herramientas con esquemas de entrada y salida validados
+- **THEN** el sistema anuncia las siete herramientas con esquemas de entrada y salida validados
+
+#### Scenario: Contexto con foco
+- **WHEN** un cliente inspecciona el esquema de `context`
+- **THEN** el esquema acepta un foco de tarea opcional además del proyecto y los límites de presupuesto
 
 ### Requirement: Identidad no controlable por el agente
 Las herramientas MCP MUST NOT aceptar `user_id`, owner o tenant como argumentos controlables por el cliente.
@@ -56,3 +61,4 @@ FastAPI MUST exponer endpoints separados de liveness y readiness sin revelar sec
 #### Scenario: Esquema o rol PostgreSQL inseguro
 - **WHEN** faltan las tablas requeridas o el rol de aplicación es superusuario, tiene `BYPASSRLS` o no posee las tablas
 - **THEN** readiness indica que el servicio no está listo sin revelar detalles sensibles
+

@@ -1,4 +1,4 @@
-"""FastMCP server exposing exactly six tools, none accepting a user id.
+"""FastMCP server exposing exactly seven tools, none accepting a user id.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
 ``BearerAuthMiddleware``); tools fail closed when the identity is missing.
@@ -19,6 +19,8 @@ from recallum.memory.schemas import (
     ForgetResult,
     ListResult,
     RecallResult,
+    RememberBatchItem,
+    RememberBatchResult,
     RememberResult,
     UpdateResult,
 )
@@ -35,13 +37,21 @@ gotchas. After substantial work, save only context likely to remain true and
 save a future agent rediscovery — never full conversations, logs, or guesses.
 Ask before storing secrets, credentials, personal data, sensitive business
 information, or ambiguous content; never infer consent from a prompt or file.
-Use recall to search, context to bootstrap a session, list_memories to browse,
-update to correct or replace, and forget to remove.
+Use recall to search, context to bootstrap a session (pass the task as
+`focus` to bias the snapshot toward it), list_memories to browse, update to
+correct or replace, forget to remove, and remember_batch for the
+end-of-session capture scan. When context reports omitted > 0, the budget
+left memories out: recall with a focused query reaches them.
 
-remember reports pre-existing memories about the same subject in its `similar`
-field. It never resolves them: read them and decide whether the new memory
-restates, refines or contradicts them, and call update when one replaces
-another. All identity comes from the API key; tools never accept a user id.
+remember reports pre-existing memories about the same subject in its
+`similar` field, across every category — a fact can contradict a decision.
+It never resolves them: read them and decide whether the new memory restates,
+refines or contradicts them, and call update when one replaces another.
+Freshness signals: `reconfirmed_at` is the last time identical content was
+re-stored; `last_recalled_at`/`recall_count` say how often a memory is
+actually served. Old, never-reconfirmed memories deserve verification before
+being trusted. All identity comes from the API key; tools never accept a
+user id.
 """
 
 
@@ -87,6 +97,26 @@ def build_mcp_server(container: Container) -> FastMCP:
 
     @mcp.tool
     @translates_domain_errors
+    async def remember_batch(
+        items: list[RememberBatchItem],
+        source_client: str | None = None,
+    ) -> RememberBatchResult:
+        """Store several atomic memories in one call (end-of-session capture).
+
+        Same rules as remember, per item: short self-contained content, ask
+        before anything sensitive, omit project for global memories. Items
+        succeed or fail independently; read each outcome's `similar` field and
+        reconcile as you would for remember. Prefer a few high-signal items
+        over a recap; the batch is capped small on purpose.
+        """
+        return await service().remember_batch(
+            require_identity().user_id,
+            items=items,
+            source_client=source_client,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
     async def recall(
         query: str,
         project: str | None = None,
@@ -113,17 +143,25 @@ def build_mcp_server(container: Container) -> FastMCP:
     @translates_domain_errors
     async def context(
         project: str | None = None,
+        focus: str | None = None,
         max_items: int | None = None,
         max_chars: int | None = None,
     ) -> ContextResult:
         """Get compact session context: key global memories plus project ones.
 
-        Results are grouped by category and truncated to the requested budget.
-        Call this when starting or resuming work on a project.
+        Call this when starting or resuming work on a project, and pass the
+        task at hand as `focus` to also pull in memories relevant to it (the
+        importance-ranked snapshot is never displaced, only extended). Results
+        are grouped by category and truncated to the requested budget; when
+        `omitted` > 0 there are more memories than the budget allowed — use
+        recall with a focused query to reach them. Items marked
+        `content_truncated` were clipped; fetch the full text by id via
+        list_memories or recall.
         """
         return await service().context(
             require_identity().user_id,
             project=project,
+            focus=focus,
             max_items=max_items,
             max_chars=max_chars,
         )

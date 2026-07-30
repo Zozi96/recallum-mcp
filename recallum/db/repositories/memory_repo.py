@@ -479,17 +479,19 @@ class MemoryRepository:
         *,
         scope: str,
         project: str | None,
-        category: str,
         min_similarity: float,
         limit: int,
         exclude_id: uuid.UUID | None = None,
     ) -> Sequence[ScoredMemory]:
         """Active memories close enough to ``embedding`` to be about the same thing.
 
-        Scoped to the same scope, project and category, because two memories can
-        only conflict if they are claims of the same kind about the same
-        subject. Similarity is evidence of overlap, never of contradiction --
-        that judgement needs to read the content, and is the caller's.
+        Scoped to the same scope and project -- those are deliberate namespaces.
+        Category is deliberately NOT filtered: it is a filing label agents get
+        wrong often enough that a near-duplicate stored under another category
+        is the common way contradictions accumulate unseen. Each hit carries its
+        category, so a filing mismatch is visible to the caller. Similarity is
+        evidence of overlap, never of contradiction -- that judgement needs to
+        read the content, and is the caller's.
         """
         async with self._sessions.for_user(user_id) as session:
             await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
@@ -500,7 +502,6 @@ class MemoryRepository:
                 Memory.deleted_at.is_(None),
                 Memory.scope == scope,
                 func.coalesce(Memory.project, "") == (project or ""),
-                Memory.category == category,
                 distance <= (1.0 - min_similarity),
             ]
             if exclude_id is not None:
@@ -638,6 +639,118 @@ class MemoryRepository:
             )
             result = await session.execute(stmt)
             return result.rowcount == 1
+
+    async def mark_reconfirmed(
+        self, user_id: uuid.UUID, memory_id: uuid.UUID
+    ) -> Memory | None:
+        """Stamp ``reconfirmed_at`` on an active memory and return the fresh row.
+
+        Called when identical content is re-stored: the claim was just observed
+        to still hold, which is a freshness signal, not a new claim. Returns
+        ``None`` for unknown, foreign or retired ids.
+        """
+        async with self._sessions.for_user(user_id) as session:
+            result = await session.execute(
+                update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.user_id == user_id,
+                    Memory.deleted_at.is_(None),
+                )
+                .values(reconfirmed_at=func.now())
+            )
+            if result.rowcount != 1:
+                return None
+            return (
+                await session.execute(
+                    select(Memory)
+                    .options(*_light())
+                    .where(Memory.id == memory_id, Memory.user_id == user_id)
+                )
+            ).scalar_one_or_none()
+
+    async def mark_recalled(
+        self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
+    ) -> None:
+        """Record that these memories were served in a recall/context result.
+
+        One bounded UPDATE, outside the read that produced the ids. Callers
+        treat failure as loggable noise: usage is a signal, never a dependency
+        of the read path.
+        """
+        if not memory_ids:
+            return
+        async with self._sessions.for_user(user_id) as session:
+            await session.execute(
+                update(Memory)
+                .where(
+                    Memory.user_id == user_id,
+                    Memory.id.in_(list(memory_ids)),
+                    Memory.deleted_at.is_(None),
+                )
+                .values(
+                    recall_count=Memory.recall_count + 1,
+                    last_recalled_at=func.now(),
+                )
+            )
+
+    async def count_active_visible(
+        self, user_id: uuid.UUID, *, visibility: MemoryVisibility
+    ) -> int:
+        """Count active rows under a visibility filter (context transparency)."""
+        async with self._sessions.for_user(user_id) as session:
+            return (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(*self._filters(user_id, visibility=visibility, category=None))
+                )
+            ).scalar_one()
+
+    async def reassign_project(
+        self,
+        user_id: uuid.UUID,
+        *,
+        from_project: str,
+        to_project: str,
+    ) -> tuple[int, list[uuid.UUID]]:
+        """Move every active memory from one project key to another.
+
+        A key migration, not an edit: content, embeddings and scope are
+        untouched, so no re-embedding is needed. Rows whose content already
+        exists active under the target key are left in place and reported --
+        moving them would break the dedup key, and choosing which duplicate
+        survives is the owner's call, not this method's. Both statements share
+        one transaction so the conflict list matches what was actually skipped.
+        """
+        async with self._sessions.for_user(user_id) as session:
+            target_hashes = select(Memory.content_hash).where(
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+                Memory.scope == "project",
+                Memory.project == to_project,
+            )
+            source_filters = [
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+                Memory.scope == "project",
+                Memory.project == from_project,
+            ]
+            conflicts = list(
+                (
+                    await session.execute(
+                        select(Memory.id)
+                        .where(*source_filters, Memory.content_hash.in_(target_hashes))
+                        .order_by(Memory.created_at.desc(), Memory.id)
+                    )
+                ).scalars()
+            )
+            moved = await session.execute(
+                update(Memory)
+                .where(*source_filters, Memory.content_hash.not_in(target_hashes))
+                .values(project=to_project)
+            )
+            return int(moved.rowcount or 0), conflicts
 
     def _filters(
         self,

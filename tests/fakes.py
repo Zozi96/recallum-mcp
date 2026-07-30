@@ -148,6 +148,11 @@ class FakeMemoryRepository:
             created_at=datetime.now(UTC),
             deleted_at=None,
             metadata_=metadata,
+            # ORM column defaults only apply at flush time, so the fake must
+            # supply what PostgreSQL would.
+            reconfirmed_at=None,
+            last_recalled_at=None,
+            recall_count=0,
             **kwargs,
         )
         self.rows[memory.id] = memory
@@ -286,22 +291,71 @@ class FakeMemoryRepository:
         *,
         scope: str,
         project: str | None,
-        category: str,
         min_similarity: float,
         limit: int,
         exclude_id: uuid.UUID | None = None,
     ) -> Sequence[ScoredMemory]:
+        # Deliberately category-blind, matching the adapter: a near-duplicate
+        # filed under another category is exactly what must surface.
         scored = [
             ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
             for m in self._active(user_id)
-            if m.scope == scope
-            and (m.project or "") == (project or "")
-            and m.category == category
-            and m.id != exclude_id
+            if m.scope == scope and (m.project or "") == (project or "") and m.id != exclude_id
         ]
         scored = [s for s in scored if s.score >= min_similarity]
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:limit]
+
+    async def mark_reconfirmed(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
+        memory = self.rows.get(memory_id)
+        if memory is None or memory.user_id != user_id or memory.is_deleted:
+            return None
+        memory.reconfirmed_at = datetime.now(UTC)
+        return memory
+
+    async def mark_recalled(self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]) -> None:
+        now = datetime.now(UTC)
+        for memory_id in memory_ids:
+            memory = self.rows.get(memory_id)
+            if memory is None or memory.user_id != user_id or memory.is_deleted:
+                continue
+            memory.recall_count = (memory.recall_count or 0) + 1
+            memory.last_recalled_at = now
+
+    async def count_active_visible(
+        self, user_id: uuid.UUID, *, visibility: MemoryVisibility
+    ) -> int:
+        return len(self._filtered(user_id, visibility, None))
+
+    async def reassign_project(
+        self,
+        user_id: uuid.UUID,
+        *,
+        from_project: str,
+        to_project: str,
+    ) -> tuple[int, list[uuid.UUID]]:
+        target_hashes = {
+            m.content_hash
+            for m in self._active(user_id)
+            if m.scope == "project" and m.project == to_project
+        }
+        source = [
+            m
+            for m in self._active(user_id)
+            if m.scope == "project" and m.project == from_project
+        ]
+        conflicts = sorted(
+            (m for m in source if m.content_hash in target_hashes),
+            key=lambda m: (m.created_at, str(m.id)),
+        )
+        conflicts.sort(key=lambda m: m.created_at, reverse=True)
+        moved = 0
+        for memory in source:
+            if memory.content_hash in target_hashes:
+                continue
+            memory.project = to_project
+            moved += 1
+        return moved, [m.id for m in conflicts]
 
     async def update_attributes(
         self,
@@ -363,6 +417,9 @@ class FakeMemoryRepository:
             metadata_=metadata if metadata is not None else dict(original.metadata_ or {}),
             created_at=datetime.now(UTC),
             deleted_at=None,
+            reconfirmed_at=None,
+            last_recalled_at=None,
+            recall_count=0,
         )
         self.rows[replacement.id] = replacement
         original.deleted_at = datetime.now(UTC)

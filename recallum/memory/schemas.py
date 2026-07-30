@@ -16,7 +16,14 @@ RecallMode = Literal["hybrid", "degraded_textual"]
 
 
 class MemoryOut(BaseModel):
-    """A stored memory as returned to agents."""
+    """A stored memory as returned to agents.
+
+    ``reconfirmed_at`` is the last time identical content was re-stored: a
+    freshness signal that the claim still held then. ``last_recalled_at`` and
+    ``recall_count`` say when and how often this memory was served in recall or
+    context results, as of before the response carrying them was produced.
+    NULL / 0 mean "no signal yet".
+    """
 
     id: uuid.UUID
     scope: Literal["global", "project"]
@@ -27,6 +34,9 @@ class MemoryOut(BaseModel):
     source_client: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    reconfirmed_at: datetime | None = None
+    last_recalled_at: datetime | None = None
+    recall_count: int = 0
 
 
 class SimilarMemory(BaseModel):
@@ -44,6 +54,7 @@ class SimilarMemory(BaseModel):
     importance: int
     similarity: float
     created_at: datetime
+    reconfirmed_at: datetime | None = None
 
 
 class RememberResult(BaseModel):
@@ -59,6 +70,52 @@ class RememberResult(BaseModel):
     memory: MemoryOut
     created: bool
     similar: list[SimilarMemory] = Field(default_factory=list)
+
+
+class RememberBatchItem(BaseModel):
+    """One memory to store inside a ``remember_batch`` call."""
+
+    content: str
+    category: Literal["preference", "decision", "constraint", "fact"]
+    project: str | None = None
+    importance: int = 5
+    metadata: dict[str, Any] | None = None
+
+
+class RememberBatchItemOutcome(BaseModel):
+    """Per-item outcome of ``remember_batch``; items succeed or fail alone.
+
+    Exactly one of ``memory`` or ``error`` is set. ``created`` and ``similar``
+    mean the same as in ``RememberResult``.
+    """
+
+    created: bool = False
+    memory: MemoryOut | None = None
+    similar: list[SimilarMemory] = Field(default_factory=list)
+    error: str | None = None
+
+
+class RememberBatchResult(BaseModel):
+    """Outcome of ``remember_batch``: one entry per input item, same order."""
+
+    results: list[RememberBatchItemOutcome]
+    stored: int
+    deduplicated: int
+    failed: int
+
+
+class ReassignResult(BaseModel):
+    """Outcome of a project-key migration.
+
+    ``conflicts`` are memories whose content already exists active under the
+    target key: they stayed in place, and resolving the duplication is the
+    owner's decision.
+    """
+
+    from_project: str
+    to_project: str
+    moved: int
+    conflicts: list[uuid.UUID]
 
 
 class UpdateResult(BaseModel):
@@ -90,7 +147,11 @@ class RecallResult(BaseModel):
 
 
 class ContextItem(BaseModel):
-    """A compact memory entry inside a context group."""
+    """A compact memory entry inside a context group.
+
+    ``content_truncated`` marks an entry clipped to fit the character budget;
+    the full content is retrievable by id via ``recall`` or ``list_memories``.
+    """
 
     id: uuid.UUID
     category: Literal["preference", "decision", "constraint", "fact"]
@@ -99,6 +160,8 @@ class ContextItem(BaseModel):
     project: str | None = None
     importance: int
     created_at: datetime
+    reconfirmed_at: datetime | None = None
+    content_truncated: bool = False
 
 
 class ContextGroup(BaseModel):
@@ -109,11 +172,21 @@ class ContextGroup(BaseModel):
 
 
 class ContextResult(BaseModel):
-    """Compact session context within the requested budget."""
+    """Compact session context within the requested budget.
+
+    ``total_available`` counts every active memory visible to the request;
+    ``omitted`` is how many of those the budget left out. When ``omitted`` is
+    positive, ``recall`` with a focused query is the way to reach the rest.
+    ``focus`` echoes the task focus that biased the snapshot, when one was
+    given.
+    """
 
     project: str | None = None
+    focus: str | None = None
     groups: list[ContextGroup]
     total_items: int
+    total_available: int
+    omitted: int
     truncated: bool
 
 

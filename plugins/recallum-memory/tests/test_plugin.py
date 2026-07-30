@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ast
+import http.server
 import json
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -92,7 +94,9 @@ def run_hook(
     event: str, payload: str, client_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    for key in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+    # Also drop the digest opt-in variables: a developer with them exported
+    # must not turn every hint test into a live network call.
+    for key in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "RECALLUM_MCP_URL", "RECALLUM_API_KEY"):
         env.pop(key, None)
     env.update(client_env or {})
     return subprocess.run(
@@ -186,6 +190,30 @@ class HookTests(unittest.TestCase):
                 )
             self.assertNotEqual(contexts[0], contexts[1])
 
+    def test_project_key_falls_back_to_any_remote_when_origin_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "remote",
+                    "add",
+                    "upstream",
+                    "https://example.com/owner/repo.git",
+                ],
+                check=True,
+            )
+            result = run_hook("session", json.dumps({"cwd": str(root)}))
+            context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("project='remote:", context)
+
+    def test_session_hint_makes_missing_tools_visible(self) -> None:
+        context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
+        self.assertIn("tell the user once", context)
+
     def test_untrusted_git_remote_is_replaced_with_opaque_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -241,6 +269,189 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+
+class _StubMCPHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal MCP streamable-HTTP endpoint: initialize / initialized / tools/call."""
+
+    requests: list[dict] = []
+    context_result: dict = {}
+    fail_with: int | None = None
+    sse_tools_call: bool = False
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server API)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            body = {}
+        type(self).requests.append(
+            {"path": self.path, "headers": dict(self.headers), "body": body}
+        )
+        failure_code = type(self).fail_with
+        if failure_code is not None:
+            self.send_response(failure_code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        method = body.get("method")
+        if method == "initialize":
+            self._reply_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": body.get("id"),
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "serverInfo": {"name": "stub", "version": "0"},
+                    },
+                },
+                extra_headers={"mcp-session-id": "stub-session"},
+            )
+        elif method == "notifications/initialized":
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif method == "tools/call":
+            payload = {
+                "jsonrpc": "2.0",
+                "id": body.get("id"),
+                "result": {
+                    "content": [],
+                    "structuredContent": type(self).context_result,
+                    "isError": False,
+                },
+            }
+            if type(self).sse_tools_call:
+                data = ("event: message\ndata: " + json.dumps(payload) + "\n\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._reply_json(payload)
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    def _reply_json(self, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        del format, args  # silence the test log
+
+
+class DigestTests(unittest.TestCase):
+    """The opt-in session digest: inlined when reachable, invisible when not."""
+
+    def setUp(self) -> None:
+        _StubMCPHandler.requests = []
+        _StubMCPHandler.context_result = {}
+        _StubMCPHandler.fail_with = None
+        _StubMCPHandler.sse_tools_call = False
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StubMCPHandler)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/mcp"
+
+    def _digest_env(self) -> dict[str, str]:
+        return {
+            "RECALLUM_MCP_URL": self.url,
+            "RECALLUM_API_KEY": "test-key",
+            "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+        }
+
+    def _session_context(self) -> str:
+        result = run_hook("session", json.dumps({"cwd": "/work/alpha"}), self._digest_env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    def test_digest_is_inlined_and_replaces_the_context_instruction(self) -> None:
+        _StubMCPHandler.context_result = {
+            "project": "local:abc",
+            "groups": [
+                {
+                    "category": "constraint",
+                    "items": [
+                        {"category": "constraint", "content": "never bypass RLS"},
+                    ],
+                }
+            ],
+            "total_items": 1,
+            "total_available": 4,
+            "omitted": 3,
+            "truncated": True,
+        }
+        context = self._session_context()
+        self.assertIn("- [constraint] never bypass RLS", context)
+        self.assertIn("+3 more stored memories", context)
+        self.assertIn("already loaded", context)
+        self.assertNotIn("before planning, call", context)
+        # Every request carried the bearer key; the follow-ups carried the
+        # session id the stub handed out.
+        self.assertTrue(
+            all(
+                request["headers"].get("Authorization") == "Bearer test-key"
+                for request in _StubMCPHandler.requests
+            )
+        )
+        self.assertEqual(
+            [request["body"].get("method") for request in _StubMCPHandler.requests],
+            ["initialize", "notifications/initialized", "tools/call"],
+        )
+        self.assertEqual(
+            _StubMCPHandler.requests[-1]["headers"].get("Mcp-Session-Id"), "stub-session"
+        )
+
+    def test_digest_parses_sse_framed_responses(self) -> None:
+        _StubMCPHandler.sse_tools_call = True
+        _StubMCPHandler.context_result = {
+            "groups": [
+                {"category": "fact", "items": [{"category": "fact", "content": "uses uv"}]}
+            ],
+            "total_items": 1,
+            "omitted": 0,
+            "truncated": False,
+        }
+        context = self._session_context()
+        self.assertIn("- [fact] uses uv", context)
+
+    def test_empty_memory_skips_the_pointless_context_call(self) -> None:
+        _StubMCPHandler.context_result = {
+            "groups": [],
+            "total_items": 0,
+            "omitted": 0,
+            "truncated": False,
+        }
+        context = self._session_context()
+        self.assertIn("no stored memories", context)
+        self.assertNotIn("before planning, call", context)
+
+    def test_server_failure_falls_back_to_the_standard_hint(self) -> None:
+        _StubMCPHandler.fail_with = 500
+        context = self._session_context()
+        self.assertIn("before planning, call", context)
+        self.assertIn("ToolSearch", context)
+
+    def test_missing_configuration_never_touches_the_network(self) -> None:
+        result = run_hook(
+            "session",
+            json.dumps({"cwd": "/work/alpha"}),
+            {"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"},
+        )
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("before planning, call", context)
+        self.assertEqual(_StubMCPHandler.requests, [])
 
 
 class ManifestTests(unittest.TestCase):
