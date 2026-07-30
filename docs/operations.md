@@ -193,9 +193,13 @@ docker compose exec recallum uv run --no-sync recallum-admin eval \
   --email eval@example.com --dataset scripts/eval_dataset.json
 ```
 
-Use a dedicated user for the corpus. Reseeding is idempotent (exact dedup),
-but rows from an older dataset revision stay behind and compete in rankings —
-prune that user's memories when the dataset changes shape. Grow the dataset
+Use a dedicated user for the corpus. Reseeding is idempotent (exact dedup), so
+only *removing* or *rewording* a corpus row strands its previously seeded
+memory: the row stays active but no longer maps to a key, and competes for
+top-k slots as an unlabelled distractor. Adding rows, or changing a row's
+importance or category, strands nothing — those reseed onto the same memory.
+You do not have to prune preemptively: a stranded row shows up as `?<id>` in
+the `misses:` section of the report, so prune when you see one. Grow the dataset
 with real queries agents got wrong: every fixed regression should leave a
 query behind. `--trigram-weight` / `--importance-weight` override one knob for
 an A/B run; numbers are only comparable against the same dataset and the same
