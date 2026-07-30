@@ -37,9 +37,17 @@ git rev-list --count origin/<branch>..HEAD
 
 The tag and the version declared in the code must agree, or the release **drifts** from what it ships.
 
-Set every file that declares the version to the version you are about to tag — `pyproject.toml`, `package.json`, `Cargo.toml`, app metadata — and regenerate any lockfile that embeds it rather than hand-editing. A tag that already exists forces a bump; pick the level from what actually changed, treating a behaviour change as minor pre-1.0 and major after.
+Set every file that declares the version to the version you are about to tag — `pyproject.toml`, `package.json`, `Cargo.toml`, app metadata — and regenerate any lockfile that embeds it rather than hand-editing. In this repo `uv.lock` embeds the package version, so after editing `pyproject.toml` always run
 
-**Done when** every version-declaring file states the tag's version and the test suite still passes.
+```sh
+uv sync
+```
+
+and commit `uv.lock` **in the same bump commit** as `pyproject.toml`. Skipping this leaves the lock stale, and the very next `uv run` regenerates it as an uncommitted side effect — the drift then surfaces as a dirty tree in whatever unrelated work comes later (this bit v0.7.0, whose bump commit shipped a `uv.lock` still claiming 0.6.1).
+
+A tag that already exists forces a bump; pick the level from what actually changed, treating a behaviour change as minor pre-1.0 and major after.
+
+**Done when** every version-declaring file states the tag's version, `git status` shows no lockfile drift after a `uv run` command, and the test suite still passes (`tests/unit/test_app.py` pins that the app's public version matches the package metadata).
 
 ## 4. Read the commits
 
