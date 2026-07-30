@@ -18,6 +18,10 @@ COPY recallum ./recallum
 # Install dependencies and the project itself, without dev extras.
 RUN uv sync --frozen --no-dev --no-cache
 
+# Migrate-then-serve lives in the image so no deployment has to remember it.
+COPY deploy/entrypoint.sh /usr/local/bin/recallum-entrypoint
+RUN chmod +x /usr/local/bin/recallum-entrypoint
+
 # Run as a non-root user.
 RUN groupadd --system recallum && useradd --system --gid recallum --home /app recallum \
     && chown -R recallum:recallum /app
@@ -25,4 +29,9 @@ USER recallum
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-sync", "uvicorn", "recallum.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# Deliberately no CMD: the entrypoint migrates and then execs uvicorn itself.
+# A "run command" field on a managed deployment replaces CMD, so leaving one
+# here is what allows a stray command to silently take the server's place.
+# One-off commands go through `docker compose exec` (which bypasses the
+# entrypoint) or an explicit `--entrypoint`.
+ENTRYPOINT ["/usr/local/bin/recallum-entrypoint"]

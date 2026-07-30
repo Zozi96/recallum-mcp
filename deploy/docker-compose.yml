@@ -11,8 +11,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       ollama:
         condition: service_started
     networks:
@@ -25,19 +25,9 @@ services:
       timeout: 5s
       retries: 3
 
-  migrate:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
-    environment:
-      RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:recallum@postgres:5432/recallum
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - recallum
-    restart: "no"
+  # No separate `migrate` service: the image's entrypoint migrates before it
+  # serves, so compose and the managed deployment run the identical sequence
+  # and there is only one ordering to get right.
 
   postgres:
     image: pgvector/pgvector:pg17

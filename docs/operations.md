@@ -69,16 +69,41 @@ ALTER ROLE recallum NOSUPERUSER NOBYPASSRLS;
 
 ## Migrations
 
-Alembic owns the schema. The application never runs `create_all()`. Compose
-runs the one-shot `migrate` service before starting Recallum.
+Alembic owns the schema. The application never runs `create_all()`. The image's
+entrypoint (`deploy/entrypoint.sh`) runs `alembic upgrade head` and then `exec`s
+the server, so **every** way of starting the container migrates first — compose,
+Dokploy, or a bare `docker run`. Nothing to remember per deployment.
+
+If migrations fail, the entrypoint retries (`RECALLUM_MIGRATION_ATTEMPTS`,
+default 10, `RECALLUM_MIGRATION_RETRY_SECONDS` apart) to absorb a database that
+is not accepting connections yet, then **exits non-zero rather than serving**
+against an unexpected schema.
+
+Inspect or run migrations by hand against a running stack:
 
 ```bash
-docker compose run --rm migrate
-docker compose run --rm migrate uv run --no-sync alembic current
+docker compose exec recallum uv run --no-sync alembic current
 ```
 
-On Dokploy with separate services (no `migrate` container), migrations run as a
-**pre-deploy command** instead — see below.
+The image has **no `CMD`** — the entrypoint runs the server itself, so there is
+nothing for a stray "run command" to replace. One-off commands therefore go
+through `exec` (which bypasses the entrypoint) rather than `docker run`:
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin list-keys --email you@example.com
+```
+
+Serve without migrating, to debug a container whose database is unreachable or
+mid-restore:
+
+```bash
+docker run --rm -e RECALLUM_SKIP_MIGRATIONS=1 <image>
+```
+
+**One replica at a time for schema-changing deploys.** Concurrent boots both
+migrating is not serialized by an advisory lock; the loser fails, retries, and
+finds the schema already at head, so it self-heals — but a rolling deploy across
+replicas is noisier than it needs to be. Scale to 1 while a migration lands.
 
 ## Dokploy deployment (separate services)
 
@@ -116,25 +141,29 @@ RECALLUM__DATABASE__URL=postgresql+asyncpg://recallum:CHANGE_ME_APP@<pg-internal
 RECALLUM__OLLAMA__URL=http://<ollama-internal-host>:11434
 ```
 
-**3. Migrations = pre-deploy command (option A).** The image never migrates on
-build or start (the Dockerfile `CMD` only runs uvicorn). Configure Recallum's
-**pre-deploy command** in Dokploy so Alembic runs after the image is built and
-the database is reachable, but before the server starts:
+**3. Migrations: nothing to configure.** The image migrates before it serves
+(see "Migrations" above), inside the Recallum container as the `recallum` role,
+idempotently on every deploy.
 
-```bash
-uv run --no-sync alembic upgrade head
-```
-
-This runs inside the Recallum container as the `recallum` role (so tables are
-owned by it), is idempotent (safe to re-run every deploy), and does not touch
-`docker build`. If your Dokploy version lacks a pre-deploy hook, run the same
-command once via the container terminal before sending traffic.
+> **Leave Dokploy's *Run Command* (Advanced tab) completely empty — both the
+> `Command` field and every `Args` row.** Despite its label ("run a custom
+> command in the container after the application initialized") it does not run
+> alongside or after the server: on Swarm those two fields are `ContainerSpec`
+> `Command` and `Args`, which override the image's **entrypoint** and command
+> respectively. A value there therefore bypasses `deploy/entrypoint.sh`
+> entirely, skipping the migration *and* the server.
+>
+> Setting it to `uv run --no-sync alembic upgrade head` makes the container
+> migrate, exit **0**, and be restarted forever while nothing ever listens on
+> 8000. Traefik then has no upstream, every route answers 502, and because a 502
+> carries no `Access-Control-Allow-Origin` the browser reports it as a CORS
+> failure — sending you after a CORS bug that does not exist.
 
 **4. Pull the embedding model** into the Ollama app's volume once (see
 "Embedding model" above), then verify `/readyz` returns `ready`.
 
 Deploy order: **postgres → role SQL (step 1) → ollama (+ model pull) → recallum
-(pre-deploy migration runs, then uvicorn starts)**.
+(its entrypoint migrates, then uvicorn starts)**.
 
 ## Changing the embedding model
 
