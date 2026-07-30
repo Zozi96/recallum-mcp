@@ -1,4 +1,4 @@
-"""FastMCP server exposing exactly eight tools, none accepting a user id.
+"""FastMCP server exposing exactly nine tools, none accepting a user id.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
 ``BearerAuthMiddleware``); tools fail closed when the identity is missing.
@@ -19,6 +19,7 @@ from recallum.memory.schemas import (
     ForgetResult,
     GetResult,
     ListResult,
+    MergeResult,
     RecallResult,
     RememberBatchItem,
     RememberBatchResult,
@@ -48,12 +49,18 @@ left memories out: recall with a focused query reaches them.
 remember reports pre-existing memories about the same subject in its
 `similar` field, across every category — a fact can contradict a decision.
 It never resolves them: read them and decide whether the new memory restates,
-refines or contradicts them, and call update when one replaces another.
+refines or contradicts them. Call update when one replaces another, and
+merge_memories when several restate one underlying claim — it retires all
+sources into a single linked replacement, recoverable via get_memory
+history. Contradictions are never merged.
 Freshness signals: `reconfirmed_at` is the last time identical content was
 re-stored; `last_recalled_at`/`recall_count` say how often a memory matched
 a recall query, and `context_count` how often it rode along in a session
-snapshot. Old, never-reconfirmed memories deserve verification before being
-trusted. All identity comes from the API key; tools never accept a user id.
+snapshot. Context items carry `stale: true` once a memory has gone
+unconfirmed past the staleness threshold: verify those against reality
+before trusting them, then re-store unchanged (stamps `reconfirmed_at`),
+update, or forget. list_memories(stale=true) is the verification queue.
+All identity comes from the API key; tools never accept a user id.
 """
 
 
@@ -126,11 +133,13 @@ def build_mcp_server(container: Container) -> FastMCP:
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
         limit: int | None = None,
     ) -> RecallResult:
-        """Search memories by meaning and exact terms (hybrid retrieval).
+        """Search memories by meaning, exact terms and close spellings.
 
-        Passing project includes that project's memories plus the user's global
-        ones; scope narrows to exactly 'global' or 'project'. When embeddings
-        are unavailable the result mode is 'degraded_textual'.
+        Hybrid retrieval: semantic similarity, full-text ranking and a
+        typo-tolerant trigram leg, fused. Passing project includes that
+        project's memories plus the user's global ones; scope narrows to
+        exactly 'global' or 'project'. When embeddings are unavailable the
+        result mode is 'degraded_textual' (lexical legs only).
         """
         return await service().recall(
             require_identity().user_id,
@@ -194,15 +203,24 @@ def build_mcp_server(container: Container) -> FastMCP:
         scope: Literal["global", "project"] | None = None,
         project: str | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
+        stale: bool | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> ListResult:
-        """List active memories with optional filters and bounded pagination."""
+        """List active memories with optional filters and bounded pagination.
+
+        stale=true is the verification queue: only memories whose last
+        confirmation (reconfirmed_at, else created_at) is older than the
+        server's staleness threshold. Verify each against reality, then
+        re-store it unchanged to reconfirm, update it, or forget it.
+        stale=false keeps only fresh memories.
+        """
         return await service().list_memories(
             require_identity().user_id,
             scope=scope,
             project=project,
             category=category,
+            stale=stale,
             limit=limit,
             offset=offset,
         )
@@ -228,6 +246,37 @@ def build_mcp_server(container: Container) -> FastMCP:
         return await service().update(
             require_identity().user_id,
             memory_id,
+            content=content,
+            category=category,
+            importance=importance,
+            metadata=metadata,
+            source_client=source_client,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
+    async def merge_memories(
+        source_ids: list[uuid.UUID],
+        content: str,
+        category: Literal["preference", "decision", "constraint", "fact"],
+        importance: int | None = None,
+        metadata: dict[str, str | int | float | bool | None] | None = None,
+        source_client: str | None = None,
+    ) -> MergeResult:
+        """Consolidate two or more overlapping memories into one statement.
+
+        Use it when `similar` or a stale-queue review shows several memories
+        making the same underlying claim: write the consolidated content and
+        list every source id. All sources are retired and linked to the new
+        memory — recoverable via get_memory with history, never deleted.
+        Sources must share one scope and project; importance defaults to the
+        loudest source. Restatements and refinements only: resolving a
+        contradiction is an update of the wrong memory, not a merge. If any
+        source id is unknown, merged=false and nothing changed.
+        """
+        return await service().merge(
+            require_identity().user_id,
+            source_ids=source_ids,
             content=content,
             category=category,
             importance=importance,

@@ -6,15 +6,21 @@ are generated locally with Ollama, storage is PostgreSQL with pgvector.
 
 ## Features
 
-- **Eight MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
-  `get_memory`, `list_memories`, `update`, `forget`.
+- **Nine MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
+  `get_memory`, `list_memories`, `update`, `merge_memories`, `forget`.
 - **Explicit supersession**: `update` retires a memory and links it to its
-  replacement; `remember` reports similar existing memories so contradictions
-  surface where they are created, and are never resolved automatically.
+  replacement; `merge_memories` consolidates several restatements into one
+  linked replacement; `remember` reports similar existing memories so
+  contradictions surface where they are created, and are never resolved
+  automatically.
 - **Hybrid retrieval**: pgvector cosine similarity + PostgreSQL full-text
-  ranking fused with Reciprocal Rank Fusion; graceful textual-only degradation
-  when Ollama is down. The vector leg only compares same-model vectors; after
-  changing the embedding model, `recallum-admin reembed` restamps stored rows.
+  ranking + a typo-tolerant pg_trgm leg, fused with Reciprocal Rank Fusion;
+  graceful lexical-only degradation when Ollama is down. The vector leg only
+  compares same-model vectors; after changing the embedding model,
+  `recallum-admin reembed` restamps stored rows.
+- **Freshness lifecycle**: exact re-stores stamp `reconfirmed_at`; context
+  snapshots flag unconfirmed memories as `stale`, and
+  `list_memories(stale=true)` is the verification queue.
 - **Strict per-user isolation**: individual API keys (stored as SHA-256 hashes),
   explicit user filters, and Row-Level Security as a second barrier.
 - **Atomic memories only**: preferences, decisions, constraints, facts — never

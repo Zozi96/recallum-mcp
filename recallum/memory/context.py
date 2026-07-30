@@ -6,6 +6,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from recallum.db.models import Memory
 from recallum.memory.schemas import ContextGroup, ContextItem, ContextResult
@@ -42,6 +43,7 @@ class SessionContextBudget:
         project: str | None,
         total_available: int,
         focus: str | None = None,
+        stale_before: datetime | None = None,
     ) -> ContextResult:
         """Dedup, group by category and apply the budget to produce a snapshot.
 
@@ -55,14 +57,25 @@ class SessionContextBudget:
         would go unseen precisely when it mattered. ``total_available`` is the
         caller-supplied count of every active memory visible to the request;
         the difference against what the budget kept is reported as ``omitted``
-        so the agent knows there is more to ``recall``.
+        so the agent knows there is more to ``recall``. ``stale_before``
+        annotates (never reorders) items whose last confirmation --
+        ``reconfirmed_at``, else ``created_at`` -- is older than the cutoff:
+        the snapshot is where an agent meets old claims, so it is where the
+        verification nudge belongs.
         """
         # Focus hits first (dedup keeps the first occurrence, so a focused
-        # memory takes its relevance position); then the established ordering:
-        # globals before project rows.
+        # memory takes its relevance position). The importance pools then
+        # merge by importance and recency rather than globals-before-project:
+        # the budget cuts inside a category, and pool membership is not a
+        # statement of priority -- an importance-9 project constraint must
+        # not sit behind importance-1 globals at the cliff. Globals keep
+        # winning exact ties (stable sorts preserve their lead).
+        merged = [*global_memories, *project_memories]
+        merged.sort(key=lambda m: m.created_at, reverse=True)
+        merged.sort(key=lambda m: m.importance, reverse=True)
         seen: set[uuid.UUID] = set()
         ordered: list[Memory] = []
-        for memory in (*focus_memories, *global_memories, *project_memories):
+        for memory in (*focus_memories, *merged):
             if memory.id in seen:
                 continue
             seen.add(memory.id)
@@ -80,6 +93,10 @@ class SessionContextBudget:
                     importance=memory.importance,
                     created_at=memory.created_at,
                     reconfirmed_at=memory.reconfirmed_at,
+                    stale=(
+                        stale_before is not None
+                        and (memory.reconfirmed_at or memory.created_at) < stale_before
+                    ),
                 )
             )
 

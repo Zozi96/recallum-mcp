@@ -135,6 +135,23 @@ class UpdateResult(BaseModel):
     superseded_id: uuid.UUID | None = None
 
 
+class MergeResult(BaseModel):
+    """Outcome of ``merge_memories``.
+
+    ``merged`` is False when any source id is unknown, foreign or already
+    retired -- indistinguishable on purpose -- and nothing was changed.
+    ``superseded_ids`` lists every retired source; each is linked to the new
+    memory, so ``get_memory`` with history recovers exactly what was folded
+    in. ``similar`` keeps the consolidation loop going: same-subject
+    memories that still remain after this merge.
+    """
+
+    merged: bool
+    memory: MemoryOut | None = None
+    superseded_ids: list[uuid.UUID] = Field(default_factory=list)
+    similar: list[SimilarMemory] = Field(default_factory=list)
+
+
 class RecalledMemory(MemoryOut):
     """A memory plus its fused relevance score."""
 
@@ -153,7 +170,11 @@ class ContextItem(BaseModel):
     """A compact memory entry inside a context group.
 
     ``content_truncated`` marks an entry clipped to fit the character budget;
-    the full content is retrievable by id via ``get_memory``.
+    the full content is retrievable by id via ``get_memory``. ``stale`` marks
+    an entry whose last confirmation (``reconfirmed_at``, else ``created_at``)
+    is older than the server's staleness threshold: verify it against reality
+    before trusting it, then re-store it unchanged to reconfirm, update it,
+    or forget it.
     """
 
     id: uuid.UUID
@@ -165,6 +186,7 @@ class ContextItem(BaseModel):
     created_at: datetime
     reconfirmed_at: datetime | None = None
     content_truncated: bool = False
+    stale: bool = False
 
 
 class ContextGroup(BaseModel):

@@ -23,12 +23,13 @@ import hashlib
 import math
 import random
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from recallum.db.repositories.memory_repo import MAX_CANDIDATES
+from recallum.db.repositories.memory_repo import MAX_CANDIDATES, BucketMismatchError
 from recallum.memory import MemoryVisibility
 
 
@@ -405,6 +406,52 @@ class MemoryRepositoryContract:
         }
         assert foreign.id in text_ids
 
+    # -- search_trigram ------------------------------------------------
+
+    async def test_search_trigram_matches_exact_words_and_rejects_unrelated(
+        self, repo, user_id
+    ):
+        """The portable extremes of the fuzzy leg's promise.
+
+        An exact word in the content is a perfect extent match (1.0) in both
+        the adapter and the fake; unrelated text falls under any sane
+        threshold. How close a typo may be is pg_trgm's own business and is
+        pinned Postgres-only in the integration suite, like stemming.
+        """
+        hit = await repo.create_memory(
+            user_id, **self._kwargs(content="prefer pnpm for installs")
+        )
+        miss = await repo.create_memory(
+            user_id, **self._kwargs(content="database of record is postgres")
+        )
+
+        pools = await repo.search_candidates(
+            user_id,
+            query="pnpm",
+            embedding=None,
+            embedding_model=None,
+            visibility=MemoryVisibility("all"),
+            limit=10,
+            trigram_min_word_similarity=0.4,
+        )
+        scores = {r.memory.id: r.score for r in pools.trigram}
+        assert scores.get(hit.id) == pytest.approx(1.0)
+        assert miss.id not in scores
+
+    async def test_search_trigram_pool_is_empty_unless_requested(self, repo, user_id):
+        await repo.create_memory(
+            user_id, **self._kwargs(content="prefer pnpm for installs")
+        )
+        pools = await repo.search_candidates(
+            user_id,
+            query="pnpm",
+            embedding=None,
+            embedding_model=None,
+            visibility=MemoryVisibility("all"),
+            limit=10,
+        )
+        assert list(pools.trigram) == []
+
     # -- search_text ---------------------------------------------------
 
     async def test_search_text_matches_whole_words_not_substrings(self, repo, user_id):
@@ -665,6 +712,156 @@ class MemoryRepositoryContract:
 
     # -- similar_active --------------------------------------------------
 
+    # -- merge ------------------------------------------------------------
+
+    def _merge_kwargs(
+        self,
+        *,
+        content: str,
+        category: str = "fact",
+        importance: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "content": content,
+            "content_hash": _hash(content),
+            "embedding": _embedding(hash(content) & 0xFFFF),
+            "embedding_model": "contract-embedding-model",
+            "category": category,
+            "importance": importance,
+            "source_client": None,
+            "metadata": {},
+        }
+
+    async def test_merge_retires_sources_into_one_linked_replacement(self, repo, user_id):
+        first = await repo.create_memory(
+            user_id, **self._kwargs(content="claim variant one", importance=3)
+        )
+        second = await repo.create_memory(
+            user_id,
+            **self._kwargs(content="claim variant two", category="decision", importance=8),
+        )
+
+        outcome = await repo.merge_memories(
+            user_id,
+            [first.id, second.id],
+            **self._merge_kwargs(content="the consolidated claim"),
+        )
+
+        assert outcome is not None
+        replacement, retired = outcome
+        assert set(retired) == {first.id, second.id}
+        assert replacement.importance == 8  # loudest source when not given
+        for source_id in (first.id, second.id):
+            assert await repo.get_active(user_id, source_id) is None
+        history = await repo.history(user_id, replacement.id)
+        assert {m.id for m in history} == {first.id, second.id}
+        assert [m.id for m in history] == [
+            m.id for m in sorted(history, key=lambda m: (m.created_at, str(m.id)))
+        ]
+
+    async def test_merge_may_keep_one_sources_exact_wording(self, repo, user_id):
+        """Sources retire before the replacement lands, so consolidating onto
+        one source's wording never trips the active-duplicate index."""
+        keeper = await repo.create_memory(user_id, **self._kwargs(content="the wording to keep"))
+        folded = await repo.create_memory(user_id, **self._kwargs(content="a rougher variant"))
+
+        outcome = await repo.merge_memories(
+            user_id,
+            [keeper.id, folded.id],
+            **self._merge_kwargs(content="the wording to keep"),
+        )
+
+        assert outcome is not None
+        replacement, _ = outcome
+        assert replacement.content == "the wording to keep"
+        assert replacement.id != keeper.id
+        assert await repo.get_active(user_id, keeper.id) is None
+
+    async def test_merge_collision_with_unrelated_active_row_changes_nothing(
+        self, repo, user_id
+    ):
+        a = await repo.create_memory(user_id, **self._kwargs(content="merge source a"))
+        b = await repo.create_memory(user_id, **self._kwargs(content="merge source b"))
+        bystander = await repo.create_memory(
+            user_id, **self._kwargs(content="the bystander claim")
+        )
+
+        with pytest.raises(IntegrityError):
+            await repo.merge_memories(
+                user_id,
+                [a.id, b.id],
+                **self._merge_kwargs(content="the bystander claim"),
+            )
+        # The transaction rolled back whole: nothing was retired.
+        for source_id in (a.id, b.id, bystander.id):
+            assert await repo.get_active(user_id, source_id) is not None
+
+    async def test_merge_unknown_foreign_or_retired_source_changes_nothing(
+        self, repo, user_id, other_user_id
+    ):
+        mine = await repo.create_memory(user_id, **self._kwargs(content="my mergeable"))
+        theirs = await repo.create_memory(
+            other_user_id, **self._kwargs(content="their row")
+        )
+
+        assert (
+            await repo.merge_memories(
+                user_id, [mine.id, theirs.id], **self._merge_kwargs(content="never lands")
+            )
+            is None
+        )
+        assert (
+            await repo.merge_memories(
+                user_id, [mine.id, uuid.uuid4()], **self._merge_kwargs(content="never lands")
+            )
+            is None
+        )
+        assert await repo.get_active(user_id, mine.id) is not None
+        assert await repo.get_active(other_user_id, theirs.id) is not None
+
+    async def test_merge_rejects_sources_from_different_buckets(self, repo, user_id):
+        global_row = await repo.create_memory(user_id, **self._kwargs(content="global claim"))
+        project_row = await repo.create_memory(
+            user_id,
+            **self._kwargs(content="project claim", scope="project", project="alpha"),
+        )
+
+        with pytest.raises(BucketMismatchError):
+            await repo.merge_memories(
+                user_id,
+                [global_row.id, project_row.id],
+                **self._merge_kwargs(content="never lands"),
+            )
+        assert await repo.get_active(user_id, global_row.id) is not None
+        assert await repo.get_active(user_id, project_row.id) is not None
+
+    async def test_history_flattens_update_chains_into_merge_trees(self, repo, user_id):
+        origin = await repo.create_memory(user_id, **self._kwargs(content="origin claim"))
+        refined = await repo.supersede(
+            user_id,
+            origin.id,
+            content="refined claim",
+            content_hash=_hash("refined claim"),
+            embedding=_embedding(11),
+            embedding_model="contract-embedding-model",
+            category=None,
+            importance=None,
+            metadata=None,
+            source_client=None,
+        )
+        sibling = await repo.create_memory(user_id, **self._kwargs(content="sibling claim"))
+
+        outcome = await repo.merge_memories(
+            user_id,
+            [refined.id, sibling.id],
+            **self._merge_kwargs(content="the whole story"),
+        )
+
+        assert outcome is not None
+        replacement, _ = outcome
+        history = await repo.history(user_id, replacement.id)
+        assert {m.id for m in history} == {origin.id, refined.id, sibling.id}
+
     async def test_similar_active_finds_close_memories_in_the_same_bucket(self, repo, user_id):
         target = _embedding(4242)
         near = await repo.create_memory(
@@ -814,6 +1011,39 @@ class MemoryRepositoryContract:
         untouched = await repo.get_active(other_user_id, foreign.id)
         assert untouched.recall_count == 0
         assert untouched.last_recalled_at is None
+
+    async def test_list_active_staleness_filters_use_last_confirmation(
+        self, repo, user_id
+    ):
+        """Pins the comparison direction and that the total honours the filter.
+
+        Real rows are stamped "now", so the cutoffs bracket the present: a
+        future cutoff makes everything stale, a past one makes everything
+        fresh. Which timestamp COALESCE picks is pinned at the service level,
+        where the fake can age rows.
+        """
+        row = await repo.create_memory(user_id, **self._kwargs(content="confirmable row"))
+        far_future = datetime.now(UTC) + timedelta(days=1)
+        far_past = datetime.now(UTC) - timedelta(days=3650)
+        visibility = MemoryVisibility("all")
+
+        stale_rows, stale_total = await repo.list_active(
+            user_id, visibility=visibility, limit=10, stale_before=far_future
+        )
+        assert [r.id for r in stale_rows] == [row.id]
+        assert stale_total == 1
+
+        no_rows, none_total = await repo.list_active(
+            user_id, visibility=visibility, limit=10, stale_before=far_past
+        )
+        assert list(no_rows) == []
+        assert none_total == 0
+
+        fresh_rows, fresh_total = await repo.list_active(
+            user_id, visibility=visibility, limit=10, fresh_since=far_past
+        )
+        assert [r.id for r in fresh_rows] == [row.id]
+        assert fresh_total == 1
 
     async def test_mark_seen_in_context_counts_apart_from_recall(self, repo, user_id):
         row = await repo.create_memory(user_id, **self._kwargs(content="counted row"))

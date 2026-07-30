@@ -7,6 +7,7 @@ fakes. The budget mechanics themselves are pinned in test_context_budget.py.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -174,14 +175,19 @@ async def test_recall_usage_weight_breaks_retrieval_ties():
         repo.rows[older.memory.id].recall_count = 50
         return older.memory.id
 
-    # Weight 0.0 (the default): the tie falls to the recency tie-break.
-    service, repo = build(None)
+    # The fixture engineers an exact two-signal tie, so the trigram leg is
+    # pinned off in both builds: with it voting, lexical closeness would
+    # break the tie before usage or recency ever got a say.
+    # Usage weight 0.0 (the default): the tie falls to the recency tie-break.
+    service, repo = build(MemoryLimits(recall_trigram_weight=0.0))
     older_id = await seed(service, repo)
     baseline = await service.recall(USER, query="alpha beta")
     assert [r.content for r in baseline.results][0] == "alpha beta pipeline"
 
     # A positive weight lets accumulated usage break the same tie instead.
-    service, repo = build(MemoryLimits(recall_usage_weight=0.5))
+    service, repo = build(
+        MemoryLimits(recall_usage_weight=0.5, recall_trigram_weight=0.0)
+    )
     older_id = await seed(service, repo)
     weighted = await service.recall(USER, query="alpha beta")
     assert weighted.results[0].id == older_id
@@ -310,6 +316,46 @@ async def test_reassign_project_rejects_identical_or_missing_keys():
 
 
 # ---------------------------------------------------------------------------
+# staleness: the verification queue
+# ---------------------------------------------------------------------------
+
+
+async def test_context_flags_stale_memories_and_reconfirmation_clears_it():
+    """The freshness signals finally have a consumer.
+
+    Also pins which timestamp counts: COALESCE(reconfirmed_at, created_at),
+    so re-storing identical content clears the flag without touching the row.
+    """
+    service, repo, _ = make_service()
+    stored = await service.remember(USER, content="an aging claim", category="fact")
+    repo.rows[stored.memory.id].created_at = datetime.now(UTC) - timedelta(days=120)
+
+    flagged = await service.context(USER)
+    assert [i.stale for g in flagged.groups for i in g.items] == [True]
+
+    await service.remember(USER, content="an aging claim", category="fact")
+    cleared = await service.context(USER)
+    assert [i.stale for g in cleared.groups for i in g.items] == [False]
+
+
+async def test_list_memories_stale_filter_is_the_verification_queue():
+    service, repo, _ = make_service()
+    aged = await service.remember(USER, content="aged fact", category="fact")
+    fresh = await service.remember(USER, content="fresh fact", category="fact")
+    repo.rows[aged.memory.id].created_at = datetime.now(UTC) - timedelta(days=120)
+
+    queue = await service.list_memories(USER, stale=True)
+    assert [m.id for m in queue.items] == [aged.memory.id]
+    assert queue.total == 1
+
+    current = await service.list_memories(USER, stale=False)
+    assert [m.id for m in current.items] == [fresh.memory.id]
+
+    everything = await service.list_memories(USER)
+    assert everything.total == 2
+
+
+# ---------------------------------------------------------------------------
 # get: the by-id read behind truncated context items
 # ---------------------------------------------------------------------------
 
@@ -339,6 +385,129 @@ async def test_get_hides_unknown_foreign_and_retired_ids_alike():
     retired = await service.get(USER, stored.memory.id)
     assert retired.found is False
     assert retired.memory is None
+
+
+# ---------------------------------------------------------------------------
+# merge: consolidation with a recoverable trail
+# ---------------------------------------------------------------------------
+
+
+def _overlap_embedder() -> ScriptedEmbeddingClient:
+    same = [1.0] + [0.0] * 7
+    other = [0.0, 1.0] + [0.0] * 6
+    return ScriptedEmbeddingClient(
+        vectors={
+            "the timeout is thirty seconds": same,
+            "timeouts are 30s": same,
+            "http timeout: 30 seconds": same,
+            "the http timeout is 30 seconds": same,
+            "a project-scoped claim": other,
+            "merged wording": other,
+        }
+    )
+
+
+async def test_merge_consolidates_and_reports_remaining_overlap():
+    service, _, _ = make_service(embedder=_overlap_embedder())
+    a = await service.remember(
+        USER, content="the timeout is thirty seconds", category="fact", importance=3
+    )
+    b = await service.remember(
+        USER, content="timeouts are 30s", category="decision", importance=7
+    )
+    leftover = await service.remember(
+        USER, content="http timeout: 30 seconds", category="fact"
+    )
+
+    result = await service.merge(
+        USER,
+        source_ids=[a.memory.id, b.memory.id],
+        content="the http timeout is 30 seconds",
+        category="fact",
+    )
+
+    assert result.merged
+    assert set(result.superseded_ids) == {a.memory.id, b.memory.id}
+    assert result.memory.importance == 7  # loudest source when not given
+    # The advisory keeps the consolidation loop going: what still overlaps.
+    assert [s.id for s in result.similar] == [leftover.memory.id]
+
+    # The trail is recoverable, not deleted.
+    trail = await service.get(USER, result.memory.id, include_history=True)
+    assert {m.content for m in trail.history} == {
+        "the timeout is thirty seconds",
+        "timeouts are 30s",
+    }
+    remaining = await service.list_memories(USER)
+    assert remaining.total == 2  # the replacement and the leftover
+
+
+async def test_merge_validates_shape_before_touching_anything():
+    service, _, _ = make_service(embedder=_overlap_embedder())
+    a = await service.remember(USER, content="the timeout is thirty seconds", category="fact")
+
+    with pytest.raises(MemoryValidationError, match="at least two"):
+        await service.merge(
+            USER, source_ids=[a.memory.id], content="never embedded", category="fact"
+        )
+    with pytest.raises(MemoryValidationError, match="unique"):
+        await service.merge(
+            USER,
+            source_ids=[a.memory.id, a.memory.id],
+            content="never embedded",
+            category="fact",
+        )
+
+
+async def test_merge_enforces_the_source_cap():
+    service, _, _ = make_service(
+        limits=MemoryLimits(merge_max_sources=2), embedder=_overlap_embedder()
+    )
+    a = await service.remember(USER, content="the timeout is thirty seconds", category="fact")
+    b = await service.remember(USER, content="timeouts are 30s", category="fact")
+    c = await service.remember(USER, content="http timeout: 30 seconds", category="fact")
+
+    with pytest.raises(MemoryValidationError, match="exceeds 2"):
+        await service.merge(
+            USER,
+            source_ids=[a.memory.id, b.memory.id, c.memory.id],
+            content="never embedded",
+            category="fact",
+        )
+
+
+async def test_merge_with_unknown_source_reports_nothing_happened():
+    service, _, _ = make_service(embedder=_overlap_embedder())
+    a = await service.remember(USER, content="the timeout is thirty seconds", category="fact")
+
+    result = await service.merge(
+        USER,
+        source_ids=[a.memory.id, uuid.uuid4()],
+        content="the http timeout is 30 seconds",
+        category="fact",
+    )
+
+    assert result.merged is False
+    assert result.memory is None
+    assert (await service.get(USER, a.memory.id)).found
+
+
+async def test_merge_rejects_cross_bucket_sources():
+    service, _, _ = make_service(embedder=_overlap_embedder())
+    global_row = await service.remember(
+        USER, content="the timeout is thirty seconds", category="fact"
+    )
+    project_row = await service.remember(
+        USER, content="a project-scoped claim", category="fact", project="alpha"
+    )
+
+    with pytest.raises(MemoryValidationError, match="scopes or projects"):
+        await service.merge(
+            USER,
+            source_ids=[global_row.memory.id, project_row.memory.id],
+            content="merged wording",
+            category="fact",
+        )
 
 
 # ---------------------------------------------------------------------------

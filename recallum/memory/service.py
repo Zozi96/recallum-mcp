@@ -21,12 +21,18 @@ import unicodedata
 import uuid
 from collections import defaultdict
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
 
 from sqlalchemy.exc import IntegrityError
 
 from recallum.db.models import Memory
-from recallum.db.repositories.memory_repo import MAX_CANDIDATES, MemoryRepository, ScoredMemory
+from recallum.db.repositories.memory_repo import (
+    MAX_CANDIDATES,
+    BucketMismatchError,
+    MemoryRepository,
+    ScoredMemory,
+)
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.context import SessionContextBudget
@@ -40,6 +46,7 @@ from recallum.memory.schemas import (
     MemoryGraphNode,
     MemoryGraphResponse,
     MemoryOut,
+    MergeResult,
     ReassignResult,
     RecalledMemory,
     RecallResult,
@@ -350,6 +357,93 @@ class MemoryService:
         )
 
     # ------------------------------------------------------------------
+    # merge
+    # ------------------------------------------------------------------
+
+    async def merge(
+        self,
+        user_id: uuid.UUID,
+        *,
+        source_ids: Sequence[uuid.UUID],
+        content: str,
+        category: str,
+        importance: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_client: str | None = None,
+    ) -> MergeResult:
+        """Consolidate several memories into one, keeping the whole trail.
+
+        The missing move in the reconcile loop: ``similar`` surfaces
+        overlapping memories at write time, but the only responses were 1:1
+        ``update`` or destructive ``forget``, so ignored near-duplicates
+        accumulated forever. Merge retires every source and links each to
+        the one consolidated replacement -- recoverable via ``get`` with
+        history, never a deletion. Scope and project come from the sources
+        and must agree across them; ``importance`` defaults to the loudest
+        source, because a consolidated claim is at least as important as its
+        strongest part. For restatements and refinements only: resolving a
+        contradiction is an ``update`` of the wrong memory, not a merge.
+        """
+        unique_ids = list(dict.fromkeys(source_ids))
+        if len(unique_ids) != len(list(source_ids)):
+            raise MemoryValidationError("source ids must be unique")
+        if len(unique_ids) < 2:
+            raise MemoryValidationError("merging needs at least two source memories")
+        if len(unique_ids) > self._limits.merge_max_sources:
+            raise MemoryValidationError(
+                f"merge exceeds {self._limits.merge_max_sources} sources"
+            )
+        normalized = self._normalize_content(content)
+        validated_category = self._validate_category(category)
+        validated_importance = (
+            self._validate_importance(importance) if importance is not None else None
+        )
+        validated_metadata = self._validate_metadata(metadata)
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+        # Embed before touching rows: a memory without a vector is never stored.
+        embedding = await self._embeddings.embed(normalized)
+        try:
+            outcome = await self._repo.merge_memories(
+                user_id,
+                unique_ids,
+                content=normalized,
+                content_hash=digest,
+                embedding=embedding,
+                embedding_model=self._embeddings.model,
+                category=validated_category,
+                importance=validated_importance,
+                source_client=source_client,
+                metadata=validated_metadata,
+            )
+        except BucketMismatchError as exc:
+            raise MemoryValidationError(
+                "sources span different scopes or projects; merge within one "
+                "bucket -- moving memories between projects is a supervised "
+                "reassign-project migration"
+            ) from exc
+        except IntegrityError as exc:
+            raise MemoryValidationError(
+                "another active memory already has that content; include it "
+                "in the merge or update it instead"
+            ) from exc
+        if outcome is None:
+            return MergeResult(merged=False)
+        replacement, retired = outcome
+        return MergeResult(
+            merged=True,
+            memory=_to_memory_out(replacement),
+            superseded_ids=retired,
+            similar=await self._similar_to(
+                user_id,
+                embedding,
+                scope=replacement.scope,
+                project=replacement.project,
+                exclude_id=replacement.id,
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # reassign project
     # ------------------------------------------------------------------
 
@@ -474,9 +568,12 @@ class MemoryService:
             visibility=visibility,
             category=validated_category,
             limit=candidate_limit,
+            trigram_min_word_similarity=self._trigram_min_similarity(),
         )
 
-        fused = self._reciprocal_rank_fusion(list(pools.vector), list(pools.text))
+        fused = self._reciprocal_rank_fusion(
+            list(pools.vector), list(pools.text), list(pools.trigram)
+        )
         results = [
             RecalledMemory(**_to_memory_out(scored.memory).model_dump(), score=score)
             for scored, score in fused[:effective_limit]
@@ -488,10 +585,20 @@ class MemoryService:
         self,
         vector_candidates: list[ScoredMemory],
         text_candidates: list[ScoredMemory],
+        trigram_candidates: list[ScoredMemory] | None = None,
     ) -> list[tuple[ScoredMemory, float]]:
         """Merge ranked candidate lists with RRF (k=60), importance included.
 
-        Importance enters as a third weighted voter over the candidates the
+        The retrieval voters are the semantic leg and the exact-text leg at
+        full strength, plus the fuzzy trigram leg at
+        ``recall_trigram_weight``: it is a safety net for typos, identifier
+        fragments and dictionary-mangled words, so it may surface rows the
+        primary signals never found and break ties, but never outvote a
+        genuine match. At weight 0.0 its candidates are ignored entirely --
+        a pool that cannot vote must not smuggle rows into the importance
+        ranking either.
+
+        Importance enters as a further weighted voter over the candidates the
         retrieval signals already found, never as a way in: a memory nobody
         matched cannot be surfaced by being marked important. Expressing it as a
         rank rather than a score is what keeps it bounded -- RRF only ever reads
@@ -504,16 +611,23 @@ class MemoryService:
         for it here would quietly bury long-standing constraints. It stays what
         it was: the tie-break.
 
-        Usage (``recall_count``) is wired as a fourth voter under the same
+        Usage (``recall_count``) is wired as one more voter under the same
         competition-ranking rules, but ships with ``recall_usage_weight`` at
         0.0: being served often is a feedback loop (rich get richer), so it
         may only influence ranking after real usage data justifies a weight.
         """
+        weighted_pools: list[tuple[list[ScoredMemory], float]] = [
+            (vector_candidates, 1.0),
+            (text_candidates, 1.0),
+            (trigram_candidates or [], self._limits.recall_trigram_weight),
+        ]
         scores: dict[uuid.UUID, float] = defaultdict(float)
         entries: dict[uuid.UUID, ScoredMemory] = {}
-        for candidates in (vector_candidates, text_candidates):
+        for candidates, pool_weight in weighted_pools:
+            if not pool_weight:
+                continue
             for rank, scored in enumerate(candidates, start=1):
-                scores[scored.memory.id] += 1.0 / (RRF_K + rank)
+                scores[scored.memory.id] += pool_weight / (RRF_K + rank)
                 entries.setdefault(scored.memory.id, scored)
 
         weight = self._limits.recall_importance_weight
@@ -628,6 +742,7 @@ class MemoryService:
             project=normalized_project,
             total_available=total_available,
             focus=normalized_focus,
+            stale_before=self._stale_cutoff(),
         )
         await self._record_context_served(
             user_id, [item.id for group in result.groups for item in group.items]
@@ -660,9 +775,18 @@ class MemoryService:
             visibility=visibility,
             category=None,
             limit=min(MAX_CANDIDATES, max(limit * 3, 10)),
+            trigram_min_word_similarity=self._trigram_min_similarity(),
         )
-        fused = self._reciprocal_rank_fusion(list(pools.vector), list(pools.text))
+        fused = self._reciprocal_rank_fusion(
+            list(pools.vector), list(pools.text), list(pools.trigram)
+        )
         return [scored.memory for scored, _ in fused[:limit]]
+
+    def _trigram_min_similarity(self) -> float | None:
+        """The trigram leg's threshold, or None when its weight disables it."""
+        if not self._limits.recall_trigram_weight:
+            return None
+        return self._limits.trigram_min_word_similarity
 
     async def _record_recalled(
         self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]
@@ -703,10 +827,19 @@ class MemoryService:
         scope: str | None = None,
         project: str | None = None,
         category: str | None = None,
+        stale: bool | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> ListResult:
-        """Enumerate the caller's active memories with bounded pagination."""
+        """Enumerate the caller's active memories with bounded pagination.
+
+        ``stale=True`` is the verification queue: only memories whose last
+        confirmation (``reconfirmed_at``, else ``created_at``) is older than
+        ``stale_after_days``. ``stale=False`` keeps only fresh ones; ``None``
+        does not filter. This is the consumer for the freshness signals the
+        schema records: without it, finding what needs re-verification meant
+        paging everything and doing date math by hand.
+        """
         normalized_project = self._normalize_project(project)
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         validated_category = self._validate_category(category) if category else None
@@ -714,12 +847,15 @@ class MemoryService:
             limit, self._limits.list_default_limit, self._limits.list_max_limit
         )
         offset = max(0, min(int(offset), self._limits.list_max_offset))
+        cutoff = self._stale_cutoff() if stale is not None else None
         rows, total = await self._repo.list_active(
             user_id,
             visibility=visibility,
             category=validated_category,
             limit=effective_limit,
             offset=offset,
+            stale_before=cutoff if stale else None,
+            fresh_since=cutoff if stale is False else None,
         )
         return ListResult(
             items=[_to_memory_out(row) for row in rows],
@@ -832,6 +968,10 @@ class MemoryService:
         return ForgetResult(id=memory_id, forgotten=forgotten)
 
     # ------------------------------------------------------------------
+
+    def _stale_cutoff(self) -> datetime:
+        """The instant before which an unconfirmed memory counts as stale."""
+        return datetime.now(UTC) - timedelta(days=self._limits.stale_after_days)
 
     def _clamp_limit(self, requested: int | None, default: int, maximum: int) -> int:
         if requested is None:

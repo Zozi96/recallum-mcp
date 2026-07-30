@@ -151,6 +151,27 @@ The command is idempotent and resumable: rows whose embedding fails are
 counted, skipped, and picked up on the next run. `/admin/status` reports
 `model_mismatch: true` while any active row still carries stale provenance.
 
+## Measuring retrieval quality
+
+`recallum-admin eval` replays a golden dataset (a small corpus plus queries
+with expected results) through the ordinary remember/recall paths and reports
+MRR and recall@k per query tag (semantic, exact, typo, spanish, identifier),
+so the fusion tunables become measured choices instead of defaults:
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin eval \
+  --email eval@example.com --dataset scripts/eval_dataset.json
+```
+
+Use a dedicated user for the corpus. Reseeding is idempotent (exact dedup),
+but rows from an older dataset revision stay behind and compete in rankings —
+prune that user's memories when the dataset changes shape. Grow the dataset
+with real queries agents got wrong: every fixed regression should leave a
+query behind. `--trigram-weight` / `--importance-weight` override one knob for
+an A/B run; numbers are only comparable against the same dataset and the same
+embedding model. Persist a winning value via the `RECALLUM__LIMITS__*`
+environment variables.
+
 ## Users and API keys
 
 ```bash

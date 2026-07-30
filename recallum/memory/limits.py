@@ -61,8 +61,36 @@ class MemoryLimits(BaseModel):
     # should be a few high-signal atoms, not a session recap.
     batch_max_items: int = Field(default=10, gt=0, le=20)
 
+    # Upper bound on memories one ``merge`` may consolidate. Small on purpose:
+    # a merge is a considered editorial act over memories the agent has read,
+    # not a bulk compaction pass.
+    merge_max_sources: int = Field(default=10, gt=1, le=20)
+
     # Usage's vote in recall fusion, same competition-ranking mechanism as
     # importance. Ships at 0.0 (no effect) so ``recall_count`` accumulates real
     # data before it is allowed to influence ranking -- a non-zero weight is a
     # rich-get-richer loop and must be a deliberate, measured choice.
     recall_usage_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # Days after which a memory that was never reconfirmed or re-stored counts
+    # as stale: context items carry ``stale: true`` past this age, and
+    # ``list_memories(stale=true)`` is the verification queue. Re-storing
+    # identical content stamps ``reconfirmed_at`` and resets the clock;
+    # ``update`` replaces the row outright.
+    stale_after_days: int = Field(default=90, gt=0)
+
+    # The trigram leg's vote in recall fusion, relative to one full retrieval
+    # signal. It is a safety net for what the other legs miss -- typos,
+    # identifier fragments, and words the English full-text dictionary
+    # mangles -- so it ships at half strength: enough to surface rows the
+    # primary signals never found and to break ties, never enough to outvote
+    # a genuine semantic or exact-text match. 0.0 disables the leg and skips
+    # its query entirely.
+    recall_trigram_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    # Minimum pg_trgm word_similarity for a trigram candidate. 0.4 keeps
+    # one-letter typos on medium-length words and camelCase fragments while
+    # rejecting accidental trigram overlap; pg_trgm's own default (0.6)
+    # misses realistic typos, and short-word transpositions are beyond any
+    # trigram threshold.
+    trigram_min_word_similarity: float = Field(default=0.4, gt=0.0, le=1.0)

@@ -12,10 +12,14 @@ import asyncio
 import getpass
 import sys
 import uuid
+from pathlib import Path
 
 from recallum.auth.api_keys import UserNotFoundError
 from recallum.config import get_settings
 from recallum.container import Container, create_container, shutdown_container
+from recallum.embeddings.ollama import EmbeddingError
+from recallum.evaluation import read_dataset, render_report, run_eval
+from recallum.memory.service import MemoryService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +54,35 @@ def build_parser() -> argparse.ArgumentParser:
     grant_admin.add_argument("--email", required=True)
     revoke_admin = subparsers.add_parser("revoke-admin", help="Revoke web administrator status")
     revoke_admin.add_argument("--email", required=True)
+
+    eval_cmd = subparsers.add_parser(
+        "eval",
+        help=(
+            "Measure retrieval quality against a golden dataset "
+            "(needs Ollama; seeds the corpus into the given user)"
+        ),
+    )
+    eval_cmd.add_argument(
+        "--email", required=True, help="User whose store hosts the eval corpus"
+    )
+    eval_cmd.add_argument(
+        "--dataset",
+        required=True,
+        help="Path to a golden dataset JSON (see scripts/eval_dataset.json)",
+    )
+    eval_cmd.add_argument("--k", type=int, default=10, help="Ranking depth (default 10)")
+    eval_cmd.add_argument(
+        "--trigram-weight",
+        type=float,
+        default=None,
+        help="Override recall_trigram_weight for this run",
+    )
+    eval_cmd.add_argument(
+        "--importance-weight",
+        type=float,
+        default=None,
+        help="Override recall_importance_weight for this run",
+    )
 
     reembed = subparsers.add_parser(
         "reembed",
@@ -129,6 +162,36 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
             is_admin = args.command == "grant-admin"
             await container.user_repository().set_admin(user.id, is_admin)
             print(f"administrator {'granted' if is_admin else 'revoked'}: {user.email}")
+        return 0
+
+    if args.command == "eval":
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        dataset = read_dataset(Path(args.dataset))
+        overrides = {}
+        if args.trigram_weight is not None:
+            overrides["recall_trigram_weight"] = args.trigram_weight
+        if args.importance_weight is not None:
+            overrides["recall_importance_weight"] = args.importance_weight
+        if overrides:
+            # Same graph, one knob turned: the configured limits with the
+            # overrides applied, so an A/B differs only in what was asked.
+            service = MemoryService(
+                repository=container.memory_repository(),
+                embeddings=container.embedding_client(),
+                limits=get_settings().limits.model_copy(update=overrides),
+            )
+        else:
+            service = container.memory_service()
+        try:
+            report = await run_eval(service, user.id, dataset, k=args.k)
+        except EmbeddingError as exc:
+            print(f"error: embeddings unavailable ({exc}); is Ollama running?", file=sys.stderr)
+            return 1
+        report.tunables = overrides
+        print(render_report(report))
         return 0
 
     if args.command == "reembed":

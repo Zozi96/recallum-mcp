@@ -18,6 +18,7 @@ from recallum.container import Container, create_container
 from recallum.db.models import ApiKey, Memory, User, WebSession
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
+    BucketMismatchError,
     CandidatePools,
     GraphPair,
     GraphSnapshot,
@@ -109,6 +110,39 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb)
 
 
+def _trigrams(word: str) -> set[str]:
+    """pg_trgm-style padded trigrams: two leading blanks, one trailing."""
+    padded = f"  {word.lower()} "
+    return {padded[i : i + 3] for i in range(len(padded) - 2)}
+
+
+def _word_similarity(query: str, content: str) -> float:
+    """Approximate pg_trgm ``word_similarity``: query vs best content extent.
+
+    Models the promise at the seam -- an exact word in the content scores
+    1.0, close spellings score high, unrelated text scores near 0 -- via
+    trigram Jaccard over word windows. It is not pg_trgm's exact extent
+    algorithm; behaviour that depends on pg_trgm internals (precise typo
+    thresholds) is pinned Postgres-only in the integration suite, like
+    stemming.
+    """
+    query_words = _WORD_RE.findall(query.lower())
+    content_words = _WORD_RE.findall(content.lower())
+    if not query_words or not content_words:
+        return 0.0
+    query_grams: set[str] = set().union(*(_trigrams(w) for w in query_words))
+    best = 0.0
+    for size in range(1, len(query_words) + 1):
+        for start in range(len(content_words) - size + 1):
+            extent: set[str] = set().union(
+                *(_trigrams(w) for w in content_words[start : start + size])
+            )
+            union = len(query_grams | extent)
+            if union:
+                best = max(best, len(query_grams & extent) / union)
+    return best
+
+
 class FakeMemoryRepository:
     """Dict-backed repository implementing the real interface."""
 
@@ -185,12 +219,20 @@ class FakeMemoryRepository:
         category: str | None = None,
         limit: int,
         offset: int = 0,
+        stale_before: datetime | None = None,
+        fresh_since: datetime | None = None,
     ) -> tuple[Sequence[Memory], int]:
         self.last_list_offset = offset
+        rows = self._filtered(user_id, visibility, category)
+        # Mirrors the adapter's COALESCE(reconfirmed_at, created_at) filter.
+        if stale_before is not None:
+            rows = [m for m in rows if (m.reconfirmed_at or m.created_at) < stale_before]
+        if fresh_since is not None:
+            rows = [m for m in rows if (m.reconfirmed_at or m.created_at) >= fresh_since]
         # Matches Postgres' ORDER BY created_at DESC, id ASC: stable-sort by
         # id ascending first, then stable-sort by created_at descending so
         # ties on created_at keep id-ascending order.
-        rows = sorted(self._filtered(user_id, visibility, category), key=lambda m: str(m.id))
+        rows = sorted(rows, key=lambda m: str(m.id))
         rows.sort(key=lambda m: m.created_at, reverse=True)
         return rows[offset : offset + limit], len(rows)
 
@@ -204,6 +246,7 @@ class FakeMemoryRepository:
         visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
+        trigram_min_word_similarity: float | None = None,
     ) -> CandidatePools:
         capped = min(limit, MAX_CANDIDATES)
         return CandidatePools(
@@ -215,6 +258,13 @@ class FakeMemoryRepository:
                 else []
             ),
             text=self._text_pool(user_id, query, visibility, category, capped),
+            trigram=(
+                self._trigram_pool(
+                    user_id, query, trigram_min_word_similarity, visibility, category, capped
+                )
+                if trigram_min_word_similarity is not None
+                else []
+            ),
         )
 
     async def graph_snapshot(
@@ -292,6 +342,23 @@ class FakeMemoryRepository:
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:limit]
 
+    def _trigram_pool(
+        self,
+        user_id: uuid.UUID,
+        query: str,
+        min_word_similarity: float,
+        visibility: MemoryVisibility,
+        category: str | None,
+        limit: int,
+    ) -> Sequence[ScoredMemory]:
+        scored = []
+        for memory in self._filtered(user_id, visibility, category):
+            score = _word_similarity(query, memory.content)
+            if score >= min_word_similarity:
+                scored.append(ScoredMemory(memory=memory, score=score))
+        scored.sort(key=lambda s: s.score, reverse=True)
+        return scored[:limit]
+
     async def similar_active(
         self,
         user_id: uuid.UUID,
@@ -318,6 +385,70 @@ class FakeMemoryRepository:
         scored = [s for s in scored if s.score >= min_similarity]
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:limit]
+
+    async def merge_memories(
+        self,
+        user_id: uuid.UUID,
+        source_ids: Sequence[uuid.UUID],
+        *,
+        content: str,
+        content_hash: str,
+        embedding: list[float],
+        embedding_model: str | None,
+        category: str,
+        importance: int | None,
+        source_client: str | None,
+        metadata: dict[str, Any],
+    ) -> tuple[Memory, list[uuid.UUID]] | None:
+        unique_ids = list(dict.fromkeys(source_ids))
+        found = [
+            row
+            for row in (self.rows.get(source_id) for source_id in unique_ids)
+            if row is not None and row.user_id == user_id and not row.is_deleted
+        ]
+        if len(found) != len(unique_ids):
+            return None
+        if len({(row.scope, row.project or "") for row in found}) != 1:
+            raise BucketMismatchError("sources span different scopes or projects")
+        # Sources retire first, so merging onto one source's exact wording is
+        # legal; only an unrelated active row collides.
+        source_id_set = {row.id for row in found}
+        for other in self._active(user_id):
+            if (
+                other.id not in source_id_set
+                and other.scope == found[0].scope
+                and (other.project or "") == (found[0].project or "")
+                and other.content_hash == content_hash
+            ):
+                raise IntegrityError("merge_memories", {}, Exception("duplicate key"))
+        replacement = Memory(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            scope=found[0].scope,
+            project=found[0].project,
+            category=category,
+            content=content,
+            content_hash=content_hash,
+            embedding=embedding,
+            embedding_model=embedding_model,
+            importance=(
+                importance if importance is not None else max(row.importance for row in found)
+            ),
+            source_client=source_client,
+            metadata_=metadata,
+            created_at=datetime.now(UTC),
+            deleted_at=None,
+            reconfirmed_at=None,
+            last_recalled_at=None,
+            recall_count=0,
+            context_count=0,
+        )
+        self.rows[replacement.id] = replacement
+        now = datetime.now(UTC)
+        for row in found:
+            row.deleted_at = now
+            row.superseded_by = replacement.id
+        return replacement, [row.id for row in found]
 
     async def mark_reconfirmed(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
         memory = self.rows.get(memory_id)
@@ -508,20 +639,20 @@ class FakeMemoryRepository:
         anchor = self.rows.get(memory_id)
         if anchor is None or anchor.user_id != user_id:
             return None
-        chain = []
-        current = memory_id
-        while previous := next(
-            (
+        # Ancestry is a tree since merge_memories: walk level by level,
+        # flatten by age, exactly like the adapter.
+        ancestors: dict[uuid.UUID, Memory] = {}
+        frontier: list[uuid.UUID] = [memory_id]
+        while frontier:
+            level = [
                 row
                 for row in self.rows.values()
-                if row.user_id == user_id and row.superseded_by == current
-            ),
-            None,
-        ):
-            chain.append(previous)
-            current = previous.id
-        chain.reverse()
-        return chain
+                if row.user_id == user_id and row.superseded_by in frontier
+            ]
+            frontier = [row.id for row in level if row.id not in ancestors]
+            for row in level:
+                ancestors.setdefault(row.id, row)
+        return sorted(ancestors.values(), key=lambda m: (m.created_at, str(m.id)))
 
     async def statistics(self, user_id: uuid.UUID) -> dict[str, Any]:
         from recallum.config import EMBEDDING_DIMENSIONS

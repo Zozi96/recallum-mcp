@@ -216,6 +216,39 @@ async def test_recall_vector_leg_ignores_vectors_from_another_model():
     assert [r.id for r in textual.results] == [stored.memory.id]
 
 
+async def test_recall_trigram_leg_catches_typos_even_when_embeddings_are_down():
+    """The fuzzy leg is the language-neutral rescue for typos and fragments.
+
+    With embeddings down and no whole-word overlap, neither primary leg can
+    reach the row; the trigram leg still does, inside degraded mode.
+    """
+    service, _, embedder = make_service()
+    stored = await service.remember(
+        USER, content="use alembic migrations here", category="fact"
+    )
+    embedder.available = False
+
+    result = await service.recall(USER, query="migrasions")
+    assert result.mode == "degraded_textual"
+    assert [r.id for r in result.results] == [stored.memory.id]
+
+
+async def test_recall_trigram_weight_zero_disables_the_leg_entirely():
+    """At weight 0.0 the leg neither votes nor smuggles rows in via importance."""
+    repo = FakeMemoryRepository()
+    embedder = FakeEmbeddingClient(dimensions=8)
+    service = MemoryService(
+        repository=repo,
+        embeddings=embedder,
+        limits=MemoryLimits(recall_trigram_weight=0.0),
+    )
+    await service.remember(USER, content="use alembic migrations here", category="fact")
+    embedder.available = False
+
+    result = await service.recall(USER, query="migrasions")
+    assert result.results == []
+
+
 async def test_recall_vector_leg_keeps_rows_predating_provenance_tracking():
     """Unknown provenance is not evidence of drift.
 

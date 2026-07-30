@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import cast, func, literal, or_, select, text, update
@@ -64,6 +65,14 @@ def _or_tsquery(query: str) -> Any:
     )
 
 
+class BucketMismatchError(ValueError):
+    """Merge sources live in different scope/project buckets.
+
+    Raised inside the merge transaction, where the rows are actually held:
+    the caller cannot pre-check without racing a concurrent write.
+    """
+
+
 @dataclass(slots=True)
 class ScoredMemory:
     """A memory row plus a per-signal score (cosine similarity or text rank)."""
@@ -74,15 +83,17 @@ class ScoredMemory:
 
 @dataclass(frozen=True, slots=True)
 class CandidatePools:
-    """The two ranked candidate lists a single query produced.
+    """The ranked candidate lists a single query produced.
 
     Each list is ordered best-first by its own signal and the scores are not
-    comparable across lists -- only the ordering is. ``vector`` is empty when no
-    embedding was available.
+    comparable across lists -- only the ordering is. ``vector`` is empty when
+    no embedding was available; ``trigram`` is empty when the fuzzy lexical
+    leg was not requested.
     """
 
     vector: Sequence[ScoredMemory]
     text: Sequence[ScoredMemory]
+    trigram: Sequence[ScoredMemory] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +129,16 @@ class MemoryRepository:
             ).scalar_one()
 
     async def history(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Sequence[Memory] | None:
-        """Return predecessors oldest-first, or None when the anchor is invisible."""
+        """Return every ancestor oldest-first, or None when the anchor is invisible.
+
+        Supersession became many-to-one with ``merge_memories``: several
+        retired rows may point at one replacement, so ancestry is a tree,
+        walked level by level and flattened by age. A linear ``update`` chain
+        comes out in exactly the order it always did. The seen-set makes the
+        walk bounded regardless of data (cycles are structurally impossible
+        -- a replacement is always a freshly inserted row -- but an infinite
+        loop is not a graceful way to learn otherwise).
+        """
         async with self._sessions.for_user(user_id) as session:
             anchor = (
                 await session.execute(
@@ -130,26 +150,27 @@ class MemoryRepository:
             ).scalar_one_or_none()
             if anchor is None:
                 return None
-            chain: list[Memory] = []
-            current = memory_id
-            while True:
-                previous = (
-                    await session.execute(
-                        select(Memory)
-                        .options(*_light())
-                        .where(
-                            Memory.user_id == user_id,
-                            Memory.superseded_by == current,
+            ancestors: dict[uuid.UUID, Memory] = {}
+            frontier: list[uuid.UUID] = [memory_id]
+            while frontier:
+                rows = (
+                    (
+                        await session.execute(
+                            select(Memory)
+                            .options(*_light())
+                            .where(
+                                Memory.user_id == user_id,
+                                Memory.superseded_by.in_(frontier),
+                            )
                         )
-                        .limit(1)
                     )
-                ).scalar_one_or_none()
-                if previous is None:
-                    break
-                chain.append(previous)
-                current = previous.id
-            chain.reverse()
-            return chain
+                    .scalars()
+                    .all()
+                )
+                frontier = [row.id for row in rows if row.id not in ancestors]
+                for row in rows:
+                    ancestors.setdefault(row.id, row)
+            return sorted(ancestors.values(), key=lambda m: (m.created_at, str(m.id)))
 
     async def statistics(self, user_id: uuid.UUID) -> dict[str, Any]:
         """Derive per-user aggregates in one forced-RLS transaction."""
@@ -355,10 +376,23 @@ class MemoryRepository:
         category: str | None = None,
         limit: int,
         offset: int = 0,
+        stale_before: datetime | None = None,
+        fresh_since: datetime | None = None,
     ) -> tuple[Sequence[Memory], int]:
-        """Return a page of active memories plus the total matching count."""
+        """Return a page of active memories plus the total matching count.
+
+        ``stale_before`` keeps only rows whose last confirmation --
+        ``reconfirmed_at``, else ``created_at`` -- predates the cutoff (the
+        verification queue); ``fresh_since`` is its complement. At most one
+        is set; the total honours the same filter as the page.
+        """
         async with self._sessions.for_user(user_id) as session:
             filters = self._filters(user_id, visibility=visibility, category=category)
+            confirmed_at = func.coalesce(Memory.reconfirmed_at, Memory.created_at)
+            if stale_before is not None:
+                filters.append(confirmed_at < stale_before)
+            if fresh_since is not None:
+                filters.append(confirmed_at >= fresh_since)
             count_stmt = select(func.count()).select_from(Memory).where(*filters)
             total = (await session.execute(count_stmt)).scalar_one()
             stmt = (
@@ -437,8 +471,9 @@ class MemoryRepository:
         visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
+        trigram_min_word_similarity: float | None = None,
     ) -> CandidatePools:
-        """Both retrieval signals for one query, in a single transaction.
+        """Every retrieval signal for one query, in a single transaction.
 
         Replaces a pair of separately-opened searches. Each open cost a pool
         checkout, a BEGIN, a ``set_config`` round trip for the RLS context and a
@@ -449,13 +484,14 @@ class MemoryRepository:
         not the other.
 
         ``embedding`` is ``None`` when the embedding service is unavailable; the
-        vector pool is then empty and the caller degrades to textual only.
+        vector pool is then empty and the caller degrades to lexical-only.
         ``embedding_model`` names the coordinate space the query vector lives
         in; only rows embedded in that space (or predating provenance
-        tracking) may take part in the vector pool. Fusing the two pools is
-        deliberately left to the caller: it is pure computation over ranked
-        lists, and pushing it behind this seam would force every adapter to
-        reimplement it.
+        tracking) may take part in the vector pool.
+        ``trigram_min_word_similarity`` enables the fuzzy lexical pool; None
+        skips its query entirely. Fusing the pools is deliberately left to
+        the caller: it is pure computation over ranked lists, and pushing it
+        behind this seam would force every adapter to reimplement it.
         """
         capped = min(limit, MAX_CANDIDATES)
         filters = self._filters(user_id, visibility=visibility, category=category)
@@ -466,7 +502,12 @@ class MemoryRepository:
                     session, embedding, embedding_model, filters, capped
                 )
             text_pool = await self._text_candidates(session, query, filters, capped)
-            return CandidatePools(vector=vector, text=text_pool)
+            trigram: list[ScoredMemory] = []
+            if trigram_min_word_similarity is not None:
+                trigram = await self._trigram_candidates(
+                    session, query, trigram_min_word_similarity, filters, capped
+                )
+            return CandidatePools(vector=vector, text=text_pool, trigram=trigram)
 
     async def _vector_candidates(
         self,
@@ -531,6 +572,46 @@ class MemoryRepository:
             .options(*_light())
             .where(*filters, Memory.content_tsv.op("@@")(ts_query))
             .order_by(rank.desc(), Memory.created_at.desc())
+            .limit(limit)
+        )
+        return [
+            ScoredMemory(memory=row.Memory, score=float(row.score))
+            for row in (await session.execute(stmt)).all()
+        ]
+
+    async def _trigram_candidates(
+        self,
+        session: AsyncSession,
+        query: str,
+        min_word_similarity: float,
+        filters: list[Any],
+        limit: int,
+    ) -> list[ScoredMemory]:
+        """Fuzzy lexical candidates: language-neutral trigram word-similarity.
+
+        Catches what the other legs miss: typos, identifier and camelCase
+        fragments, and words the full-text dictionary mangles (``content_tsv``
+        uses the English configuration, so Spanish content gets English
+        stemming). ``word_similarity`` compares the query against its best
+        matching extent of the content, so one close variant of one content
+        word is enough. The ``<%`` predicate is what keeps the trigram GIN
+        index usable; ranking is by closeness, recency breaking ties.
+        """
+        await session.execute(
+            select(
+                func.set_config(
+                    "pg_trgm.word_similarity_threshold",
+                    str(min_word_similarity),
+                    True,  # transaction-local, like the hnsw knob above
+                )
+            )
+        )
+        score = func.word_similarity(query, Memory.content).label("score")
+        stmt = (
+            select(Memory, score)
+            .options(*_light())
+            .where(*filters, literal(query).op("<%")(Memory.content))
+            .order_by(score.desc(), Memory.created_at.desc())
             .limit(limit)
         )
         return [
@@ -732,6 +813,87 @@ class MemoryRepository:
             )
             result = await session.execute(stmt)
             return result.rowcount == 1
+
+    async def merge_memories(
+        self,
+        user_id: uuid.UUID,
+        source_ids: Sequence[uuid.UUID],
+        *,
+        content: str,
+        content_hash: str,
+        embedding: list[float],
+        embedding_model: str | None,
+        category: str,
+        importance: int | None,
+        source_client: str | None,
+        metadata: dict[str, Any],
+    ) -> tuple[Memory, list[uuid.UUID]] | None:
+        """Retire several memories and replace them with one consolidated claim.
+
+        All-or-nothing inside one transaction: every source must be an active
+        row of this user's, and all must share one scope/project bucket
+        (``BucketMismatchError`` otherwise -- merging across buckets would
+        move claims between namespaces, which is ``reassign_project``'s
+        supervised territory). Sources are retired *before* the replacement
+        is inserted, so consolidating onto one source's exact wording never
+        trips the active-duplicate index; a collision with an unrelated
+        active row still raises ``IntegrityError`` and rolls everything back.
+        ``importance=None`` inherits the loudest source. Unknown, foreign and
+        already-retired ids are indistinguishable: ``None``, nothing changed.
+        """
+        unique_ids = list(dict.fromkeys(source_ids))
+        async with self._sessions.for_user(user_id) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(Memory)
+                        .options(*_light())
+                        .where(
+                            Memory.user_id == user_id,
+                            Memory.id.in_(unique_ids),
+                            Memory.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(rows) != len(unique_ids):
+                return None
+            if len({(row.scope, row.project or "") for row in rows}) != 1:
+                raise BucketMismatchError("sources span different scopes or projects")
+            await session.execute(
+                update(Memory)
+                .where(Memory.user_id == user_id, Memory.id.in_(unique_ids))
+                .values(deleted_at=func.now())
+            )
+            replacement = Memory(
+                user_id=user_id,
+                scope=rows[0].scope,
+                project=rows[0].project,
+                category=category,
+                content=content,
+                content_hash=content_hash,
+                embedding=embedding,
+                embedding_model=embedding_model,
+                importance=(
+                    importance
+                    if importance is not None
+                    else max(row.importance for row in rows)
+                ),
+                source_client=source_client,
+                metadata_=metadata,
+            )
+            session.add(replacement)
+            await session.flush()
+            await session.execute(
+                update(Memory)
+                .where(Memory.user_id == user_id, Memory.id.in_(unique_ids))
+                .values(superseded_by=replacement.id)
+            )
+            await session.refresh(replacement, attribute_names=["created_at"])
+            return replacement, [row.id for row in rows]
 
     async def mark_reconfirmed(
         self, user_id: uuid.UUID, memory_id: uuid.UUID

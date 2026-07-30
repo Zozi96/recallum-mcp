@@ -90,6 +90,34 @@ async def test_search_text_collapses_inflections(container):
     assert stored.memory.id in {r.memory.id for r in pools.text}
 
 
+async def test_search_trigram_tolerates_typos(container):
+    """Postgres-only: pg_trgm word similarity over real trigram extents.
+
+    The contract pins only the exact-word and unrelated extremes; how close
+    a typo may be is a property of pg_trgm itself, so it is pinned here,
+    like stemming.
+    """
+    user_id = await _make_user_with_key(container, "trigram@example.com")
+    service = container.memory_service()
+    stored = await service.remember(
+        user_id, content="use alembic migrations for schema changes", category="fact"
+    )
+
+    repo = container.memory_repository()
+    pools = await repo.search_candidates(
+        user_id,
+        query="migrasions",
+        embedding=None,
+        embedding_model=None,
+        visibility=MemoryVisibility("all"),
+        limit=10,
+        trigram_min_word_similarity=0.4,
+    )
+    assert stored.memory.id in {r.memory.id for r in pools.trigram}
+    # The typo'd word never survives whole-word full-text matching.
+    assert stored.memory.id not in {r.memory.id for r in pools.text}
+
+
 async def test_recall_still_works_when_embeddings_are_unavailable(container):
     """The degraded-textual path must actually return memories.
 
@@ -243,7 +271,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0009_context_usage_split"
+        assert version == "0010_trigram_leg"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")

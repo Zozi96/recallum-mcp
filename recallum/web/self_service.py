@@ -222,6 +222,7 @@ def create_self_service_router(
         scope: Annotated[Scope | None, Query()] = None,
         project: Annotated[str | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
+        stale: Annotated[bool | None, Query()] = None,
         limit: Annotated[int | None, Query()] = None,
         offset: Annotated[int, Query()] = 0,
     ) -> ListResult:
@@ -230,6 +231,7 @@ def create_self_service_router(
             scope=scope,
             project=project,
             category=category,
+            stale=stale,
             limit=limit,
             offset=offset,
         )

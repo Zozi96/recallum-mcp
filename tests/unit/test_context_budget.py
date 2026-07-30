@@ -35,7 +35,7 @@ def flatten(result) -> list[str]:
     return [item.content for group in result.groups for item in group.items]
 
 
-def test_globals_come_before_project_memories_and_duplicates_collapse():
+def test_pools_merge_without_duplicates():
     shared = memory("shared")
     budget = SessionContextBudget(max_items=10, max_chars=1000)
 
@@ -48,6 +48,63 @@ def test_globals_come_before_project_memories_and_duplicates_collapse():
     assert result.project == "recallum"
     assert result.truncated is False
     assert result.omitted == 0
+
+
+def test_high_importance_project_rows_outrank_low_importance_globals():
+    """Pool membership is not priority.
+
+    The budget cuts inside a category, so globals-before-project ordering
+    used to drop an importance-9 project constraint while keeping
+    importance-1 globals. Pools merge by importance instead.
+    """
+    weak_globals = [
+        memory(f"weak global {i}", category="constraint", importance=1) for i in range(2)
+    ]
+    vital = memory(
+        "vital project constraint",
+        category="constraint",
+        importance=9,
+        scope="project",
+        project="p",
+    )
+    budget = SessionContextBudget(max_items=2, max_chars=1000)
+
+    result = budget.assemble(weak_globals, [vital], project="p", total_available=3)
+
+    assert flatten(result) == ["vital project constraint", "weak global 0"]
+
+
+def test_globals_keep_winning_exact_importance_and_recency_ties():
+    tied_global = memory("tied global")
+    tied_project = memory("tied project", scope="project", project="p")
+    budget = SessionContextBudget(max_items=1, max_chars=1000)
+
+    result = budget.assemble([tied_global], [tied_project], project="p", total_available=2)
+
+    assert flatten(result) == ["tied global"]
+
+
+def test_stale_before_annotates_unconfirmed_items_without_reordering():
+    old = memory("old claim", age_days=0)
+    fresh = memory("fresh claim", age_days=40)
+    reconfirmed = memory("old but reconfirmed", age_days=0)
+    reconfirmed.reconfirmed_at = BASE + timedelta(days=40)
+    budget = SessionContextBudget(max_items=10, max_chars=1000)
+
+    result = budget.assemble(
+        [old, fresh, reconfirmed],
+        [],
+        project=None,
+        total_available=3,
+        stale_before=BASE + timedelta(days=30),
+    )
+
+    by_content = {item.content: item.stale for g in result.groups for item in g.items}
+    assert by_content == {
+        "old claim": True,
+        "fresh claim": False,
+        "old but reconfirmed": False,
+    }
 
 
 def test_groups_follow_the_declared_category_order():

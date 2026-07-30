@@ -10,9 +10,9 @@ instructions always override recalled memory.
 
 ## Tool Names
 
-Recallum exposes eight tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
-`update`, `list_memories`, and `forget`. The prefix differs by client, because Claude Code
-namespaces a plugin-bundled MCP server:
+Recallum exposes nine tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
+`update`, `merge_memories`, `list_memories`, and `forget`. The prefix differs by client, because
+Claude Code namespaces a plugin-bundled MCP server:
 
 | Client | Prefix | Example |
 | --- | --- | --- |
@@ -43,7 +43,9 @@ Below, tools are written unprefixed.
    re-stored, `last_recalled_at`/`recall_count` say whether the memory actually matches recall
    queries, and `context_count` how often it rode along in session snapshots. An
    old memory that was never reconfirmed deserves verification before being trusted; verifying one
-   is a good moment to re-store it unchanged, which stamps `reconfirmed_at`.
+   is a good moment to re-store it unchanged, which stamps `reconfirmed_at`. Context items flag
+   this as `stale: true`, and `list_memories` with `stale=true` returns the full verification
+   queue for the current scope.
 5. After substantial work, run one capture scan: what newly verified context would save a future
    agent several minutes of rediscovery or prevent a likely mistake? Store only answers likely to
    remain true across sessions. Zero items is valid; prefer a few high-signal items over a recap,
@@ -67,7 +69,9 @@ Below, tools are written unprefixed.
    memories about the same subject — across every category, since a `fact` can contradict a
    `decision` — which are otherwise invisible: the response shows your new memory and nothing
    else. Similarity means the two are about the same thing, never that they agree. Read both and
-   decide.
+   decide. When several active memories restate one underlying claim, consolidate them with
+   `merge_memories`: one consolidated statement, all sources retired and linked (recoverable via
+   `get_memory` history). Never merge contradictions — correct the wrong one with `update`.
 9. When a stored fact has changed, call `update` with the new `content` instead of `forget` plus
    `remember`. That retires the old memory and links it to its replacement, so the correction is
    recoverable and the two never both look current. Passing only `importance`, `category`, or

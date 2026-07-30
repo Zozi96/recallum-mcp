@@ -1,0 +1,33 @@
+{
+  "$comment": "Starter golden dataset for `recallum-admin eval`. Grow it with real queries your agents got wrong: every regression you fix should leave a query behind. Tags name the retrieval class a query exercises so tuning changes show per-class effects.",
+  "corpus": [
+    {"key": "pnpm", "content": "Prefer pnpm over npm for JavaScript package installs", "category": "preference", "importance": 7},
+    {"key": "db", "content": "The database of record is PostgreSQL 17 with pgvector", "category": "fact", "importance": 8},
+    {"key": "deploy", "content": "Deploys go through Dokploy on the VPS, never manual docker commands", "category": "constraint", "importance": 8},
+    {"key": "tests", "content": "Run unit tests with uv run pytest tests/unit before pushing", "category": "fact", "importance": 6},
+    {"key": "lint", "content": "Ruff is the only linter and formatter, line length 100", "category": "preference", "importance": 5},
+    {"key": "branch", "content": "Feature branches are named feat/<ticket-id>", "category": "preference", "importance": 4},
+    {"key": "tz", "content": "All timestamps are stored timezone-aware in UTC", "category": "constraint", "importance": 9},
+    {"key": "es-backup", "content": "Los respaldos de la base de datos corren cada noche a las 02:00", "category": "fact", "importance": 6},
+    {"key": "es-docs", "content": "La documentación de usuario se escribe en español", "category": "preference", "importance": 6},
+    {"key": "auth", "content": "API keys are stored only as SHA-256 hashes, never plaintext", "category": "constraint", "importance": 9},
+    {"key": "sessionprovider", "content": "SessionProvider.for_user opens an RLS-scoped transaction per call", "category": "fact", "importance": 7},
+    {"key": "ollama", "content": "Embeddings come from local Ollama running embeddinggemma 300m", "category": "fact", "importance": 7}
+  ],
+  "queries": [
+    {"query": "which package manager should I use", "expect": ["pnpm"], "tag": "semantic"},
+    {"query": "where do production releases happen", "expect": ["deploy"], "tag": "semantic"},
+    {"query": "how are credentials protected", "expect": ["auth"], "tag": "semantic"},
+    {"query": "what produces the embedding vectors", "expect": ["ollama"], "tag": "semantic"},
+    {"query": "time zone handling rules", "expect": ["tz"], "tag": "semantic"},
+    {"query": "pgvector", "expect": ["db"], "tag": "exact"},
+    {"query": "ruff line length", "expect": ["lint"], "tag": "exact"},
+    {"query": "feat branch naming", "expect": ["branch"], "tag": "exact"},
+    {"query": "postgersql database", "expect": ["db"], "tag": "typo"},
+    {"query": "pnmp packages", "expect": ["pnpm"], "tag": "typo"},
+    {"query": "SessionProvider", "expect": ["sessionprovider"], "tag": "identifier"},
+    {"query": "for_user transaction", "expect": ["sessionprovider"], "tag": "identifier"},
+    {"query": "respaldos nocturnos de la base", "expect": ["es-backup"], "tag": "spanish"},
+    {"query": "en qué idioma va la documentación", "expect": ["es-docs"], "tag": "spanish"}
+  ]
+}
