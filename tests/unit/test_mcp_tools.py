@@ -43,6 +43,21 @@ def test_server_instructions_cover_reusable_context_beyond_decisions():
     assert "never infer consent" in INSTRUCTIONS
 
 
+def test_server_instructions_pin_english_for_both_writes_and_queries():
+    """The rule has to reach clients that never load the plugin skill.
+
+    Both halves are load-bearing. Dedup is an exact hash of the content and
+    ``content_tsv`` is built with the English configuration, so a mixed
+    store splits one fact into two memories; and storing English while
+    querying in the session's language drops the full-text and trigram legs
+    entirely, leaving only embeddings.
+    """
+    collapsed = " ".join(INSTRUCTIONS.split())
+    assert "Write every memory in English" in collapsed
+    assert "phrase every recall query in English" in collapsed
+    assert "verbatim" in collapsed
+
+
 @dataclass
 class ServerInfo:
     url: str

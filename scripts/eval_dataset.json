@@ -1,5 +1,6 @@
 {
   "$comment": "Starter golden dataset for `recallum-admin eval`. Grow it with real queries your agents got wrong: every regression you fix should leave a query behind. Tags name the retrieval class a query exercises so tuning changes show per-class effects.",
+  "$language_experiment": "The es-*/en-* corpus keys and the four <content>-<query> tags (es-es, es-en, en-en, en-es) form a 2x2 measuring the English-only memory policy. Each fact is stored once and queried in BOTH languages, so es-es vs es-en and en-en vs en-es are within-fact comparisons -- the language is the only variable. The two halves use disjoint topics so an English query cannot accidentally retrieve the Spanish half. Read it as: en-en is the new happy path; es-en is what the transition costs while pre-policy Spanish memories are still stored; en-es is what half-compliance costs when an agent stores English but keeps querying in the user's language; es-es is the pre-policy control. CAVEAT: Spanish and English technical vocabulary share Latin roots and the trigram leg is character-based, so cognates hand the cross-language tags a partial lexical freebie. Treat es-en and en-es as an OPTIMISTIC bound on the mixed-language penalty, not a measurement of it. Adding or renaming corpus rows changes the dataset shape: prune the eval user first, or stale rows from the previous revision compete in the rankings.",
   "corpus": [
     {"key": "pnpm", "content": "Prefer pnpm over npm for JavaScript package installs", "category": "preference", "importance": 7},
     {"key": "db", "content": "The database of record is PostgreSQL 17 with pgvector", "category": "fact", "importance": 8},
@@ -8,11 +9,19 @@
     {"key": "lint", "content": "Ruff is the only linter and formatter, line length 100", "category": "preference", "importance": 5},
     {"key": "branch", "content": "Feature branches are named feat/<ticket-id>", "category": "preference", "importance": 4},
     {"key": "tz", "content": "All timestamps are stored timezone-aware in UTC", "category": "constraint", "importance": 9},
-    {"key": "es-backup", "content": "Los respaldos de la base de datos corren cada noche a las 02:00", "category": "fact", "importance": 6},
-    {"key": "es-docs", "content": "La documentación de usuario se escribe en español", "category": "preference", "importance": 6},
     {"key": "auth", "content": "API keys are stored only as SHA-256 hashes, never plaintext", "category": "constraint", "importance": 9},
     {"key": "sessionprovider", "content": "SessionProvider.for_user opens an RLS-scoped transaction per call", "category": "fact", "importance": 7},
-    {"key": "ollama", "content": "Embeddings come from local Ollama running embeddinggemma 300m", "category": "fact", "importance": 7}
+    {"key": "ollama", "content": "Embeddings come from local Ollama running embeddinggemma 300m", "category": "fact", "importance": 7},
+
+    {"key": "es-backup", "content": "Los respaldos de la base de datos corren cada noche a las 02:00", "category": "fact", "importance": 6},
+    {"key": "es-docs", "content": "La documentación de usuario se escribe en español", "category": "preference", "importance": 6},
+    {"key": "es-facturas", "content": "Las facturas se emiten el primer día hábil de cada mes", "category": "fact", "importance": 7},
+    {"key": "es-soporte", "content": "El horario de atención al cliente termina a las 18:00", "category": "constraint", "importance": 7},
+
+    {"key": "en-staging", "content": "The staging environment wipes its data every Sunday night", "category": "fact", "importance": 6},
+    {"key": "en-oncall", "content": "The on-call engineer rotates every Monday at 09:00", "category": "fact", "importance": 6},
+    {"key": "en-review", "content": "Pull requests need two approvals before merge", "category": "constraint", "importance": 7},
+    {"key": "en-retention", "content": "Audit logs are retained for eighteen months", "category": "constraint", "importance": 7}
   ],
   "queries": [
     {"query": "which package manager should I use", "expect": ["pnpm"], "tag": "semantic"},
@@ -27,7 +36,25 @@
     {"query": "pnmp packages", "expect": ["pnpm"], "tag": "typo"},
     {"query": "SessionProvider", "expect": ["sessionprovider"], "tag": "identifier"},
     {"query": "for_user transaction", "expect": ["sessionprovider"], "tag": "identifier"},
-    {"query": "respaldos nocturnos de la base", "expect": ["es-backup"], "tag": "spanish"},
-    {"query": "en qué idioma va la documentación", "expect": ["es-docs"], "tag": "spanish"}
+
+    {"query": "respaldos nocturnos de la base", "expect": ["es-backup"], "tag": "es-es"},
+    {"query": "en qué idioma va la documentación", "expect": ["es-docs"], "tag": "es-es"},
+    {"query": "cuándo se emiten las facturas", "expect": ["es-facturas"], "tag": "es-es"},
+    {"query": "hasta qué hora atienden los clientes", "expect": ["es-soporte"], "tag": "es-es"},
+
+    {"query": "nightly database backup schedule", "expect": ["es-backup"], "tag": "es-en"},
+    {"query": "what language is the user documentation written in", "expect": ["es-docs"], "tag": "es-en"},
+    {"query": "when are invoices issued", "expect": ["es-facturas"], "tag": "es-en"},
+    {"query": "when does customer support close", "expect": ["es-soporte"], "tag": "es-en"},
+
+    {"query": "when does the staging data get wiped", "expect": ["en-staging"], "tag": "en-en"},
+    {"query": "who is on call this week", "expect": ["en-oncall"], "tag": "en-en"},
+    {"query": "how many approvals does a merge need", "expect": ["en-review"], "tag": "en-en"},
+    {"query": "how long are audit logs kept", "expect": ["en-retention"], "tag": "en-en"},
+
+    {"query": "cuándo se borran los datos del entorno de pruebas", "expect": ["en-staging"], "tag": "en-es"},
+    {"query": "quién está de guardia esta semana", "expect": ["en-oncall"], "tag": "en-es"},
+    {"query": "cuántas aprobaciones hacen falta para integrar un cambio", "expect": ["en-review"], "tag": "en-es"},
+    {"query": "cuánto tiempo se conservan los registros de auditoría", "expect": ["en-retention"], "tag": "en-es"}
   ]
 }

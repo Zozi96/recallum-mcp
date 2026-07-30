@@ -22,6 +22,23 @@ Claude Code namespaces a plugin-bundled MCP server:
 Use whichever prefix is actually present in your tool list; the session hook names the right one.
 Below, tools are written unprefixed.
 
+## Memory Language
+
+Write every stored memory in English, and phrase every `recall` query in English, whatever language
+the session speaks. This is not a style preference. Deduplication is an exact hash of the stored
+content and the full-text index uses the English configuration, so one fact written once in Spanish
+and once in English becomes two memories that no single query retrieves, and that exact dedup can
+never collapse.
+
+Both halves are required. Storing in English while still querying in the user's language is worse
+than storing in that language: the full-text and trigram legs stop matching entirely and only the
+semantic leg carries the search.
+
+Keep verbatim whatever only means something as written — identifiers, commands, file paths, error
+strings, and terms the user explicitly defined. A preference *about* another language is itself
+stored in English: `User-facing documentation is written in Spanish`, not the Spanish sentence.
+Translating an existing, still-true memory is not a reason to call `update`.
+
 ## Workflow
 
 1. Use the opaque canonical project key supplied by the Recallum session hook. Without that
@@ -104,6 +121,8 @@ Below, tools are written unprefixed.
 - Substantial work ended with one brief capture scan for newly verified reusable context.
 - Each newly stored item is atomic, durable, correctly scoped, and non-sensitive or explicitly
   approved.
+- Every memory written and every `recall` query issued was in English, with identifiers, commands
+  and user-defined terms left verbatim.
 - Overlapping evidence was consolidated instead of stored as redundant memories.
 - No memory write was made when nothing durable was settled.
 - Delegated work carried the project key and relevant memories in the subagent prompt, and only the

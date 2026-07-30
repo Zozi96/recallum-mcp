@@ -9,11 +9,13 @@ idempotent seeding, and actionable miss reporting.
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 
 from recallum.evaluation import (
     load_dataset,
+    read_dataset,
     recall_fraction,
     reciprocal_rank,
     render_report,
@@ -52,6 +54,38 @@ def make_eval_service() -> tuple[MemoryService, FakeMemoryRepository]:
     )
     repo = FakeMemoryRepository()
     return MemoryService(repository=repo, embeddings=embedder), repo
+
+
+SHIPPED_DATASET = Path(__file__).resolve().parents[2] / "scripts" / "eval_dataset.json"
+
+
+def test_shipped_dataset_keeps_the_language_2x2_paired():
+    """The language tags only mean anything while both halves stay paired.
+
+    ``es-es`` vs ``es-en`` and ``en-en`` vs ``en-es`` are read as within-fact
+    comparisons -- the same stored memory, queried in two languages, so the
+    language is the only variable. Adding a query to one tag without its twin
+    silently degrades that into a comparison across different facts, which
+    still produces a plausible-looking number nobody would question. This is
+    the only coverage the shipped dataset has: the harness tests above run on
+    an inline fixture.
+    """
+    dataset = read_dataset(SHIPPED_DATASET)
+    covered: dict[str, set[str]] = {}
+    for query in dataset.queries:
+        covered.setdefault(query.tag, set()).update(query.expect)
+
+    assert covered["es-es"] == covered["es-en"]
+    assert covered["en-en"] == covered["en-es"]
+    # Disjoint topics: a cross-language query that could plausibly land on the
+    # other half's memory would score retrieval breadth, not the language.
+    assert covered["es-es"].isdisjoint(covered["en-en"])
+    # Importance feeds ranking through recall_importance_weight, so an
+    # unmatched profile confounds the two halves with a second variable.
+    importance = {item.key: item.importance for item in dataset.corpus}
+    assert sorted(importance[key] for key in covered["es-es"]) == sorted(
+        importance[key] for key in covered["en-en"]
+    )
 
 
 def test_metric_math_pins_the_edges():

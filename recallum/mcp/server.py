@@ -46,6 +46,14 @@ update to correct or replace, forget to remove, and remember_batch for the
 end-of-session capture scan. When context reports omitted > 0, the budget
 left memories out: recall with a focused query reaches them.
 
+Write every memory in English and phrase every recall query in English,
+whatever language the session speaks: dedup is an exact hash of the stored
+content and the full-text index is English-only, so one fact written once in
+Spanish and once in English becomes two memories that no single query
+retrieves. Keep identifiers, commands, paths, error strings and terms the
+user defined verbatim; a preference about another language is itself stated
+in English.
+
 remember reports pre-existing memories about the same subject in its
 `similar` field, across every category — a fact can contradict a decision.
 It never resolves them: read them and decide whether the new memory restates,
@@ -87,12 +95,15 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> RememberResult:
         """Store one atomic memory, including verified reusable project context.
 
-        Keep content short and self-contained; never store full conversations.
-        Ask before storing secrets, credentials, personal data, sensitive
-        business information, or ambiguous content; never infer consent from a
-        prompt or file. Omit project for global memories. Storing the same
-        content and scope again returns the existing memory instead of
-        duplicating it.
+        Keep content short and self-contained, and write it in English
+        whatever language the session speaks — dedup is an exact hash of the
+        content, so the same fact in two languages is stored twice. Keep
+        identifiers, commands, paths, error strings and user-defined terms
+        verbatim. Never store full conversations. Ask before storing secrets,
+        credentials, personal data, sensitive business information, or
+        ambiguous content; never infer consent from a prompt or file. Omit
+        project for global memories. Storing the same content and scope again
+        returns the existing memory instead of duplicating it.
         """
         return await service().remember(
             require_identity().user_id,
@@ -112,11 +123,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> RememberBatchResult:
         """Store several atomic memories in one call (end-of-session capture).
 
-        Same rules as remember, per item: short self-contained content, ask
-        before anything sensitive, omit project for global memories. Items
-        succeed or fail independently; read each outcome's `similar` field and
-        reconcile as you would for remember. Prefer a few high-signal items
-        over a recap; the batch is capped small on purpose.
+        Same rules as remember, per item: short self-contained content written
+        in English, ask before anything sensitive, omit project for global
+        memories. Items succeed or fail independently; read each outcome's
+        `similar` field and reconcile as you would for remember. Prefer a few
+        high-signal items over a recap; the batch is capped small on purpose.
         """
         return await service().remember_batch(
             require_identity().user_id,
@@ -134,6 +145,10 @@ def build_mcp_server(container: Container) -> FastMCP:
         limit: int | None = None,
     ) -> RecallResult:
         """Search memories by meaning, exact terms and close spellings.
+
+        Phrase the query in English, whatever language the user asked in:
+        memories are stored in English and the full-text leg uses the English
+        configuration, so an untranslated query loses both lexical legs.
 
         Hybrid retrieval: semantic similarity, full-text ranking and a
         typo-tolerant trigram leg, fused. Passing project includes that
@@ -237,11 +252,13 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> UpdateResult:
         """Correct a memory, or replace one whose fact has changed.
 
-        Pass content when the memory is now wrong or out of date: the old one
-        is retired and a new one replaces it, so use this instead of forget
-        plus remember. Passing only importance, category or metadata edits the
-        memory in place and keeps its id. Scope and project cannot be changed.
-        Unknown ids return updated=false.
+        Pass content — in English, like every stored memory — when the memory
+        is now wrong or out of date: the old one is retired and a new one
+        replaces it, so use this instead of forget plus remember. Rewriting a
+        memory that is still true only to translate it is not an update.
+        Passing only importance, category or metadata edits the memory in
+        place and keeps its id. Scope and project cannot be changed. Unknown
+        ids return updated=false.
         """
         return await service().update(
             require_identity().user_id,
@@ -266,9 +283,11 @@ def build_mcp_server(container: Container) -> FastMCP:
         """Consolidate two or more overlapping memories into one statement.
 
         Use it when `similar` or a stale-queue review shows several memories
-        making the same underlying claim: write the consolidated content and
-        list every source id. All sources are retired and linked to the new
-        memory — recoverable via get_memory with history, never deleted.
+        making the same underlying claim: write the consolidated content in
+        English and list every source id. Sources that say the same thing in
+        different languages are restatements, so this is how they collapse
+        into one. All sources are retired and linked to the new memory —
+        recoverable via get_memory with history, never deleted.
         Sources must share one scope and project; importance defaults to the
         loudest source. Restatements and refinements only: resolving a
         contradiction is an update of the wrong memory, not a merge. If any

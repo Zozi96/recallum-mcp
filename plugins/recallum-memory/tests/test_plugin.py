@@ -131,6 +131,18 @@ class HookTests(unittest.TestCase):
         self.assertIn("newly verified reusable context", context)
         self.assertIn("save a future agent rediscovery", context)
 
+    def test_session_start_pins_english_for_both_writes_and_queries(self) -> None:
+        # The skill that explains the rule in full is loaded lazily, so the
+        # hint has to carry it: a capture can happen before the skill ever
+        # loads. Both halves are asserted because storing English while
+        # querying in the session's language is worse than not switching --
+        # it drops the full-text and trigram legs and leaves only embeddings.
+        context = " ".join(
+            self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"}).split()
+        )
+        self.assertIn("Write memories and phrase recall queries in English", context)
+        self.assertIn("verbatim", context)
+
     def test_codex_is_told_the_bare_server_tool_name(self) -> None:
         # Codex sets CLAUDE_PLUGIN_ROOT alongside PLUGIN_ROOT for compatibility
         # with hooks written against Claude Code, so this is what a real Codex
@@ -521,6 +533,19 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("capture scan", text)
         self.assertIn("passing test is evidence", text)
         self.assertIn("current branch or worktree", text)
+
+    def test_memory_skill_pins_english_and_its_verbatim_exceptions(self) -> None:
+        text = " ".join(
+            (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        self.assertIn("Write every stored memory in English", text)
+        self.assertIn("phrase every `recall` query in English", text)
+        # Without the exceptions the rule destroys the content it is meant
+        # to make retrievable, and re-translation churn looks like an update.
+        self.assertIn("identifiers, commands, file paths, error", text)
+        self.assertIn("Translating an existing, still-true memory is not a reason", text)
 
     def test_both_marketplaces_point_at_the_same_local_plugin(self) -> None:
         codex = self._load(CODEX_MARKETPLACE)

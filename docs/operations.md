@@ -184,8 +184,9 @@ counted, skipped, and picked up on the next run. `/admin/status` reports
 
 `recallum-admin eval` replays a golden dataset (a small corpus plus queries
 with expected results) through the ordinary remember/recall paths and reports
-MRR and recall@k per query tag (semantic, exact, typo, spanish, identifier),
-so the fusion tunables become measured choices instead of defaults:
+MRR and recall@k per query tag (semantic, exact, typo, identifier, plus the
+four language tags below), so the fusion tunables become measured choices
+instead of defaults:
 
 ```bash
 docker compose exec recallum uv run --no-sync recallum-admin eval \
@@ -200,6 +201,31 @@ query behind. `--trigram-weight` / `--importance-weight` override one knob for
 an A/B run; numbers are only comparable against the same dataset and the same
 embedding model. Persist a winning value via the `RECALLUM__LIMITS__*`
 environment variables.
+
+### Reading the language tags
+
+Memories are written in English on purpose: dedup is an exact content hash and
+`content_tsv` uses the English text-search configuration, so one fact stored in
+two languages becomes two memories that no single query retrieves. The dataset
+measures what that policy costs with a 2×2 — each fact is stored once and
+queried in both languages, so the language is the only variable:
+
+| tag | stored | queried | what a low score means |
+| --- | --- | --- | --- |
+| `en-en` | English | English | the policy itself is not paying off |
+| `es-es` | Spanish | Spanish | pre-policy control; the baseline to beat |
+| `es-en` | Spanish | English | pre-policy memories are unreachable — the migration is urgent |
+| `en-es` | English | Spanish | half-compliance is expensive — agents must translate queries too |
+
+`en-es` is the one to watch. Storing English while still querying in the user's
+language drops the full-text and trigram legs and leaves only the embedding
+leg, which is worse than never having switched. If it sags, the instruction
+reached the write path but not the read path.
+
+Both cross-language tags are an **optimistic** bound: Spanish and English
+technical vocabulary share Latin roots and the trigram leg is character-based,
+so cognates hand those queries a partial lexical freebie that real mixed-language
+traffic will not always get.
 
 ## Users and API keys
 

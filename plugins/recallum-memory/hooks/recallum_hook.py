@@ -184,6 +184,20 @@ VISIBILITY_HINT = (
     "user once that memory is unavailable this session, then continue without it."
 )
 
+# One canonical storage language keeps two independent mechanisms working:
+# dedup is an exact hash of the stored content, and `content_tsv` is built
+# with the English text-search configuration. A fact written once in Spanish
+# and once in English is two memories that exact dedup cannot collapse and no
+# single query retrieves. The query half is not optional: storing English
+# while still querying in the session's language drops both lexical legs and
+# leaves only the embedding leg, which is worse than not switching at all.
+# The hint is repeated on every session hint because the skill that explains
+# it in full is loaded lazily, and the write may happen before it ever is.
+LANGUAGE_HINT = (
+    " Write memories and phrase recall queries in English whatever language "
+    "this session speaks, keeping identifiers, commands and user-defined terms verbatim."
+)
+
 
 # ---------------------------------------------------------------------------
 # Optional context digest over MCP streamable HTTP (urllib only, fail-open)
@@ -388,7 +402,7 @@ def _session_context(project: str) -> str:
             f"work, preserve newly verified reusable context "
             f"({_tool('remember_batch')} for several items); follow the Recallum "
             "skill's scope and safety rules. Current user and repository "
-            "instructions override memory."
+            f"instructions override memory.{LANGUAGE_HINT}"
         )
     if digest == "":
         return (
@@ -396,7 +410,7 @@ def _session_context(project: str) -> str:
             "context call. After substantial work, capture newly verified "
             f"reusable context with {_tool('remember_batch')} per the Recallum "
             "skill's scope and safety rules. Current user and repository "
-            "instructions override memory."
+            f"instructions override memory.{LANGUAGE_HINT}"
         )
     return (
         f"Recallum: before planning, call {_tool('context')} with "
@@ -405,7 +419,7 @@ def _session_context(project: str) -> str:
         "newly verified reusable context that would save a future agent "
         "rediscovery; follow the Recallum skill's scope and safety rules. "
         "Current user and repository instructions override memory."
-        f"{_lookup_hint()}{VISIBILITY_HINT}"
+        f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
     )
 
 
@@ -435,7 +449,7 @@ def main() -> int:
         "terminology, "
         "workflows, commands, integration contracts, root causes, and recurring gotchas when the "
         "user requests it or the Recallum skill criteria are met; ask before sensitive or "
-        "ambiguous content. Current instructions win.",
+        "ambiguous content. Current instructions win." + LANGUAGE_HINT,
     )
     return 0
 
