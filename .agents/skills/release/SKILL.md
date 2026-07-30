@@ -37,7 +37,7 @@ git rev-list --count origin/<branch>..HEAD
 
 The tag and the version declared in the code must agree, or the release **drifts** from what it ships.
 
-Set every file that declares the version to the version you are about to tag — `pyproject.toml`, `package.json`, `Cargo.toml`, app metadata — and regenerate any lockfile that embeds it rather than hand-editing. In this repo `uv.lock` embeds the package version, so after editing `pyproject.toml` always run
+Set every file that declares the version to the version you are about to tag — `pyproject.toml`, `package.json`, `Cargo.toml`, app metadata — and regenerate any lockfile that embeds it rather than hand-editing. In this repo the version is declared in **three** places: `pyproject.toml`, the hand-declared `recallum/__init__.py` `__version__`, and the generated `uv.lock`. Edit the first two; for the lock, after editing `pyproject.toml` always run
 
 ```sh
 uv sync
