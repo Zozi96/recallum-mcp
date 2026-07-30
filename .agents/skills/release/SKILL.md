@@ -47,7 +47,9 @@ and commit `uv.lock` **in the same bump commit** as `pyproject.toml`. Skipping t
 
 A tag that already exists forces a bump; pick the level from what actually changed, treating a behaviour change as minor pre-1.0 and major after.
 
-**Done when** every version-declaring file states the tag's version, `git status` shows no lockfile drift after a `uv run` command, and the test suite still passes (`tests/unit/test_app.py` pins that the app's public version matches the package metadata).
+The plugin is a **second, independently versioned artifact**. If anything under `plugins/recallum-memory/` changed since the baseline (`git diff --stat <baseline>..HEAD -- plugins/`), bump the version in **both** client manifests — `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` — to the same value (`test_both_client_manifests_describe_the_same_plugin_release` pins that they agree). Client update flows key off this manifest version: shipping changed plugin content under an unchanged version means users never see the update.
+
+**Done when** every version-declaring file states the tag's version, a changed plugin carries a bumped manifest version in both manifests, `git status` shows no lockfile drift after a `uv run` command, and the test suite still passes (`tests/unit/test_app.py` pins that the app's public version matches the package metadata).
 
 ## 4. Read the commits
 
