@@ -20,9 +20,11 @@ class MemoryOut(BaseModel):
 
     ``reconfirmed_at`` is the last time identical content was re-stored: a
     freshness signal that the claim still held then. ``last_recalled_at`` and
-    ``recall_count`` say when and how often this memory was served in recall or
-    context results, as of before the response carrying them was produced.
-    NULL / 0 mean "no signal yet".
+    ``recall_count`` say when and how often this memory matched a ``recall``
+    query; ``context_count`` says how often it rode along in a ``context``
+    snapshot, which tracks importance more than relevance. Counters are as of
+    before the response carrying them was produced. NULL / 0 mean "no signal
+    yet".
     """
 
     id: uuid.UUID
@@ -37,6 +39,7 @@ class MemoryOut(BaseModel):
     reconfirmed_at: datetime | None = None
     last_recalled_at: datetime | None = None
     recall_count: int = 0
+    context_count: int = 0
 
 
 class SimilarMemory(BaseModel):
@@ -150,7 +153,7 @@ class ContextItem(BaseModel):
     """A compact memory entry inside a context group.
 
     ``content_truncated`` marks an entry clipped to fit the character budget;
-    the full content is retrievable by id via ``recall`` or ``list_memories``.
+    the full content is retrievable by id via ``get_memory``.
     """
 
     id: uuid.UUID
@@ -197,6 +200,20 @@ class ListResult(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class GetResult(BaseModel):
+    """Outcome of ``get_memory``; unknown, foreign and retired ids look identical.
+
+    ``history`` is present only when requested: the retired memories this one
+    superseded, oldest first, each carrying the content that was corrected
+    away. ``None`` means history was not asked for; ``[]`` means the memory
+    never replaced anything.
+    """
+
+    found: bool
+    memory: MemoryOut | None = None
+    history: list[MemoryOut] | None = None
 
 
 class MemoryGraphNode(BaseModel):

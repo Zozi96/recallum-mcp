@@ -6,14 +6,15 @@ are generated locally with Ollama, storage is PostgreSQL with pgvector.
 
 ## Features
 
-- **Six MCP tools**: `remember`, `recall`, `context`, `list_memories`, `update`,
-  `forget`.
+- **Eight MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
+  `get_memory`, `list_memories`, `update`, `forget`.
 - **Explicit supersession**: `update` retires a memory and links it to its
   replacement; `remember` reports similar existing memories so contradictions
   surface where they are created, and are never resolved automatically.
 - **Hybrid retrieval**: pgvector cosine similarity + PostgreSQL full-text
   ranking fused with Reciprocal Rank Fusion; graceful textual-only degradation
-  when Ollama is down.
+  when Ollama is down. The vector leg only compares same-model vectors; after
+  changing the embedding model, `recallum-admin reembed` restamps stored rows.
 - **Strict per-user isolation**: individual API keys (stored as SHA-256 hashes),
   explicit user filters, and Row-Level Security as a second barrier.
 - **Atomic memories only**: preferences, decisions, constraints, facts — never

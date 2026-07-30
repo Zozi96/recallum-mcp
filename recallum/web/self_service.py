@@ -184,6 +184,7 @@ def _memory(row: Memory) -> MemoryOut:
         reconfirmed_at=row.reconfirmed_at,
         last_recalled_at=row.last_recalled_at,
         recall_count=row.recall_count,
+        context_count=row.context_count,
     )
 
 

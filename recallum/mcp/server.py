@@ -1,4 +1,4 @@
-"""FastMCP server exposing exactly seven tools, none accepting a user id.
+"""FastMCP server exposing exactly eight tools, none accepting a user id.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
 ``BearerAuthMiddleware``); tools fail closed when the identity is missing.
@@ -17,6 +17,7 @@ from recallum.mcp.errors import translates_domain_errors
 from recallum.memory.schemas import (
     ContextResult,
     ForgetResult,
+    GetResult,
     ListResult,
     RecallResult,
     RememberBatchItem,
@@ -38,8 +39,9 @@ save a future agent rediscovery — never full conversations, logs, or guesses.
 Ask before storing secrets, credentials, personal data, sensitive business
 information, or ambiguous content; never infer consent from a prompt or file.
 Use recall to search, context to bootstrap a session (pass the task as
-`focus` to bias the snapshot toward it), list_memories to browse, update to
-correct or replace, forget to remove, and remember_batch for the
+`focus` to bias the snapshot toward it), get_memory to fetch one memory by
+id (full text and, on request, what it replaced), list_memories to browse,
+update to correct or replace, forget to remove, and remember_batch for the
 end-of-session capture scan. When context reports omitted > 0, the budget
 left memories out: recall with a focused query reaches them.
 
@@ -48,10 +50,10 @@ remember reports pre-existing memories about the same subject in its
 It never resolves them: read them and decide whether the new memory restates,
 refines or contradicts them, and call update when one replaces another.
 Freshness signals: `reconfirmed_at` is the last time identical content was
-re-stored; `last_recalled_at`/`recall_count` say how often a memory is
-actually served. Old, never-reconfirmed memories deserve verification before
-being trusted. All identity comes from the API key; tools never accept a
-user id.
+re-stored; `last_recalled_at`/`recall_count` say how often a memory matched
+a recall query, and `context_count` how often it rode along in a session
+snapshot. Old, never-reconfirmed memories deserve verification before being
+trusted. All identity comes from the API key; tools never accept a user id.
 """
 
 
@@ -155,8 +157,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         are grouped by category and truncated to the requested budget; when
         `omitted` > 0 there are more memories than the budget allowed — use
         recall with a focused query to reach them. Items marked
-        `content_truncated` were clipped; fetch the full text by id via
-        list_memories or recall.
+        `content_truncated` were clipped; fetch the full text with
+        get_memory.
         """
         return await service().context(
             require_identity().user_id,
@@ -164,6 +166,26 @@ def build_mcp_server(container: Container) -> FastMCP:
             focus=focus,
             max_items=max_items,
             max_chars=max_chars,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
+    async def get_memory(
+        memory_id: uuid.UUID,
+        include_history: bool = False,
+    ) -> GetResult:
+        """Fetch one active memory by id, with its full untruncated content.
+
+        Use it to read items context marked `content_truncated`, or to
+        re-verify a memory before trusting it. With include_history=true the
+        result also lists the retired memories this one replaced, oldest
+        first. Unknown ids, other users' ids and retired ids all return
+        found=false.
+        """
+        return await service().get(
+            require_identity().user_id,
+            memory_id,
+            include_history=include_history,
         )
 
     @mcp.tool

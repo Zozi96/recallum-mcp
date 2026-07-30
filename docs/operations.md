@@ -136,6 +136,21 @@ command once via the container terminal before sending traffic.
 Deploy order: **postgres → role SQL (step 1) → ollama (+ model pull) → recallum
 (pre-deploy migration runs, then uvicorn starts)**.
 
+## Changing the embedding model
+
+Vectors from different models share no coordinate space, so after changing
+`RECALLUM__OLLAMA__MODEL` the vector search leg ignores rows embedded by the
+old model (they remain reachable through full-text search). Restore their
+vector reach by re-embedding in place:
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin reembed --all-users
+```
+
+The command is idempotent and resumable: rows whose embedding fails are
+counted, skipped, and picked up on the next run. `/admin/status` reports
+`model_mismatch: true` while any active row still carries stale provenance.
+
 ## Users and API keys
 
 ```bash

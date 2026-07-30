@@ -10,6 +10,7 @@ import uuid
 
 import pytest
 
+from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
 from recallum.memory.limits import MemoryLimits
 from recallum.memory.schemas import RememberBatchItem
@@ -102,7 +103,13 @@ async def test_context_reports_totals_and_omissions():
 # ---------------------------------------------------------------------------
 
 
-async def test_context_and_recall_record_usage_on_served_memories_only():
+async def test_context_and_recall_record_usage_in_separate_counters():
+    """Snapshot serves echo importance; only recall hits are relevance evidence.
+
+    High-importance memories ride along in nearly every snapshot, so folding
+    their serves into ``recall_count`` would pre-poison the usage voter that
+    ``recall_usage_weight`` is gated on.
+    """
     service, repo, _ = make_service()
     served = await service.remember(USER, content="alpha fact", category="fact", importance=9)
     unserved = await service.remember(USER, content="beta fact", category="fact", importance=1)
@@ -110,18 +117,22 @@ async def test_context_and_recall_record_usage_on_served_memories_only():
     snapshot = await service.context(USER, max_items=1)
 
     assert [i.id for g in snapshot.groups for i in g.items] == [served.memory.id]
-    assert repo.rows[served.memory.id].recall_count == 1
-    assert repo.rows[served.memory.id].last_recalled_at is not None
-    assert repo.rows[unserved.memory.id].recall_count == 0
-    assert repo.rows[unserved.memory.id].last_recalled_at is None
+    row = repo.rows[served.memory.id]
+    assert row.context_count == 1
+    assert row.recall_count == 0
+    assert row.last_recalled_at is None
+    assert repo.rows[unserved.memory.id].context_count == 0
 
     # Two retrieval signals (text + vector) always beat one, so "alpha fact"
     # is deterministically the top hit; limit=1 keeps "beta fact" unserved.
     hits = await service.recall(USER, query="alpha", limit=1)
     assert [r.id for r in hits.results] == [served.memory.id]
-    # The response carries the pre-serve counter; the row is already bumped.
-    assert hits.results[0].recall_count == 1
-    assert repo.rows[served.memory.id].recall_count == 2
+    # The response carries the pre-serve counters; the row is already bumped.
+    assert hits.results[0].recall_count == 0
+    assert hits.results[0].context_count == 1
+    assert row.recall_count == 1
+    assert row.last_recalled_at is not None
+    assert row.context_count == 1  # recall never touches the snapshot counter
 
 
 async def test_usage_recording_failure_never_fails_the_read():
@@ -132,6 +143,7 @@ async def test_usage_recording_failure_never_fails_the_read():
         raise RuntimeError("usage backend exploded")
 
     repo.mark_recalled = boom  # type: ignore[method-assign]
+    repo.mark_seen_in_context = boom  # type: ignore[method-assign]
 
     result = await service.recall(USER, query="resilient")
     assert [r.content for r in result.results] == ["resilient fact"]
@@ -295,3 +307,93 @@ async def test_reassign_project_rejects_identical_or_missing_keys():
         await service.reassign_project(USER, from_project="same", to_project=" same ")
     with pytest.raises(MemoryValidationError, match="required"):
         await service.reassign_project(USER, from_project="  ", to_project="target")
+
+
+# ---------------------------------------------------------------------------
+# get: the by-id read behind truncated context items
+# ---------------------------------------------------------------------------
+
+
+async def test_get_returns_full_content_and_supersession_history():
+    service, _, _ = make_service()
+    first = await service.remember(USER, content="the port is 8080", category="fact")
+    updated = await service.update(USER, first.memory.id, content="the port is 9090")
+
+    bare = await service.get(USER, updated.memory.id)
+    assert bare.found
+    assert bare.memory.content == "the port is 9090"
+    assert bare.history is None  # not asked for
+
+    with_history = await service.get(USER, updated.memory.id, include_history=True)
+    assert [m.content for m in with_history.history] == ["the port is 8080"]
+
+
+async def test_get_hides_unknown_foreign_and_retired_ids_alike():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="ephemeral fact", category="fact")
+
+    assert (await service.get(uuid.uuid4(), stored.memory.id)).found is False
+    assert (await service.get(USER, uuid.uuid4())).found is False
+
+    await service.forget(USER, stored.memory.id)
+    retired = await service.get(USER, stored.memory.id)
+    assert retired.found is False
+    assert retired.memory is None
+
+
+# ---------------------------------------------------------------------------
+# reembed: restamping vectors after an embedding-model change
+# ---------------------------------------------------------------------------
+
+
+async def test_reembed_stale_restamps_other_model_and_null_provenance_rows():
+    repo = FakeMemoryRepository()
+    old = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="old-model")
+    )
+    drifted = await old.remember(USER, content="drifted row", category="fact")
+    legacy = await old.remember(USER, content="legacy row", category="fact")
+    repo.rows[legacy.memory.id].embedding_model = None
+
+    current = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="new-model")
+    )
+    fresh = await current.remember(USER, content="fresh row", category="fact")
+
+    reembedded, failed = await current.reembed_stale(USER, batch_size=1)
+
+    assert (reembedded, failed) == (2, 0)
+    assert all(m.embedding_model == "new-model" for m in repo.rows.values())
+    # The restamped vectors live in the new model's space: recall's vector
+    # leg reaches them again (no term overlap with this query).
+    result = await current.recall(USER, query="frobnicate widget")
+    assert {r.id for r in result.results} == {
+        drifted.memory.id,
+        legacy.memory.id,
+        fresh.memory.id,
+    }
+
+
+async def test_reembed_stale_counts_failures_and_never_loops_on_them():
+    class FlakyEmbedder(FakeEmbeddingClient):
+        async def embed(self, text: str) -> list[float]:
+            if text == "unembeddable row":
+                raise EmbeddingError("fake ollama refused this one")
+            return await super().embed(text)
+
+    repo = FakeMemoryRepository()
+    old = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="old-model")
+    )
+    await old.remember(USER, content="unembeddable row", category="fact")
+    healthy = await old.remember(USER, content="healthy row", category="fact")
+
+    current = MemoryService(
+        repository=repo, embeddings=FlakyEmbedder(dimensions=8, model="new-model")
+    )
+    # batch_size=1 forces keyset pagination to step over the failing row; a
+    # refetch-on-failure implementation would never terminate here.
+    reembedded, failed = await current.reembed_stale(USER, batch_size=1)
+
+    assert (reembedded, failed) == (1, 1)
+    assert repo.rows[healthy.memory.id].embedding_model == "new-model"

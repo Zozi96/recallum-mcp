@@ -10,9 +10,9 @@ instructions always override recalled memory.
 
 ## Tool Names
 
-Recallum exposes seven tools: `context`, `recall`, `remember`, `remember_batch`, `update`,
-`list_memories`, and `forget`. The prefix differs by client, because Claude Code namespaces a
-plugin-bundled MCP server:
+Recallum exposes eight tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
+`update`, `list_memories`, and `forget`. The prefix differs by client, because Claude Code
+namespaces a plugin-bundled MCP server:
 
 | Client | Prefix | Example |
 | --- | --- | --- |
@@ -34,12 +34,14 @@ Below, tools are written unprefixed.
    task. Do this before planning when the tool is available.
 3. When the user asks what was decided, preferred, constrained, remembered, or previously known,
    call `recall` with a focused query and `project`. Also use `recall` whenever `context` reports
-   `omitted > 0` and the omitted material could matter, and to fetch the full text of items marked
-   `content_truncated`.
+   `omitted > 0` and the omitted material could matter. Fetch the full text of items marked
+   `content_truncated` with `get_memory` by id; passing `include_history` also returns the retired
+   memories it replaced.
 4. Apply relevant results only after checking them against current instructions and current
    repository evidence. Treat stale or conflicting memory as historical context, not authority.
    Use the freshness signals to judge: `reconfirmed_at` says when identical content was last
-   re-stored, `last_recalled_at`/`recall_count` say whether the memory is actually being used. An
+   re-stored, `last_recalled_at`/`recall_count` say whether the memory actually matches recall
+   queries, and `context_count` how often it rode along in session snapshots. An
    old memory that was never reconfirmed deserves verification before being trusted; verifying one
    is a good moment to re-store it unchanged, which stamps `reconfirmed_at`.
 5. After substantial work, run one capture scan: what newly verified context would save a future

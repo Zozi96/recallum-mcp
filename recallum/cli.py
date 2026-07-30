@@ -1,7 +1,8 @@
-"""Minimal stdlib admin CLI: create users, issue API keys, revoke keys.
+"""Minimal stdlib admin CLI: users, API keys, and embedding maintenance.
 
 The CLI talks to the same DI graph as the server. Issued secrets are printed
-exactly once; only their SHA-256 hash is persisted.
+exactly once; only their SHA-256 hash is persisted. ``reembed`` needs the
+same Ollama the server uses reachable from this process's environment.
 """
 
 from __future__ import annotations
@@ -49,6 +50,22 @@ def build_parser() -> argparse.ArgumentParser:
     grant_admin.add_argument("--email", required=True)
     revoke_admin = subparsers.add_parser("revoke-admin", help="Revoke web administrator status")
     revoke_admin.add_argument("--email", required=True)
+
+    reembed = subparsers.add_parser(
+        "reembed",
+        help=(
+            "Re-embed memories whose vectors came from another embedding model "
+            "(run after changing RECALLUM__OLLAMA__MODEL)"
+        ),
+    )
+    reembed_target = reembed.add_mutually_exclusive_group(required=True)
+    reembed_target.add_argument("--email", help="Re-embed one user's memories")
+    reembed_target.add_argument(
+        "--all-users", action="store_true", help="Re-embed every user's memories"
+    )
+    reembed.add_argument(
+        "--batch-size", type=int, default=50, help="Rows fetched per batch (default 50)"
+    )
 
     return parser
 
@@ -112,6 +129,33 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
             is_admin = args.command == "grant-admin"
             await container.user_repository().set_admin(user.id, is_admin)
             print(f"administrator {'granted' if is_admin else 'revoked'}: {user.email}")
+        return 0
+
+    if args.command == "reembed":
+        users_repo = container.user_repository()
+        if args.all_users:
+            users = list(await users_repo.list_users())
+        else:
+            user = await users_repo.get_by_email(args.email.lower())
+            if user is None:
+                print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+                return 1
+            users = [user]
+        service = container.memory_service()
+        total_failed = 0
+        for user in users:
+            reembedded, failed = await service.reembed_stale(
+                user.id, batch_size=max(1, args.batch_size)
+            )
+            total_failed += failed
+            print(f"{user.email}: reembedded={reembedded} failed={failed}")
+        if total_failed:
+            print(
+                f"error: {total_failed} memories could not be re-embedded; "
+                "rerun once Ollama is reachable",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     return 2  # pragma: no cover - argparse enforces known commands

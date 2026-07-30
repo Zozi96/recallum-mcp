@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     "remember_batch",
     "recall",
     "context",
+    "get_memory",
     "list_memories",
     "update",
     "forget",
@@ -192,7 +193,7 @@ async def test_validate_only_tools_are_exposed_rejects_a_prompt():
         await validate_only_tools_are_exposed(mcp)
 
 
-async def test_discovery_announces_exactly_seven_tools_without_user_inputs(server: ServerInfo):
+async def test_discovery_announces_exactly_eight_tools_without_user_inputs(server: ServerInfo):
     async with mcp_client(server.url, server.alice_token) as client:
         tools = await client.list_tools()
     names = {tool.name for tool in tools}

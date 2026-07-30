@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import cast, func, literal, select, text, update
+from sqlalchemy import cast, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
@@ -211,6 +211,67 @@ class MemoryRepository:
                 )
             ).scalar_one()
 
+    async def stale_embeddings_batch(
+        self,
+        user_id: uuid.UUID,
+        *,
+        model: str,
+        after: uuid.UUID | None,
+        limit: int,
+    ) -> Sequence[Memory]:
+        """A page of active rows whose vector provenance is NULL or another model.
+
+        These are the rows the vector search leg cannot trust; re-embedding
+        them under ``model`` restores their vector reach. Keyset-paginated by
+        id so a caller that cannot fix a row (its embedding keeps failing)
+        still advances past it instead of refetching it forever.
+        """
+        async with self._sessions.for_user(user_id) as session:
+            filters: list[Any] = [
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+                or_(
+                    Memory.embedding_model.is_(None),
+                    Memory.embedding_model != model,
+                ),
+            ]
+            if after is not None:
+                filters.append(Memory.id > after)
+            stmt = (
+                select(Memory)
+                .options(*_light())
+                .where(*filters)
+                .order_by(Memory.id)
+                .limit(limit)
+            )
+            return (await session.execute(stmt)).scalars().all()
+
+    async def replace_embedding(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        embedding: list[float],
+        model: str,
+    ) -> bool:
+        """Swap an active row's vector and provenance in place.
+
+        Content, hash and id are untouched: the claim itself is unchanged, so
+        this is maintenance of the row, not supersession. Returns ``False``
+        for unknown, foreign and retired ids alike.
+        """
+        async with self._sessions.for_user(user_id) as session:
+            result = await session.execute(
+                update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.user_id == user_id,
+                    Memory.deleted_at.is_(None),
+                )
+                .values(embedding=embedding, embedding_model=model)
+            )
+            return result.rowcount == 1
+
     async def create_memory(
         self,
         user_id: uuid.UUID,
@@ -372,6 +433,7 @@ class MemoryRepository:
         *,
         query: str,
         embedding: list[float] | None,
+        embedding_model: str | None,
         visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
@@ -388,16 +450,21 @@ class MemoryRepository:
 
         ``embedding`` is ``None`` when the embedding service is unavailable; the
         vector pool is then empty and the caller degrades to textual only.
-        Fusing the two pools is deliberately left to the caller: it is pure
-        computation over ranked lists, and pushing it behind this seam would
-        force every adapter to reimplement it.
+        ``embedding_model`` names the coordinate space the query vector lives
+        in; only rows embedded in that space (or predating provenance
+        tracking) may take part in the vector pool. Fusing the two pools is
+        deliberately left to the caller: it is pure computation over ranked
+        lists, and pushing it behind this seam would force every adapter to
+        reimplement it.
         """
         capped = min(limit, MAX_CANDIDATES)
         filters = self._filters(user_id, visibility=visibility, category=category)
         async with self._sessions.for_user(user_id) as session:
             vector: list[ScoredMemory] = []
             if embedding is not None:
-                vector = await self._vector_candidates(session, embedding, filters, capped)
+                vector = await self._vector_candidates(
+                    session, embedding, embedding_model, filters, capped
+                )
             text_pool = await self._text_candidates(session, query, filters, capped)
             return CandidatePools(vector=vector, text=text_pool)
 
@@ -405,17 +472,34 @@ class MemoryRepository:
         self,
         session: AsyncSession,
         embedding: list[float],
+        embedding_model: str | None,
         filters: list[Any],
         limit: int,
     ) -> list[ScoredMemory]:
-        """Nearest neighbours by cosine similarity (1 - distance)."""
+        """Nearest neighbours by cosine similarity (1 - distance).
+
+        Only rows whose stored provenance is ``embedding_model`` or NULL are
+        ranked. Vectors from different models share no coordinate space, so
+        their distances are noise -- and noise sometimes outranks genuine
+        matches, which is worse than absence. Exclusion is not hiding: the
+        textual pool still reaches those rows, and ``replace_embedding``
+        (via ``recallum-admin reembed``) restores their vector reach. NULL
+        provenance predates tracking and stays eligible, because treating
+        unknown as foreign would blank the vector leg of every migrated
+        corpus. The iterative scan keeps filling the limit with comparable
+        rows despite the filter.
+        """
         await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
         distance = Memory.embedding.cosine_distance(embedding)
         score = (literal(1.0) - distance).label("score")
+        comparable = or_(
+            Memory.embedding_model.is_(None),
+            Memory.embedding_model == embedding_model,
+        )
         stmt = (
             select(Memory, score)
             .options(*_light())
-            .where(*filters)
+            .where(*filters, comparable)
             .order_by(distance)
             .limit(limit)
         )
@@ -477,6 +561,7 @@ class MemoryRepository:
         user_id: uuid.UUID,
         embedding: list[float],
         *,
+        embedding_model: str,
         scope: str,
         project: str | None,
         min_similarity: float,
@@ -492,6 +577,10 @@ class MemoryRepository:
         category, so a filing mismatch is visible to the caller. Similarity is
         evidence of overlap, never of contradiction -- that judgement needs to
         read the content, and is the caller's.
+
+        Only vectors from ``embedding_model`` (or NULL provenance) are
+        compared: the probe vector just came from that model, and distances
+        into another model's space would report noise as subject overlap.
         """
         async with self._sessions.for_user(user_id) as session:
             await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
@@ -502,6 +591,10 @@ class MemoryRepository:
                 Memory.deleted_at.is_(None),
                 Memory.scope == scope,
                 func.coalesce(Memory.project, "") == (project or ""),
+                or_(
+                    Memory.embedding_model.is_(None),
+                    Memory.embedding_model == embedding_model,
+                ),
                 distance <= (1.0 - min_similarity),
             ]
             if exclude_id is not None:
@@ -672,11 +765,15 @@ class MemoryRepository:
     async def mark_recalled(
         self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
     ) -> None:
-        """Record that these memories were served in a recall/context result.
+        """Record that these memories matched a ``recall`` query.
 
-        One bounded UPDATE, outside the read that produced the ids. Callers
-        treat failure as loggable noise: usage is a signal, never a dependency
-        of the read path.
+        Recall hits only: ``context`` snapshot serves go through
+        ``mark_seen_in_context``, because snapshots select by importance and
+        folding their serves in here would turn ``recall_count`` -- the
+        signal ``recall_usage_weight`` is waiting on -- into an importance
+        echo. One bounded UPDATE, outside the read that produced the ids.
+        Callers treat failure as loggable noise: usage is a signal, never a
+        dependency of the read path.
         """
         if not memory_ids:
             return
@@ -692,6 +789,27 @@ class MemoryRepository:
                     recall_count=Memory.recall_count + 1,
                     last_recalled_at=func.now(),
                 )
+            )
+
+    async def mark_seen_in_context(
+        self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
+    ) -> None:
+        """Record that these memories rode along in a ``context`` snapshot.
+
+        Same failure contract as ``mark_recalled``; deliberately a separate
+        counter so snapshot exposure never masquerades as query relevance.
+        """
+        if not memory_ids:
+            return
+        async with self._sessions.for_user(user_id) as session:
+            await session.execute(
+                update(Memory)
+                .where(
+                    Memory.user_id == user_id,
+                    Memory.id.in_(list(memory_ids)),
+                    Memory.deleted_at.is_(None),
+                )
+                .values(context_count=Memory.context_count + 1)
             )
 
     async def count_active_visible(

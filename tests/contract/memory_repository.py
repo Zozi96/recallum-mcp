@@ -81,6 +81,7 @@ class MemoryRepositoryContract:
             user_id,
             query=query,
             embedding=None,
+            embedding_model=None,
             visibility=visibility,
             category=category,
             limit=limit,
@@ -89,13 +90,22 @@ class MemoryRepositoryContract:
         return pools.text
 
     async def _vector_pool(
-        self, repo, user_id, embedding, *, visibility, category=None, limit
+        self,
+        repo,
+        user_id,
+        embedding,
+        *,
+        visibility,
+        category=None,
+        limit,
+        embedding_model="contract-embedding-model",
     ):
         """Only the vector pool; a query with no lexemes matches nothing."""
         pools = await repo.search_candidates(
             user_id,
             query="",
             embedding=embedding,
+            embedding_model=embedding_model,
             visibility=visibility,
             category=category,
             limit=limit,
@@ -343,10 +353,57 @@ class MemoryRepositoryContract:
                 ),
             )
 
-        results = await self._vector_pool(repo, 
+        results = await self._vector_pool(repo,
             user_id, _embedding(0), visibility=MemoryVisibility("all"), limit=MAX_CANDIDATES + 10
         )
         assert len(results) <= MAX_CANDIDATES
+
+    async def test_search_vector_ranks_only_comparable_model_vectors(self, repo, user_id):
+        query_vec = _embedding(1)
+        current = await repo.create_memory(
+            user_id,
+            **self._kwargs(content="current provenance row", embedding=query_vec),
+        )
+        legacy = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="legacy provenance row",
+                embedding=query_vec,
+                embedding_model=None,
+            ),
+        )
+        foreign = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="foreign provenance row",
+                embedding=query_vec,
+                embedding_model="another-model",
+            ),
+        )
+
+        vector_ids = {
+            r.memory.id
+            for r in await self._vector_pool(
+                repo, user_id, query_vec, visibility=MemoryVisibility("all"), limit=10
+            )
+        }
+        # NULL provenance stays eligible; a positively different model never votes.
+        assert current.id in vector_ids
+        assert legacy.id in vector_ids
+        assert foreign.id not in vector_ids
+
+        # Exclusion is not hiding: the textual leg still reaches the row.
+        text_ids = {
+            r.memory.id
+            for r in await self._text_pool(
+                repo,
+                user_id,
+                "foreign provenance row",
+                visibility=MemoryVisibility("all"),
+                limit=10,
+            )
+        }
+        assert foreign.id in text_ids
 
     # -- search_text ---------------------------------------------------
 
@@ -626,6 +683,7 @@ class MemoryRepositoryContract:
         results = await repo.similar_active(
             user_id,
             target,
+            embedding_model="contract-embedding-model",
             scope="global",
             project=None,
             min_similarity=0.9,
@@ -675,6 +733,7 @@ class MemoryRepositoryContract:
         results = await repo.similar_active(
             user_id,
             target,
+            embedding_model="contract-embedding-model",
             scope="global",
             project=None,
             min_similarity=0.9,
@@ -686,6 +745,34 @@ class MemoryRepositoryContract:
         # under another category is exactly what must surface.
         assert other_category.id in ids
         assert ids.isdisjoint({itself.id, other_project.id, deleted.id})
+
+    async def test_similar_active_skips_vectors_from_other_models(self, repo, user_id):
+        target = _embedding(4242)
+        comparable = await repo.create_memory(
+            user_id, **self._kwargs(content="comparable twin", embedding=target)
+        )
+        foreign = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="foreign twin",
+                embedding=target,
+                embedding_model="another-model",
+            ),
+        )
+
+        results = await repo.similar_active(
+            user_id,
+            target,
+            embedding_model="contract-embedding-model",
+            scope="global",
+            project=None,
+            min_similarity=0.9,
+            limit=5,
+        )
+        ids = {r.memory.id for r in results}
+        assert comparable.id in ids
+        # Cross-model cosine reports noise as subject overlap; it never votes.
+        assert foreign.id not in ids
 
     # -- freshness, usage and reassignment -------------------------------
 
@@ -727,6 +814,58 @@ class MemoryRepositoryContract:
         untouched = await repo.get_active(other_user_id, foreign.id)
         assert untouched.recall_count == 0
         assert untouched.last_recalled_at is None
+
+    async def test_mark_seen_in_context_counts_apart_from_recall(self, repo, user_id):
+        row = await repo.create_memory(user_id, **self._kwargs(content="counted row"))
+
+        await repo.mark_seen_in_context(user_id, [row.id])
+        await repo.mark_seen_in_context(user_id, [row.id])
+        await repo.mark_recalled(user_id, [row.id])
+
+        fresh = await repo.get_active(user_id, row.id)
+        # Snapshot exposure and query relevance are separate signals: only
+        # mark_recalled may ever feed the usage voter.
+        assert fresh.context_count == 2
+        assert fresh.recall_count == 1
+
+    async def test_stale_embeddings_page_by_id_and_replace_embedding_restamps(
+        self, repo, user_id, other_user_id
+    ):
+        model = "contract-embedding-model"
+        await repo.create_memory(user_id, **self._kwargs(content="fresh row"))
+        legacy = await repo.create_memory(
+            user_id, **self._kwargs(content="null provenance row", embedding_model=None)
+        )
+        foreign = await repo.create_memory(
+            user_id,
+            **self._kwargs(content="old model row", embedding_model="another-model"),
+        )
+
+        first = await repo.stale_embeddings_batch(user_id, model=model, after=None, limit=1)
+        assert len(first) == 1
+        rest = await repo.stale_embeddings_batch(
+            user_id, model=model, after=first[0].id, limit=10
+        )
+        # Keyset pagination: no overlap, nothing skipped, current-model row absent.
+        assert len(rest) == 1
+        assert {r.id for r in [*first, *rest]} == {legacy.id, foreign.id}
+
+        assert not await repo.replace_embedding(
+            other_user_id, legacy.id, embedding=_embedding(7), model=model
+        )
+        for row in (legacy, foreign):
+            assert await repo.replace_embedding(
+                user_id, row.id, embedding=_embedding(7), model=model
+            )
+        assert (
+            list(
+                await repo.stale_embeddings_batch(
+                    user_id, model=model, after=None, limit=10
+                )
+            )
+            == []
+        )
+        assert (await repo.get_active(user_id, foreign.id)).embedding_model == model
 
     async def test_count_active_visible_follows_the_visibility_filter(self, repo, user_id):
         await repo.create_memory(

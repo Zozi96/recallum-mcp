@@ -1,4 +1,4 @@
-"""Memory service: remember, recall, context, list and forget.
+"""Memory service: remember, recall, context, get, list and forget.
 
 Business rules implemented here:
 - ``remember`` embeds before persisting; an exact active duplicate returns the
@@ -6,7 +6,9 @@ Business rules implemented here:
 - ``recall`` fuses vector and textual candidates with Reciprocal Rank Fusion
   and degrades to textual-only (flagged) when Ollama cannot embed the query.
 - ``context`` produces a compact, category-grouped budget-aware snapshot.
+- ``get`` is the by-id read behind truncated context items and verification.
 - ``forget`` is a logical delete; foreign and unknown ids are indistinguishable.
+- ``reembed_stale`` restamps vectors in place after an embedding-model change.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from recallum.memory.limits import MemoryLimits
 from recallum.memory.schemas import (
     ContextResult,
     ForgetResult,
+    GetResult,
     ListResult,
     MemoryGraphEdge,
     MemoryGraphNode,
@@ -196,6 +199,7 @@ class MemoryService:
             neighbours = await self._repo.similar_active(
                 user_id,
                 embedding,
+                embedding_model=self._embeddings.model,
                 scope=scope,
                 project=project,
                 min_similarity=self._limits.similar_min_similarity,
@@ -387,6 +391,50 @@ class MemoryService:
         )
 
     # ------------------------------------------------------------------
+    # reembed
+    # ------------------------------------------------------------------
+
+    async def reembed_stale(
+        self, user_id: uuid.UUID, *, batch_size: int = 50
+    ) -> tuple[int, int]:
+        """Re-embed active memories whose vector provenance is stale.
+
+        Covers rows embedded by another model and rows predating provenance
+        tracking; both are outside the configured coordinate space, so the
+        vector leg either excludes or cannot trust them until restamped. In
+        place by design: the claim itself is unchanged, so content, hash and
+        id all stay -- this is maintenance, not supersession. Keyset
+        pagination advances past rows whose embedding keeps failing, so a
+        partial Ollama outage stalls nothing; rerunning is idempotent and
+        picks up whatever remains. Returns ``(reembedded, failed)``.
+
+        Deliberately absent from the MCP surface: a model swap is an operator
+        event, remedied by ``recallum-admin reembed``, not an agent decision.
+        """
+        model = self._embeddings.model
+        reembedded = 0
+        failed = 0
+        after: uuid.UUID | None = None
+        while True:
+            rows = await self._repo.stale_embeddings_batch(
+                user_id, model=model, after=after, limit=max(1, batch_size)
+            )
+            if not rows:
+                return reembedded, failed
+            for row in rows:
+                after = row.id
+                try:
+                    vector = await self._embeddings.embed(row.content)
+                except EmbeddingError:
+                    failed += 1
+                    continue
+                # False means the row retired mid-run; neither counter moves.
+                if await self._repo.replace_embedding(
+                    user_id, row.id, embedding=vector, model=model
+                ):
+                    reembedded += 1
+
+    # ------------------------------------------------------------------
     # recall
     # ------------------------------------------------------------------
 
@@ -422,19 +470,18 @@ class MemoryService:
             user_id,
             query=normalized_query,
             embedding=query_embedding,
+            embedding_model=self._embeddings.model,
             visibility=visibility,
             category=validated_category,
             limit=candidate_limit,
         )
-        vector_candidates = list(pools.vector)
-        self._warn_on_embedding_model_drift(vector_candidates)
 
-        fused = self._reciprocal_rank_fusion(vector_candidates, list(pools.text))
+        fused = self._reciprocal_rank_fusion(list(pools.vector), list(pools.text))
         results = [
             RecalledMemory(**_to_memory_out(scored.memory).model_dump(), score=score)
             for scored, score in fused[:effective_limit]
         ]
-        await self._record_usage(user_id, [result.id for result in results])
+        await self._record_recalled(user_id, [result.id for result in results])
         return RecallResult(query=normalized_query, mode=mode, results=results)
 
     def _reciprocal_rank_fusion(
@@ -582,7 +629,7 @@ class MemoryService:
             total_available=total_available,
             focus=normalized_focus,
         )
-        await self._record_usage(
+        await self._record_context_served(
             user_id, [item.id for group in result.groups for item in group.items]
         )
         return result
@@ -609,23 +656,39 @@ class MemoryService:
             user_id,
             query=query,
             embedding=embedding,
+            embedding_model=self._embeddings.model,
             visibility=visibility,
             category=None,
             limit=min(MAX_CANDIDATES, max(limit * 3, 10)),
         )
-        vector_candidates = list(pools.vector)
-        self._warn_on_embedding_model_drift(vector_candidates)
-        fused = self._reciprocal_rank_fusion(vector_candidates, list(pools.text))
+        fused = self._reciprocal_rank_fusion(list(pools.vector), list(pools.text))
         return [scored.memory for scored, _ in fused[:limit]]
 
-    async def _record_usage(
+    async def _record_recalled(
         self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]
     ) -> None:
-        """Record served memories; a failure here never fails the read."""
+        """Count recall hits; a failure here never fails the read."""
         if not memory_ids:
             return
         try:
             await self._repo.mark_recalled(user_id, memory_ids)
+        except Exception:
+            logger.warning("usage recording failed; the result is unaffected", exc_info=True)
+
+    async def _record_context_served(
+        self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]
+    ) -> None:
+        """Count snapshot serves, apart from recall hits.
+
+        Snapshots select mostly by importance, so folding their serves into
+        ``recall_count`` would pre-poison the usage voter with an importance
+        echo -- the rich-get-richer loop it is gated against. A failure here
+        never fails the read.
+        """
+        if not memory_ids:
+            return
+        try:
+            await self._repo.mark_seen_in_context(user_id, memory_ids)
         except Exception:
             logger.warning("usage recording failed; the result is unaffected", exc_info=True)
 
@@ -664,6 +727,37 @@ class MemoryService:
             limit=effective_limit,
             offset=offset,
         )
+
+    # ------------------------------------------------------------------
+    # get
+    # ------------------------------------------------------------------
+
+    async def get(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        include_history: bool = False,
+    ) -> GetResult:
+        """Fetch one active memory, optionally with the chain it superseded.
+
+        The by-id read that ``context`` items point at: truncated snapshot
+        entries carry an id, and this is how their full text is retrieved
+        without re-running retrieval. Also the cheap re-verification read for
+        an old memory before trusting it. Unknown, foreign and retired ids
+        are indistinguishable (``found`` is False), matching ``update`` and
+        ``forget``. ``history`` lists retired predecessors oldest-first.
+        Deliberately not counted as usage: fetching by id is bookkeeping,
+        not evidence the memory matched anything.
+        """
+        memory = await self._repo.get_active(user_id, memory_id)
+        if memory is None:
+            return GetResult(found=False)
+        history: list[MemoryOut] | None = None
+        if include_history:
+            chain = await self._repo.history(user_id, memory_id)
+            history = [_to_memory_out(row) for row in (chain or ())]
+        return GetResult(found=True, memory=_to_memory_out(memory), history=history)
 
     async def memory_graph(
         self,
@@ -736,44 +830,6 @@ class MemoryService:
         """Logical delete; unknown and foreign ids both report not forgotten."""
         forgotten = await self._repo.soft_delete(user_id, memory_id)
         return ForgetResult(id=memory_id, forgotten=forgotten)
-
-    # ------------------------------------------------------------------
-
-    def _warn_on_embedding_model_drift(self, candidates: list[ScoredMemory]) -> None:
-        """Warn when ranked vectors came from a model that is no longer configured.
-
-        Embeddings from different models share no coordinate space, so after
-        ``RECALLUM__OLLAMA__MODEL`` changes, cosine similarity over older rows
-        is noise -- with nothing to notice it by.
-
-        Checked here rather than at startup because ``memories`` has RLS forced
-        and the app role is NOBYPASSRLS: there is deliberately no way to
-        aggregate across users, so the only place holding both a user's rows and
-        the configured model is a request. Reading the already-fetched rows
-        keeps it free of extra queries, and it fires exactly when a stale vector
-        actually influences a ranking. It warns rather than filtering, because
-        silently hiding a user's memories is the worse failure.
-
-        A NULL model means the row predates provenance tracking, which is not
-        evidence of a mismatch -- every row in a database migrated from an
-        earlier version looks like this. Treating unknown as stale would fire on
-        every recall until the whole corpus is rewritten, so only a positively
-        different model counts.
-        """
-        configured = self._embeddings.model
-        stale = {
-            candidate.memory.embedding_model
-            for candidate in candidates
-            if candidate.memory.embedding_model not in (None, configured)
-        }
-        if not stale:
-            return
-        logger.warning(
-            "recall ranked vectors produced by %s but %r is configured; their "
-            "similarity scores are unreliable until re-embedded",
-            ", ".join(sorted(stale)),
-            configured,
-        )
 
     # ------------------------------------------------------------------
 
@@ -858,4 +914,5 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         reconfirmed_at=memory.reconfirmed_at,
         last_recalled_at=memory.last_recalled_at,
         recall_count=memory.recall_count,
+        context_count=memory.context_count,
     )

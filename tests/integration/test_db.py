@@ -83,6 +83,7 @@ async def test_search_text_collapses_inflections(container):
         user_id,
         query="preferences",
         embedding=None,
+        embedding_model=None,
         visibility=MemoryVisibility("all"),
         limit=10,
     )
@@ -242,7 +243,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0008_agent_synergy"
+        assert version == "0009_context_usage_split"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")

@@ -147,9 +147,10 @@ class Memory(Base):
     content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=False)
     # Which model produced ``embedding``. NULL means "written before provenance
-    # was tracked". Vectors from different models are not comparable, so a
-    # mismatch makes cosine similarity meaningless; startup warns rather than
-    # hiding rows, because silently dropping memories is the worse failure.
+    # was tracked". Vectors from different models are not comparable, so the
+    # vector search leg ranks only rows whose provenance is NULL or the
+    # configured model; positively mismatched rows stay reachable through the
+    # textual leg until ``recallum-admin reembed`` restamps them.
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     importance: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=5)
     source_client: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -161,7 +162,10 @@ class Memory(Base):
     )
     # Freshness and usage signals. ``reconfirmed_at`` is the last time identical
     # content was re-stored (exact dedup); ``last_recalled_at``/``recall_count``
-    # track being served in recall/context results. NULL / 0 mean "no signal".
+    # track matching a ``recall`` query, while ``context_count`` tracks riding
+    # along in a ``context`` snapshot. Snapshot serves echo importance, not
+    # relevance, so the two counters are deliberately separate: only recall
+    # hits may ever feed the usage voter. NULL / 0 mean "no signal".
     reconfirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -169,6 +173,7 @@ class Memory(Base):
         DateTime(timezone=True), nullable=True
     )
     recall_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    context_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The memory that replaced this one. Superseding also sets ``deleted_at``,
     # so a replaced row leaves every active query through the filter that

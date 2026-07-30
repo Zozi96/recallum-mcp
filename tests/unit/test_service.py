@@ -186,56 +186,54 @@ async def test_recall_degrades_to_textual_when_embeddings_fail():
     assert [r.content for r in result.results] == ["la base de datos es postgres"]
 
 
-async def test_recall_warns_when_ranked_vectors_came_from_another_model(caplog):
-    """A silent model swap must leave a trace where it actually distorts results."""
+async def test_recall_vector_leg_ignores_vectors_from_another_model():
+    """After a model swap, stale vectors stop voting but stay textually reachable.
+
+    Cross-model cosine is noise, and noise sometimes outranks genuine matches
+    -- worse than absence. Filtering the vector leg is safe because it is not
+    hiding: the textual leg still reaches the row, and ``reembed_stale``
+    restores its vector reach.
+    """
     repo = FakeMemoryRepository()
     before = MemoryService(
         repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="new-model")
     )
-    await before.remember(USER, content="written by the old model", category="fact")
+    stored = await before.remember(
+        USER, content="tokamak ignition threshold", category="fact"
+    )
 
     after_rotation = MemoryService(
         repository=repo,
         embeddings=FakeEmbeddingClient(dimensions=8, model="rotated-model"),
     )
-    with caplog.at_level("WARNING", logger="recallum.memory"):
-        result = await after_rotation.recall(USER, query="old model")
+    # No term overlap: only a noise cosine score could surface the row, and
+    # it must not.
+    drifted = await after_rotation.recall(USER, query="frobnicate widget")
+    assert drifted.results == []
 
-    assert result.results, "drift must degrade ranking, never hide memories"
-    assert "rotated-model" in caplog.text
-    assert "new-model" in caplog.text
-
-
-async def test_recall_is_quiet_when_the_embedding_model_is_unchanged(caplog):
-    service, _, _ = make_service()
-    await service.remember(USER, content="stable model content", category="fact")
-
-    with caplog.at_level("WARNING", logger="recallum.memory"):
-        await service.recall(USER, query="stable model content")
-
-    assert "unreliable" not in caplog.text
+    # Not hidden: the textual leg reaches it, scored by real term overlap.
+    textual = await after_rotation.recall(USER, query="tokamak ignition")
+    assert [r.id for r in textual.results] == [stored.memory.id]
 
 
-async def test_recall_is_quiet_for_rows_predating_provenance_tracking(caplog):
+async def test_recall_vector_leg_keeps_rows_predating_provenance_tracking():
     """Unknown provenance is not evidence of drift.
 
     Every row in a database migrated from an earlier version has a NULL model.
-    Warning on those would fire on every single recall until the whole corpus
-    was rewritten, which is alarm fatigue rather than a signal.
+    Excluding those would blank the vector leg of every migrated corpus until
+    the whole thing was rewritten, so only a positively different model is
+    kept out of the pool.
     """
-    repo = FakeMemoryRepository()
-    service = MemoryService(
-        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8, model="current")
+    service, repo, _ = make_service()
+    stored = await service.remember(
+        USER, content="legacy row without provenance", category="fact"
     )
-    await service.remember(USER, content="legacy row without provenance", category="fact")
     for row in repo.rows.values():
         row.embedding_model = None
 
-    with caplog.at_level("WARNING", logger="recallum.memory"):
-        result = await service.recall(USER, query="legacy row without provenance")
-
-    assert result.results
-    assert "unreliable" not in caplog.text
+    # No term overlap with the content: only the vector leg can reach it.
+    result = await service.recall(USER, query="frobnicate widget")
+    assert [r.id for r in result.results] == [stored.memory.id]
 
 
 async def test_recall_importance_breaks_near_ties_without_overriding_relevance():

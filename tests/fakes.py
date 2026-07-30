@@ -153,6 +153,7 @@ class FakeMemoryRepository:
             reconfirmed_at=None,
             last_recalled_at=None,
             recall_count=0,
+            context_count=0,
             **kwargs,
         )
         self.rows[memory.id] = memory
@@ -199,6 +200,7 @@ class FakeMemoryRepository:
         *,
         query: str,
         embedding: list[float] | None,
+        embedding_model: str | None,
         visibility: MemoryVisibility,
         category: str | None = None,
         limit: int,
@@ -206,7 +208,9 @@ class FakeMemoryRepository:
         capped = min(limit, MAX_CANDIDATES)
         return CandidatePools(
             vector=(
-                self._vector_pool(user_id, embedding, visibility, category, capped)
+                self._vector_pool(
+                    user_id, embedding, embedding_model, visibility, category, capped
+                )
                 if embedding is not None
                 else []
             ),
@@ -250,13 +254,17 @@ class FakeMemoryRepository:
         self,
         user_id: uuid.UUID,
         embedding: list[float],
+        embedding_model: str | None,
         visibility: MemoryVisibility,
         category: str | None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
+        # Mirrors the adapter's provenance rule: NULL stays eligible, a
+        # positively different model never votes (its cosine would be noise).
         scored = [
             ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
             for m in self._filtered(user_id, visibility, category)
+            if m.embedding_model in (None, embedding_model)
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:limit]
@@ -289,6 +297,7 @@ class FakeMemoryRepository:
         user_id: uuid.UUID,
         embedding: list[float],
         *,
+        embedding_model: str,
         scope: str,
         project: str | None,
         min_similarity: float,
@@ -296,11 +305,15 @@ class FakeMemoryRepository:
         exclude_id: uuid.UUID | None = None,
     ) -> Sequence[ScoredMemory]:
         # Deliberately category-blind, matching the adapter: a near-duplicate
-        # filed under another category is exactly what must surface.
+        # filed under another category is exactly what must surface. Only
+        # vectors from the probe's model (or NULL provenance) are compared.
         scored = [
             ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
             for m in self._active(user_id)
-            if m.scope == scope and (m.project or "") == (project or "") and m.id != exclude_id
+            if m.scope == scope
+            and (m.project or "") == (project or "")
+            and m.id != exclude_id
+            and m.embedding_model in (None, embedding_model)
         ]
         scored = [s for s in scored if s.score >= min_similarity]
         scored.sort(key=lambda s: s.score, reverse=True)
@@ -321,6 +334,48 @@ class FakeMemoryRepository:
                 continue
             memory.recall_count = (memory.recall_count or 0) + 1
             memory.last_recalled_at = now
+
+    async def mark_seen_in_context(
+        self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
+    ) -> None:
+        for memory_id in memory_ids:
+            memory = self.rows.get(memory_id)
+            if memory is None or memory.user_id != user_id or memory.is_deleted:
+                continue
+            memory.context_count = (memory.context_count or 0) + 1
+
+    async def stale_embeddings_batch(
+        self,
+        user_id: uuid.UUID,
+        *,
+        model: str,
+        after: uuid.UUID | None,
+        limit: int,
+    ) -> Sequence[Memory]:
+        # None != model is True, matching the adapter's "NULL or another model".
+        rows = [
+            m
+            for m in self._active(user_id)
+            if m.embedding_model != model and (after is None or str(m.id) > str(after))
+        ]
+        # Matches Postgres' ORDER BY id over canonical lowercase hex uuids.
+        rows.sort(key=lambda m: str(m.id))
+        return rows[:limit]
+
+    async def replace_embedding(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        embedding: list[float],
+        model: str,
+    ) -> bool:
+        memory = self.rows.get(memory_id)
+        if memory is None or memory.user_id != user_id or memory.is_deleted:
+            return False
+        memory.embedding = embedding
+        memory.embedding_model = model
+        return True
 
     async def count_active_visible(
         self, user_id: uuid.UUID, *, visibility: MemoryVisibility
@@ -420,6 +475,7 @@ class FakeMemoryRepository:
             reconfirmed_at=None,
             last_recalled_at=None,
             recall_count=0,
+            context_count=0,
         )
         self.rows[replacement.id] = replacement
         original.deleted_at = datetime.now(UTC)

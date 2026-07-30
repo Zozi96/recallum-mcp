@@ -859,7 +859,7 @@
         "type": "object"
       },
       "MemoryOut": {
-        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory was served in recall or\ncontext results, as of before the response carrying them was produced.\nNULL / 0 mean \"no signal yet\".",
+        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory matched a ``recall``\nquery; ``context_count`` says how often it rode along in a ``context``\nsnapshot, which tracks importance more than relevance. Counters are as of\nbefore the response carrying them was produced. NULL / 0 mean \"no signal\nyet\".",
         "properties": {
           "category": {
             "enum": [
@@ -874,6 +874,11 @@
           "content": {
             "title": "Content",
             "type": "string"
+          },
+          "context_count": {
+            "default": 0,
+            "title": "Context Count",
+            "type": "integer"
           },
           "created_at": {
             "format": "date-time",
@@ -1084,6 +1089,11 @@
           "content": {
             "title": "Content",
             "type": "string"
+          },
+          "context_count": {
+            "default": 0,
+            "title": "Context Count",
+            "type": "integer"
           },
           "created_at": {
             "format": "date-time",
