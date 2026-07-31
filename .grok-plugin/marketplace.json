@@ -1,0 +1,26 @@
+{
+  "name": "recallum-local",
+  "description": "Native Grok Build marketplace for the Recallum durable-memory plugin. No Claude Code required.",
+  "owner": {
+    "name": "Zozi"
+  },
+  "plugins": [
+    {
+      "name": "recallum-memory",
+      "version": "0.7.0",
+      "description": "Recall durable project context across Grok Build sessions via the Recallum MCP server. Claude Code is not required.",
+      "category": "productivity",
+      "keywords": [
+        "memory",
+        "mcp",
+        "context",
+        "hooks"
+      ],
+      "homepage": "https://github.com/Zozi96/recallum-mcp",
+      "source": {
+        "type": "local",
+        "path": "./plugins/recallum-memory"
+      }
+    }
+  ]
+}

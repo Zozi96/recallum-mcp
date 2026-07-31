@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-open context hints for the Recallum plugin (Codex and Claude Code).
+"""Fail-open context hints for the Recallum plugin (Codex, Claude Code, Grok).
 
 Runs under whichever ``python3`` is on the host PATH, so this module must stay
 compatible with older interpreters. Do not use syntax newer than Python 3.9.
@@ -29,9 +29,11 @@ from urllib.parse import urlsplit
 # `mcp__recallum__*`. Claude Code registers a plugin-bundled server as
 # `plugin:<plugin>:<server>` and sanitizes every character outside
 # [A-Za-z0-9_-] to `_` when building tool ids, so the same tools are
-# `mcp__plugin_recallum-memory_recallum__*` there.
+# `mcp__plugin_recallum-memory_recallum__*` there. Grok Build namespaces
+# MCP tools as `server__tool` for search_tool/use_tool, so `recallum__*`.
 CODEX_TOOL_PREFIX = "mcp__recallum__"
 CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
+GROK_TOOL_PREFIX = "recallum__"
 
 # Opt-in digest configuration. The URL cannot be read from .mcp.json (its
 # ${user_config.*} interpolations are resolved by the client, not by hooks),
@@ -141,22 +143,28 @@ def _project(payload: dict[str, object]) -> str:
 def _tool(name: str) -> str:
     """Name a Recallum tool the way the running client exposes it.
 
-    PLUGIN_ROOT is the discriminator, not CLAUDE_PLUGIN_ROOT. Codex sets
-    PLUGIN_ROOT *and* also sets CLAUDE_PLUGIN_ROOT for compatibility with
-    hooks written against Claude Code, so presence of CLAUDE_PLUGIN_ROOT says
-    nothing about which client is running. Only Codex sets PLUGIN_ROOT.
+    Discriminators, in order:
 
-    Testing CLAUDE_PLUGIN_ROOT first would make every Codex session look
-    ambiguous and emit both spellings, which is noise the model has to
-    disambiguate on every single turn. Naming both is the fallback for when
-    neither variable is set, not the normal Codex path.
+    * ``GROK_PLUGIN_ROOT`` — Grok Build. It also sets ``CLAUDE_PLUGIN_ROOT``
+      as a compatibility alias, so Grok must be checked first.
+    * ``PLUGIN_ROOT`` — Codex. Codex sets ``PLUGIN_ROOT`` *and*
+      ``CLAUDE_PLUGIN_ROOT`` for Claude-hook compatibility, so presence of
+      ``CLAUDE_PLUGIN_ROOT`` alone does not identify Claude Code.
+    * ``CLAUDE_PLUGIN_ROOT`` alone — Claude Code.
+
+    Testing Claude first would make every Codex and Grok session look
+    ambiguous and emit multiple spellings, which is noise the model has to
+    disambiguate on every single turn. Naming every spelling is the fallback
+    for when no client root is set, not the normal path.
     """
-    if os.environ.get("PLUGIN_ROOT"):
+    if os.environ.get("GROK_PLUGIN_ROOT"):
+        prefixes = [GROK_TOOL_PREFIX]
+    elif os.environ.get("PLUGIN_ROOT"):
         prefixes = [CODEX_TOOL_PREFIX]
     elif os.environ.get("CLAUDE_PLUGIN_ROOT"):
         prefixes = [CLAUDE_TOOL_PREFIX]
     else:
-        prefixes = [CODEX_TOOL_PREFIX, CLAUDE_TOOL_PREFIX]
+        prefixes = [CODEX_TOOL_PREFIX, CLAUDE_TOOL_PREFIX, GROK_TOOL_PREFIX]
     return " or ".join(prefix + name for prefix in prefixes)
 
 
@@ -167,15 +175,28 @@ def _lookup_hint() -> str:
     recent versions leave them behind ToolSearch, so naming the fully qualified
     tool is an instruction the model cannot follow -- it calls the name blindly
     and gets `No such tool available` even though the server is connected and
-    authenticated. Codex lists its MCP tools directly and has no lookup step,
-    so the hint is emitted only when the Claude spelling is in play, mirroring
-    the branch in _tool().
+    authenticated. Grok Build similarly routes MCP tools through
+    ``search_tool`` / ``use_tool`` rather than listing them as first-class
+    builtins. Codex lists its MCP tools directly and has no lookup step, so
+    the hint is omitted on the Codex path, mirroring the branch in ``_tool``.
     """
-    if os.environ.get("PLUGIN_ROOT"):
+    if os.environ.get("PLUGIN_ROOT") and not os.environ.get("GROK_PLUGIN_ROOT"):
         return ""
+    if os.environ.get("GROK_PLUGIN_ROOT"):
+        return (
+            " In Grok Build, discover Recallum tools with search_tool and call "
+            "them via use_tool (names like recallum__context) before concluding "
+            "they are unavailable."
+        )
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return (
+            " In Claude Code a plugin's MCP tools are not always listed directly; "
+            "look them up with ToolSearch before concluding they are unavailable."
+        )
     return (
-        " In Claude Code a plugin's MCP tools are not always listed directly; "
-        "look them up with ToolSearch before concluding they are unavailable."
+        " If tools are not listed directly, look them up with the client's tool "
+        "search (ToolSearch in Claude Code; search_tool in Grok Build) before "
+        "concluding they are unavailable."
     )
 
 

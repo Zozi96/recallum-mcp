@@ -6,20 +6,21 @@ usage() {
 Usage: install.sh [OPTIONS]
 
 Install the repo-local Recallum plugin and configure its remote MCP server for
-Codex, Claude Code, or both.
+Codex, Claude Code, Grok Build, or any combination the host has installed.
 
 Options:
   --url URL                 Recallum MCP endpoint
                             (default: https://recallum.zozbit.com/mcp/)
                             Normalized to a trailing slash to avoid a redirect
                             that would expose or drop the bearer token
-  --target TARGET           auto | codex | claude | both (default: auto)
+  --target TARGET           auto | codex | claude | grok | both (default: auto)
                             auto installs into every detected CLI
-  --token-env-var NAME      Codex only: bearer-token environment variable
+                            both requires Codex and Claude Code (not Grok)
+  --token-env-var NAME      Codex and Grok: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
   --remote                  Register the private GitHub repository instead of the local checkout
-  --force-mcp               Replace an existing recallum setup: a differing Codex MCP
+  --force-mcp               Replace an existing recallum setup: a differing Codex/Grok MCP
                             definition, or an already-installed Claude Code plugin
   --dry-run                 Validate and print safe actions without mutating anything
   --help                    Show this help
@@ -31,6 +32,11 @@ This script never reads, prints, or stores the API key.
   Claude Code  carries the MCP server inside the plugin. It prefers RECALLUM_API_KEY,
                with a masked fallback set through
                `/plugin configure recallum-memory@recallum-local`.
+  Grok Build   registers the MCP server in ~/.grok/config.toml against
+               --token-env-var (same env-var pattern as Codex). Claude-style
+               ${user_config.*} placeholders in the plugin .mcp.json are not
+               resolved by Grok, so the native config entry is required and
+               takes precedence over the plugin-bundled server.
 EOF
 }
 
@@ -91,9 +97,9 @@ while (($#)); do
 done
 
 case "$target" in
-  auto | codex | claude | both) ;;
+  auto | codex | claude | grok | both) ;;
   *)
-    echo "error: --target must be auto, codex, claude, or both" >&2
+    echo "error: --target must be auto, codex, claude, grok, or both" >&2
     exit 2
     ;;
 esac
@@ -137,17 +143,21 @@ PY
 
 has_codex=0
 has_claude=0
+has_grok=0
 if command -v codex >/dev/null 2>&1; then has_codex=1; fi
 if command -v claude >/dev/null 2>&1; then has_claude=1; fi
+if command -v grok >/dev/null 2>&1; then has_grok=1; fi
 
 install_codex=0
 install_claude=0
+install_grok=0
 case "$target" in
   auto)
     install_codex=$has_codex
     install_claude=$has_claude
-    if ((install_codex == 0 && install_claude == 0)); then
-      echo "error: neither the codex nor the claude CLI is on PATH" >&2
+    install_grok=$has_grok
+    if ((install_codex == 0 && install_claude == 0 && install_grok == 0)); then
+      echo "error: none of the codex, claude, or grok CLIs is on PATH" >&2
       exit 1
     fi
     ;;
@@ -158,6 +168,10 @@ case "$target" in
   claude)
     ((has_claude)) || { echo "error: claude CLI is not installed or not on PATH" >&2; exit 1; }
     install_claude=1
+    ;;
+  grok)
+    ((has_grok)) || { echo "error: grok CLI is not installed or not on PATH" >&2; exit 1; }
+    install_grok=1
     ;;
   both)
     ((has_codex)) || { echo "error: codex CLI is not installed or not on PATH" >&2; exit 1; }
@@ -171,9 +185,12 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd -P)
 codex_marketplace_source="$repo_root"
 claude_marketplace_source="$repo_root"
+grok_marketplace_source="$repo_root"
 if ((remote_marketplace)); then
   codex_marketplace_source="git@github.com:Zozi96/recallum-mcp.git"
   claude_marketplace_source="Zozi96/recallum-mcp"
+  # Grok accepts GitHub shorthand and normalizes it to an https git URL.
+  grok_marketplace_source="Zozi96/recallum-mcp"
 fi
 
 tmp_dir=$(mktemp -d)
@@ -431,8 +448,280 @@ PY
     --config "mcp_url=$url"
 }
 
+# ------------------------------------------------------------ Grok Build -----
+
+install_for_grok() {
+  if [[ -z "${!token_env_var-}" ]]; then
+    echo "warning: $token_env_var is unset; set it before starting Grok Build" >&2
+  fi
+
+  local marketplace_file="$repo_root/.grok-plugin/marketplace.json"
+  local plugin_manifest="$repo_root/plugins/recallum-memory/plugin.json"
+  local plugin_index="$repo_root/.grok-plugin/plugin-index.json"
+  [[ -f "$marketplace_file" ]] || { echo "error: Grok marketplace file not found: $marketplace_file" >&2; exit 1; }
+  [[ -f "$plugin_manifest" ]] || { echo "error: Grok plugin.json not found: $plugin_manifest" >&2; exit 1; }
+  [[ -f "$plugin_index" ]] || { echo "error: Grok plugin-index.json not found: $plugin_index" >&2; exit 1; }
+
+  local marketplace_name
+  marketplace_name=$(python3 - "$marketplace_file" "$plugin_manifest" "$plugin_index" <<'PY'
+import json
+import sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    manifest = json.load(open(sys.argv[2], encoding="utf-8"))
+    index = json.load(open(sys.argv[3], encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"error: invalid Grok packaging JSON: {exc}")
+if data.get("name") != "recallum-local":
+    raise SystemExit("error: marketplace name must be recallum-local")
+if manifest.get("name") != "recallum-memory":
+    raise SystemExit("error: plugins/recallum-memory/plugin.json name must be recallum-memory")
+plugins = data.get("plugins")
+entry = next(
+    (
+        item
+        for item in plugins
+        if isinstance(item, dict)
+        and item.get("name") == "recallum-memory"
+        and (
+            item.get("source") == {"type": "local", "path": "./plugins/recallum-memory"}
+            or item.get("source") == "./plugins/recallum-memory"
+        )
+    ),
+    None,
+) if isinstance(plugins, list) else None
+if entry is None:
+    raise SystemExit("error: marketplace has an invalid recallum-memory plugin entry")
+if entry.get("version") and entry.get("version") != manifest.get("version"):
+    raise SystemExit("error: marketplace plugin version must match plugins/recallum-memory/plugin.json")
+catalog = (index.get("plugins") or {}).get("recallum-memory") if isinstance(index, dict) else None
+if not isinstance(catalog, dict) or not isinstance((catalog.get("components") or {}).get("skills"), list):
+    raise SystemExit("error: plugin-index.json must catalog recallum-memory skills")
+if catalog.get("version") and catalog.get("version") != manifest.get("version"):
+    raise SystemExit("error: plugin-index version must match plugins/recallum-memory/plugin.json")
+print(data["name"])
+PY
+  )
+
+  grok plugin marketplace list --json >"$tmp_dir/grok-marketplaces.json"
+  local marketplace_state
+  marketplace_state=$(python3 - "$tmp_dir/grok-marketplaces.json" "$marketplace_name" "$repo_root" "$remote_marketplace" "$grok_marketplace_source" <<'PY'
+import json
+import os
+import sys
+from urllib.parse import urlsplit
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+items = data if isinstance(data, list) else data.get("marketplaces", [])
+if not isinstance(items, list):
+    raise SystemExit("error: unexpected 'grok plugin marketplace list --json' payload")
+matches = [item for item in items if isinstance(item, dict) and item.get("name") == sys.argv[2]]
+expected_root = os.path.realpath(sys.argv[3])
+remote = sys.argv[4] == "1"
+expected_source = sys.argv[5]
+
+
+def normalize_git_url(value: str) -> str:
+    value = value.strip()
+    if value.startswith("git@"):
+        # git@github.com:owner/repo.git -> https://github.com/owner/repo.git
+        host_path = value.split("@", 1)[1]
+        host, _, path = host_path.partition(":")
+        if not path.endswith(".git"):
+            path = path + ".git"
+        return f"https://{host}/{path}".lower()
+    if value.count("/") == 1 and "://" not in value and not value.startswith("."):
+        owner, repo = value.split("/", 1)
+        if not repo.endswith(".git"):
+            repo = repo + ".git"
+        return f"https://github.com/{owner}/{repo}".lower()
+    parsed = urlsplit(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        path = parsed.path.rstrip("/")
+        if not path.endswith(".git"):
+            path = path + ".git"
+        return f"https://{parsed.netloc.lower()}{path.lower()}"
+    return value
+
+
+def source_locations(item):
+    source = item.get("source")
+    if isinstance(source, str):
+        yield source
+    elif isinstance(source, dict):
+        for key in ("url", "path", "git"):
+            value = source.get(key)
+            if isinstance(value, str):
+                yield value
+    for key in ("path", "root", "url"):
+        value = item.get(key)
+        if isinstance(value, str):
+            yield value
+
+
+if not matches:
+    print("missing")
+elif len(matches) != 1:
+    print("conflict")
+elif remote:
+    expected = normalize_git_url(expected_source)
+    if any(normalize_git_url(loc) == expected for loc in source_locations(matches[0])):
+        print("matching")
+    else:
+        print("conflict")
+else:
+    if any(
+        os.path.realpath(os.path.expanduser(loc)) == expected_root
+        for loc in source_locations(matches[0])
+        if loc.startswith(("/", ".", "~"))
+    ):
+        print("matching")
+    else:
+        # A git remote marketplace with the same name is a conflict when the
+        # installer is asked to track this local checkout.
+        print("conflict")
+PY
+  )
+  [[ "$marketplace_state" != "conflict" ]] || {
+    echo "error: Grok marketplace '$marketplace_name' already points to a different location" >&2
+    exit 1
+  }
+
+  # grok mcp list --json expands ${ENV} values in headers, so matching must
+  # read the unexpanded config.toml entry instead of trusting list output.
+  # Parse with a tiny section scanner (not tomllib) so the installer still
+  # works on the same Python 3.9 floor as the hook.
+  local grok_home="${GROK_HOME:-$HOME/.grok}"
+  local mcp_state
+  mcp_state=$(python3 - "$grok_home/config.toml" "$url" "$token_env_var" <<'PY'
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+want_url = sys.argv[2]
+want_token = sys.argv[3]
+if not config_path.is_file():
+    print("missing")
+    raise SystemExit(0)
+
+try:
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+except OSError as exc:
+    raise SystemExit(f"error: cannot read Grok config.toml: {exc}")
+
+# Collect [mcp_servers.recallum] and [mcp_servers.recallum.headers] only.
+section = None
+values = {}
+headers = {}
+for raw in lines:
+    line = raw.split("#", 1)[0].strip()
+    if not line:
+        continue
+    if line.startswith("[") and line.endswith("]"):
+        section = line[1:-1].strip()
+        continue
+    if section not in {"mcp_servers.recallum", "mcp_servers.recallum.headers"}:
+        continue
+    if "=" not in line:
+        continue
+    key, _, value = line.partition("=")
+    key = key.strip()
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    if section == "mcp_servers.recallum":
+        values[key] = value
+    else:
+        headers[key] = value
+
+if not values and not headers:
+    print("missing")
+    raise SystemExit(0)
+
+auth = headers.get("Authorization") or headers.get("authorization") or ""
+expected_auth = f"Bearer ${{{want_token}}}"
+enabled = values.get("enabled", "true").lower()
+matches = (
+    values.get("url") == want_url
+    and auth == expected_auth
+    and enabled not in {"false", "0", "no"}
+    and set(headers) <= {"Authorization", "authorization"}
+)
+print("matching" if matches else "different")
+PY
+  )
+
+  if [[ "$mcp_state" == "different" && "$force_mcp" -ne 1 ]]; then
+    echo "error: Grok MCP server 'recallum' exists with different settings; rerun with --force-mcp to replace it" >&2
+    exit 1
+  fi
+
+  grok plugin list --json >"$tmp_dir/grok-plugins.json"
+  local plugin_state
+  plugin_state=$(python3 - "$tmp_dir/grok-plugins.json" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+items = data if isinstance(data, list) else data.get("plugins", [])
+if not isinstance(items, list):
+    raise SystemExit("error: unexpected 'grok plugin list --json' payload")
+wanted = {"recallum-memory", "recallum-memory@recallum-local"}
+print(
+    "installed"
+    if any(
+        isinstance(i, dict)
+        and (
+            i.get("name") in wanted
+            or i.get("id") in wanted
+            or str(i.get("name", "")).endswith("/recallum-memory")
+        )
+        for i in items
+    )
+    else "missing"
+)
+PY
+  )
+
+  if [[ "$marketplace_state" == "missing" ]]; then
+    run_action grok plugin marketplace add "$grok_marketplace_source"
+  else
+    echo "Grok marketplace '$marketplace_name' already points to this repository."
+    if ((remote_marketplace)); then
+      run_action grok plugin marketplace update "$marketplace_name"
+    fi
+  fi
+
+  if [[ "$plugin_state" == "missing" ]]; then
+    run_action grok plugin install recallum-memory --trust
+  else
+    echo "Grok plugin 'recallum-memory' is already installed."
+    if ((force_mcp)); then
+      run_action grok plugin update recallum-memory
+    fi
+  fi
+  # Plugins stay disabled until enabled; enable is idempotent.
+  run_action grok plugin enable recallum-memory
+
+  # Auth header must keep the ${ENV} form so the key never lands in config.toml.
+  local auth_header="Authorization: Bearer \${$token_env_var}"
+  case "$mcp_state" in
+    missing)
+      run_action grok mcp add --transport http recallum "$url" --header "$auth_header"
+      ;;
+    matching)
+      echo "Grok MCP server 'recallum' already matches; leaving it unchanged."
+      ;;
+    different)
+      run_action grok mcp remove --scope user recallum
+      run_action grok mcp add --transport http recallum "$url" --header "$auth_header"
+      ;;
+  esac
+}
+
 if ((install_codex)); then install_for_codex; fi
 if ((install_claude)); then install_for_claude; fi
+if ((install_grok)); then install_for_grok; fi
 
 echo
 if ((install_codex)); then
@@ -441,4 +730,8 @@ fi
 if ((install_claude)); then
   echo "Claude Code: export RECALLUM_API_KEY or set a masked fallback with"
   echo "             '/plugin configure recallum-memory@recallum-local', then restart the session."
+fi
+if ((install_grok)); then
+  echo "Grok Build: export $token_env_var before launching Grok, then start a new session."
+  echo "            Verify with: grok mcp doctor recallum"
 fi

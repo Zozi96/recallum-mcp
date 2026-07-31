@@ -17,8 +17,11 @@ HOOK = PLUGIN_ROOT / "hooks" / "recallum_hook.py"
 INSTALLER = PLUGIN_ROOT / "scripts" / "install.sh"
 CODEX_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+GROK_MANIFEST = PLUGIN_ROOT / "plugin.json"
 CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 CLAUDE_MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+GROK_MARKETPLACE = REPO_ROOT / ".grok-plugin" / "marketplace.json"
+GROK_PLUGIN_INDEX = REPO_ROOT / ".grok-plugin" / "plugin-index.json"
 
 URL = "https://recallum.example/mcp/"
 TOKEN_ENV_VAR = "TEST_RECALLUM_KEY"
@@ -85,9 +88,41 @@ elif args == ["plugin", "list", "--json"]:
                            "scope": "user", "enabled": True}]))
 """
 
+FAKE_GROK = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["grok", *args]) + "\\n")
+if args == ["plugin", "marketplace", "list", "--json"]:
+    state = os.environ.get("FAKE_GROK_MARKETPLACE", "missing")
+    if state == "matching":
+        print(json.dumps([{
+            "name": "recallum-local",
+            "kind": "git",
+            "source": {
+                "url": "https://github.com/Zozi96/recallum-mcp.git",
+                "branch": None,
+            },
+        }]))
+    elif state == "local":
+        print(json.dumps([{
+            "name": "recallum-local",
+            "kind": "path",
+            "source": {"path": os.environ["EXPECTED_REPO_ROOT"]},
+        }]))
+    else:
+        print(json.dumps([]))
+elif args == ["plugin", "list", "--json"]:
+    if os.environ.get("FAKE_GROK_PLUGIN", "missing") == "installed":
+        print(json.dumps([{"name": "recallum-memory", "enabled": True}]))
+    else:
+        print(json.dumps([]))
+"""
+
 
 CODEX_PREFIX = "mcp__recallum__"
 CLAUDE_PREFIX = "mcp__plugin_recallum-memory_recallum__"
+GROK_PREFIX = "recallum__"
 
 
 def run_hook(
@@ -96,7 +131,13 @@ def run_hook(
     env = os.environ.copy()
     # Also drop the digest opt-in variables: a developer with them exported
     # must not turn every hint test into a live network call.
-    for key in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "RECALLUM_MCP_URL", "RECALLUM_API_KEY"):
+    for key in (
+        "PLUGIN_ROOT",
+        "CLAUDE_PLUGIN_ROOT",
+        "GROK_PLUGIN_ROOT",
+        "RECALLUM_MCP_URL",
+        "RECALLUM_API_KEY",
+    ):
         env.pop(key, None)
     env.update(client_env or {})
     return subprocess.run(
@@ -148,11 +189,16 @@ class HookTests(unittest.TestCase):
         # with hooks written against Claude Code, so this is what a real Codex
         # hook process sees -- not PLUGIN_ROOT on its own.
         context = self._session_context(
-            {"PLUGIN_ROOT": "/plugins/recallum-memory",
-             "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"}
+            {
+                "PLUGIN_ROOT": "/plugins/recallum-memory",
+                "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+            }
         )
         self.assertIn(f"{CODEX_PREFIX}context", context)
         self.assertNotIn(CLAUDE_PREFIX, context)
+        # Bare Grok names are a substring of mcp__recallum__*, so check the
+        # call-site form the hook actually emits.
+        self.assertNotIn(f"call {GROK_PREFIX}context", context)
 
     def test_claude_is_told_the_plugin_namespaced_tool_name(self) -> None:
         context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
@@ -160,15 +206,27 @@ class HookTests(unittest.TestCase):
         # The Codex spelling is a strict prefix-free substring check away, so
         # assert on a boundary that only the bare Codex name can satisfy.
         self.assertNotIn(f"call {CODEX_PREFIX}context", context)
+        self.assertNotIn(f"call {GROK_PREFIX}context", context)
 
-    def test_ambiguous_client_names_both_tool_spellings(self) -> None:
-        """Only a hook process with neither variable set is genuinely ambiguous.
+    def test_grok_is_told_the_server_tool_name(self) -> None:
+        # Grok sets GROK_PLUGIN_ROOT and also aliases CLAUDE_PLUGIN_ROOT; Grok
+        # must win so the model is not told the Claude plugin id.
+        context = self._session_context(
+            {
+                "GROK_PLUGIN_ROOT": "/plugins/recallum-memory",
+                "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+            }
+        )
+        self.assertIn(f"call {GROK_PREFIX}context", context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
+        self.assertNotIn(CODEX_PREFIX, context)
 
-        Both variables set is Codex, not ambiguity -- see the Codex case above.
-        """
+    def test_ambiguous_client_names_all_tool_spellings(self) -> None:
+        """Only a hook process with no client root set is genuinely ambiguous."""
         context = self._session_context({})
         self.assertIn(f"{CODEX_PREFIX}context", context)
         self.assertIn(f"{CLAUDE_PREFIX}context", context)
+        self.assertIn(f"{GROK_PREFIX}context", context)
 
     def test_claude_is_told_how_to_find_an_unlisted_tool(self) -> None:
         """Naming the tool is not enough on Claude Code.
@@ -181,12 +239,20 @@ class HookTests(unittest.TestCase):
         context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn("ToolSearch", context)
 
+    def test_grok_is_told_how_to_find_tools_via_search_tool(self) -> None:
+        context = self._session_context({"GROK_PLUGIN_ROOT": "/plugins/recallum-memory"})
+        self.assertIn("search_tool", context)
+        self.assertIn("use_tool", context)
+
     def test_codex_is_not_told_about_a_lookup_step_it_does_not_have(self) -> None:
         context = self._session_context(
-            {"PLUGIN_ROOT": "/plugins/recallum-memory",
-             "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"}
+            {
+                "PLUGIN_ROOT": "/plugins/recallum-memory",
+                "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+            }
         )
         self.assertNotIn("ToolSearch", context)
+        self.assertNotIn("search_tool", context)
 
     def test_same_basename_in_different_paths_gets_distinct_local_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -470,12 +536,38 @@ class ManifestTests(unittest.TestCase):
     def _load(self, path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def test_both_client_manifests_describe_the_same_plugin_release(self) -> None:
+    def test_all_client_manifests_describe_the_same_plugin_release(self) -> None:
         codex = self._load(CODEX_MANIFEST)
         claude = self._load(CLAUDE_MANIFEST)
+        grok = self._load(GROK_MANIFEST)
         self.assertEqual(codex["name"], "recallum-memory")
         self.assertEqual(claude["name"], "recallum-memory")
+        self.assertEqual(grok["name"], "recallum-memory")
         self.assertEqual(codex["version"], claude["version"])
+        self.assertEqual(codex["version"], grok["version"])
+        self.assertIn("Grok", grok["description"])
+        self.assertIn("grok", grok["keywords"])
+
+    def test_grok_plugin_index_catalogs_skills_hooks_and_version(self) -> None:
+        manifest = self._load(GROK_MANIFEST)
+        index = self._load(GROK_PLUGIN_INDEX)
+        self.assertEqual(index.get("version"), 1)
+        entry = index["plugins"]["recallum-memory"]
+        self.assertEqual(entry["version"], manifest["version"])
+        components = entry["components"]
+        skill_names = {s["name"] for s in components["skills"]}
+        self.assertEqual(skill_names, {"recallum-memory", "recallum-setup"})
+        hook_names = {h["name"] for h in components["hooks"]}
+        self.assertEqual(hook_names, {"SessionStart", "UserPromptSubmit"})
+        self.assertEqual(components["mcpServers"][0]["name"], "recallum")
+
+    def test_readme_documents_grok_only_install_path(self) -> None:
+        text = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Grok only (no Claude Code)", text)
+        self.assertIn("--target grok", text)
+        self.assertIn("do **not** need Claude Code", text)
+        self.assertIn("plugin.json", text)
+        self.assertIn(".grok-plugin/marketplace.json", text)
 
     def test_claude_manifest_declares_endpoint_and_masked_token(self) -> None:
         user_config = self._load(CLAUDE_MANIFEST)["userConfig"]
@@ -507,14 +599,17 @@ class ManifestTests(unittest.TestCase):
         derived = "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", registered) + "__"
         self.assertEqual(derived, CLAUDE_PREFIX)
 
-    def test_hook_and_tests_agree_on_both_tool_prefixes(self) -> None:
+    def test_hook_and_tests_agree_on_all_tool_prefixes(self) -> None:
         source = HOOK.read_text(encoding="utf-8")
         namespace: dict[str, object] = {}
         for line in source.splitlines():
-            if line.startswith(("CODEX_TOOL_PREFIX", "CLAUDE_TOOL_PREFIX")):
+            if line.startswith(
+                ("CODEX_TOOL_PREFIX", "CLAUDE_TOOL_PREFIX", "GROK_TOOL_PREFIX")
+            ):
                 exec(line, namespace)  # noqa: S102 - constant assignments only
         self.assertEqual(namespace["CODEX_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["CLAUDE_TOOL_PREFIX"], CLAUDE_PREFIX)
+        self.assertEqual(namespace["GROK_TOOL_PREFIX"], GROK_PREFIX)
 
     def test_skills_document_the_tool_prefix_of_each_client(self) -> None:
         for name in ("recallum-memory", "recallum-setup"):
@@ -522,6 +617,7 @@ class ManifestTests(unittest.TestCase):
             with self.subTest(skill=name):
                 self.assertIn(CODEX_PREFIX, text)
                 self.assertIn(CLAUDE_PREFIX, text)
+                self.assertIn(GROK_PREFIX, text)
 
     def test_memory_skill_covers_reusable_context_beyond_decisions(self) -> None:
         text = (
@@ -547,24 +643,36 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("identifiers, commands, file paths, error", text)
         self.assertIn("Translating an existing, still-true memory is not a reason", text)
 
-    def test_both_marketplaces_point_at_the_same_local_plugin(self) -> None:
+    def test_all_marketplaces_point_at_the_same_local_plugin(self) -> None:
         codex = self._load(CODEX_MARKETPLACE)
         claude = self._load(CLAUDE_MARKETPLACE)
+        grok = self._load(GROK_MARKETPLACE)
         self.assertEqual(codex["name"], "recallum-local")
         self.assertEqual(claude["name"], "recallum-local")
+        self.assertEqual(grok["name"], "recallum-local")
         codex_entry = next(p for p in codex["plugins"] if p["name"] == "recallum-memory")
         claude_entry = next(p for p in claude["plugins"] if p["name"] == "recallum-memory")
+        grok_entry = next(p for p in grok["plugins"] if p["name"] == "recallum-memory")
         self.assertEqual(codex_entry["source"]["path"], "./plugins/recallum-memory")
         self.assertEqual(claude_entry["source"], "./plugins/recallum-memory")
+        grok_source = grok_entry["source"]
+        if isinstance(grok_source, dict):
+            self.assertEqual(grok_source.get("path"), "./plugins/recallum-memory")
+        else:
+            self.assertEqual(grok_source, "./plugins/recallum-memory")
+        self.assertEqual(grok_entry.get("version"), self._load(GROK_MANIFEST)["version"])
+        self.assertIn("Claude Code is not required", grok_entry["description"])
 
-    def test_hooks_resolve_the_plugin_root_for_both_clients(self) -> None:
+    def test_hooks_resolve_the_plugin_root_for_all_clients(self) -> None:
         hooks = self._load(PLUGIN_ROOT / "hooks" / "hooks.json")["hooks"]
         self.assertEqual(set(hooks), {"SessionStart", "UserPromptSubmit"})
         for entries in hooks.values():
             for entry in entries:
                 for hook in entry["hooks"]:
                     self.assertIn("PLUGIN_ROOT", hook["command"])
+                    self.assertIn("GROK_PLUGIN_ROOT", hook["command"])
                     self.assertIn("CLAUDE_PLUGIN_ROOT", hook["command"])
+                    self.assertIn("GROK_PLUGIN_ROOT", hook["commandWindows"])
                     self.assertIn("CLAUDE_PLUGIN_ROOT", hook["commandWindows"])
 
 
@@ -576,8 +684,12 @@ class InstallerTestCase(unittest.TestCase):
         claude_plugin: str = "missing",
         codex_marketplace: str = "missing",
         claude_marketplace: str = "missing",
+        grok_marketplace: str = "missing",
+        grok_plugin: str = "missing",
+        grok_mcp: str = "missing",
         stub_codex: bool = True,
         stub_claude: bool = True,
+        stub_grok: bool = True,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -585,22 +697,82 @@ class InstallerTestCase(unittest.TestCase):
         for name, source, wanted in (
             ("codex", FAKE_CODEX, stub_codex),
             ("claude", FAKE_CLAUDE, stub_claude),
+            ("grok", FAKE_GROK, stub_grok),
         ):
             if not wanted:
                 continue
             fake = bin_dir / name
             fake.write_text(source, encoding="utf-8")
             fake.chmod(0o755)
+
+        # Grok matches MCP against the unexpanded config.toml, not list --json.
+        grok_home = root / "grok-home"
+        grok_home.mkdir()
+        config_path = grok_home / "config.toml"
+        if grok_mcp == "missing":
+            config_path.write_text("", encoding="utf-8")
+        elif grok_mcp == "matching":
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[mcp_servers.recallum]",
+                        f'url = "{URL}"',
+                        "enabled = true",
+                        "",
+                        "[mcp_servers.recallum.headers]",
+                        f'Authorization = "Bearer ${{{TOKEN_ENV_VAR}}}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+        elif grok_mcp == "different":
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[mcp_servers.recallum]",
+                        'url = "https://old.example/mcp/"',
+                        "enabled = true",
+                        "",
+                        "[mcp_servers.recallum.headers]",
+                        f'Authorization = "Bearer ${{{TOKEN_ENV_VAR}}}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+        elif grok_mcp == "poisoned":
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[mcp_servers.recallum]",
+                        f'url = "{URL}"',
+                        "enabled = true",
+                        "",
+                        "[mcp_servers.recallum.headers]",
+                        'Authorization = "Bearer stale-secret"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+        else:
+            raise AssertionError(f"unknown grok_mcp state: {grok_mcp}")
+
         env = os.environ.copy()
         env.update(
             {
-                # Isolate from any real codex/claude on the developer's PATH.
+                # Isolate from any real codex/claude/grok on the developer's PATH.
                 "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
                 "FAKE_CLI_LOG": str(log),
                 "FAKE_CODEX_MCP": codex_mcp,
                 "FAKE_CLAUDE_PLUGIN": claude_plugin,
                 "FAKE_CODEX_MARKETPLACE": codex_marketplace,
                 "FAKE_CLAUDE_MARKETPLACE": claude_marketplace,
+                "FAKE_GROK_MARKETPLACE": grok_marketplace,
+                "FAKE_GROK_PLUGIN": grok_plugin,
+                "GROK_HOME": str(grok_home),
+                "HOME": str(root),
                 "EXPECTED_URL": URL,
                 "EXPECTED_TOKEN": TOKEN_ENV_VAR,
                 "EXPECTED_REPO_ROOT": str(REPO_ROOT),
@@ -702,6 +874,7 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("dry-run: codex plugin marketplace add", result.stdout)
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
 
     def test_remote_uses_private_repository_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -711,6 +884,17 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertIn("git@github.com:Zozi96/recallum-mcp.git", result.stdout)
             self.assertIn("Zozi96/recallum-mcp", result.stdout)
 
+    def test_remote_uses_github_shorthand_for_grok(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(
+                Path(directory), stub_codex=False, stub_claude=False
+            )
+            result = self._run(
+                env, "--target", "grok", "--remote", "--token-env-var", TOKEN_ENV_VAR, "--dry-run"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Zozi96/recallum-mcp", result.stdout)
+
     def test_auto_target_skips_a_cli_that_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory), stub_codex=False)
@@ -718,6 +902,7 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("dry-run: codex", result.stdout)
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
 
     def test_explicit_target_requires_that_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -725,6 +910,14 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--target", "claude", "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("claude CLI is not installed", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_explicit_grok_target_requires_that_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), stub_grok=False)
+            result = self._run(env, "--url", URL, "--target", "grok", "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("grok CLI is not installed", result.stderr)
             self.assertFalse(log.exists())
 
     def test_both_target_fails_when_only_one_cli_is_present(self) -> None:
@@ -737,10 +930,12 @@ class SharedInstallerTests(InstallerTestCase):
 
     def test_auto_target_fails_when_no_cli_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env, log = self._fake_clis(Path(directory), stub_codex=False, stub_claude=False)
+            env, log = self._fake_clis(
+                Path(directory), stub_codex=False, stub_claude=False, stub_grok=False
+            )
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("neither the codex nor the claude CLI", result.stderr)
+            self.assertIn("none of the codex, claude, or grok CLIs", result.stderr)
             self.assertFalse(log.exists())
 
 
@@ -915,6 +1110,132 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertTrue(planned)
             for line in planned:
                 self.assertIn("--scope project", line)
+
+
+class GrokInstallerTests(InstallerTestCase):
+    def _run_grok(self, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+        return self._run(
+            env, "--url", URL, "--token-env-var", TOKEN_ENV_VAR, "--target", "grok", *args
+        )
+
+    def test_dry_run_validates_and_does_not_mutate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory))
+            result = self._run_grok(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                self._calls(log),
+                [
+                    ["grok", "plugin", "marketplace", "list", "--json"],
+                    ["grok", "plugin", "list", "--json"],
+                ],
+            )
+            self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: grok plugin install recallum-memory", result.stdout)
+            self.assertIn("--trust", result.stdout)
+            self.assertIn("dry-run: grok plugin enable recallum-memory", result.stdout)
+            self.assertIn("dry-run: grok mcp add", result.stdout)
+            self.assertNotIn("not-printed", result.stdout + result.stderr)
+
+    def test_normalization_applies_to_the_grok_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            result = self._run(
+                env,
+                "--url",
+                "https://recallum.example/mcp",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+                "--target",
+                "grok",
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("https://recallum.example/mcp/", result.stdout)
+
+    def test_token_is_referenced_as_env_var_not_inlined(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory))
+            result = self._run_grok(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            combined = result.stdout + result.stderr + log.read_text(encoding="utf-8")
+            self.assertIn(f"${{{TOKEN_ENV_VAR}}}", combined.replace("\\", ""))
+            self.assertNotIn("not-printed", combined)
+            self.assertNotIn("stale-secret", combined)
+
+    def test_differing_mcp_requires_force_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), grok_mcp="different")
+            result = self._run_grok(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            # MCP state is read from GROK_HOME/config.toml (no CLI). Exit before
+            # plugin list so a bad MCP definition never mutates plugin state.
+            self.assertEqual(
+                self._calls(log),
+                [
+                    ["grok", "plugin", "marketplace", "list", "--json"],
+                ],
+            )
+
+    def test_force_dry_run_plans_remove_and_readd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_mcp="different")
+            result = self._run_grok(env, "--force-mcp", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: grok mcp remove", result.stdout)
+            self.assertIn("dry-run: grok mcp add", result.stdout)
+
+    def test_matching_mcp_is_left_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_mcp="matching")
+            result = self._run_grok(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already matches", result.stdout)
+            self.assertNotIn("dry-run: grok mcp add", result.stdout)
+            self.assertNotIn("dry-run: grok mcp remove", result.stdout)
+
+    def test_poisoned_static_header_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_mcp="poisoned")
+            result = self._run_grok(env, "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            self.assertNotIn("stale-secret", result.stdout + result.stderr)
+
+    def test_matching_marketplace_is_updated_before_plugin_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_marketplace="matching")
+            result = self._run_grok(env, "--remote", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            planned = [line for line in result.stdout.splitlines() if line.startswith("dry-run:")]
+            update = next(i for i, line in enumerate(planned) if "marketplace update" in line)
+            install = next(i for i, line in enumerate(planned) if "plugin install" in line)
+            self.assertLess(update, install)
+
+    def test_matching_local_marketplace_is_not_updated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_marketplace="local")
+            result = self._run_grok(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("marketplace update", result.stdout)
+            self.assertIn("dry-run: grok plugin install", result.stdout)
+
+    def test_existing_plugin_is_not_reinstalled_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_plugin="installed")
+            result = self._run_grok(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already installed", result.stdout)
+            self.assertNotIn("dry-run: grok plugin install", result.stdout)
+            self.assertIn("dry-run: grok plugin enable recallum-memory", result.stdout)
+
+    def test_completion_notice_points_at_doctor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            result = self._run_grok(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("grok mcp doctor recallum", result.stdout)
 
 
 if __name__ == "__main__":

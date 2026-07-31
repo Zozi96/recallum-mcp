@@ -18,6 +18,7 @@ Claude Code namespaces a plugin-bundled MCP server:
 | --- | --- | --- |
 | Codex | `mcp__recallum__` | `mcp__recallum__context` |
 | Claude Code | `mcp__plugin_recallum-memory_recallum__` | `mcp__plugin_recallum-memory_recallum__context` |
+| Grok Build | `recallum__` | `recallum__context` (via `search_tool` / `use_tool`) |
 
 Use whichever prefix is actually present in your tool list; the session hook names the right one.
 Below, tools are written unprefixed.

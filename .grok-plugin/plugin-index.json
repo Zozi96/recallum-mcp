@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "plugins": {
+    "recallum-memory": {
+      "version": "0.7.0",
+      "components": {
+        "skills": [
+          {
+            "name": "recallum-memory",
+            "description": "Load project context and capture verified reusable knowledge via Recallum."
+          },
+          {
+            "name": "recallum-setup",
+            "description": "Install, configure, and diagnose Recallum for Grok Build, Codex, or Claude Code."
+          }
+        ],
+        "hooks": [
+          {
+            "name": "SessionStart",
+            "description": "Injects the canonical project key and a completion capture reminder."
+          },
+          {
+            "name": "UserPromptSubmit",
+            "description": "Nudges recall when a prompt mentions memory (fail-open)."
+          }
+        ],
+        "mcpServers": [
+          {
+            "name": "recallum",
+            "description": "Streamable HTTP Recallum MCP. On Grok Build, register the server natively in config.toml with Bearer ${RECALLUM_API_KEY}; the plugin-bundled Claude userConfig placeholders are not resolved by Grok."
+          }
+        ]
+      }
+    }
+  }
+}

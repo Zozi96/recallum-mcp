@@ -1,6 +1,6 @@
 ---
 name: recallum-setup
-description: Set up or diagnose the Recallum plugin and remote MCP connection for Codex or Claude Code when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
+description: Set up or diagnose the Recallum plugin and remote MCP connection for Codex, Claude Code, or Grok Build when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
 ---
 
 # Recallum Setup
@@ -9,9 +9,9 @@ Diagnose without exposing credentials. Never print, echo, interpolate, or store 
 
 Prefer the bundled `scripts/install.sh` for configuration. It validates the endpoint, registers the
 repo marketplace, installs the plugin, and configures the bearer-token environment variable
-reference without storing the token. Use `--target codex`, `--target claude`, `--target both`, or
-the default `--target auto` (every detected CLI). Run it with `--dry-run` first to see the planned
-actions.
+reference without storing the token. Use `--target codex`, `--target claude`, `--target grok`,
+`--target both` (Codex + Claude Code), or the default `--target auto` (every detected CLI). Run it
+with `--dry-run` first to see the planned actions.
 
 ## Setup — Codex
 
@@ -84,17 +84,60 @@ enabling the plugin prompts for it rather than pointing at someone else's.
 5. Verify the plugin manifest with `claude plugin validate <repo-root> --strict` and
    `claude plugin validate <repo-root>/plugins/recallum-memory --strict`.
 
+## Setup — Grok Build
+
+Grok does **not** resolve Claude-style `${user_config.*}` placeholders in a plugin `.mcp.json`.
+Register the MCP server natively in `~/.grok/config.toml` (the installer does this) so the URL and
+`Authorization: Bearer ${RECALLUM_API_KEY}` form are real values Grok expands at connect time. That
+native entry takes precedence over any broken plugin-bundled MCP definition with the same name.
+
+1. Confirm the marketplace and plugin:
+   `grok plugin marketplace list --json` must contain `recallum-local`, and
+   `grok plugin list --json` must show `recallum-memory` enabled.
+2. Inspect only safe MCP fields from config (never print expanded secrets from
+   `grok mcp list --json`, which interpolates env vars for display):
+
+   ```bash
+   python3 - <<'PY'
+   from pathlib import Path
+   import tomllib
+   cfg = tomllib.loads(Path.home().joinpath(".grok/config.toml").read_text())
+   server = cfg.get("mcp_servers", {}).get("recallum", {})
+   headers = server.get("headers") or {}
+   print({
+       "url": server.get("url"),
+       "enabled": server.get("enabled", True),
+       "authorization": headers.get("Authorization"),
+   })
+   PY
+   ```
+
+   `url` must end in `/mcp/`, and `authorization` must be exactly
+   `Bearer ${RECALLUM_API_KEY}` (or the custom `--token-env-var` name), not a static key.
+3. Confirm connectivity without printing the key:
+
+   ```bash
+   grok mcp doctor recallum
+   ```
+
+   Expect handshake OK and nine tools discovered.
+4. Export `RECALLUM_API_KEY` in the environment that launches Grok, then start a **new** session.
+5. Optional: validate the plugin with `grok plugin validate <repo-root>/plugins/recallum-memory`.
+
 ## Shared Checks
 
 1. Check only whether the token environment variable or Claude Code fallback is present. Report set
    or unset; never reveal its value.
-2. Confirm the server is ready and that tool discovery exposes exactly five tools — `context`,
-   `recall`, `remember`, `list_memories`, and `forget` — under the prefix for that client:
+2. Confirm the server is ready and that tool discovery exposes the Recallum tools — at least
+   `context`, `recall`, `remember`, `list_memories`, and `forget` (current servers also expose
+   `get_memory`, `remember_batch`, `update`, and `merge_memories`) — under the prefix for that
+   client:
 
    | Client | Prefix |
    | --- | --- |
    | Codex | `mcp__recallum__` |
    | Claude Code | `mcp__plugin_recallum-memory_recallum__` |
+   | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every
    character outside `[A-Za-z0-9_-]` to `_` when building tool ids, which is where the longer
@@ -126,9 +169,15 @@ echo the key while doing so.
 - Authentication failure on Claude Code: verify `RECALLUM_API_KEY` was exported before Claude
   started, or re-run `/plugin configure recallum-memory@recallum-local`. Do not ask for the value
   in chat and do not read it back.
+- Authentication failure on Grok Build: verify `RECALLUM_API_KEY` is exported for the Grok process
+  and that `~/.grok/config.toml` has `Authorization = "Bearer ${RECALLUM_API_KEY}"` (unexpanded).
+  A plugin-only MCP entry showing `url = "${user_config.mcp_url}"` is broken on Grok — re-run
+  `scripts/install.sh --target grok` (or `--force-mcp` if a stale definition exists).
 - Connection failure: verify the URL and service readiness independently, then retry discovery.
 - Hook absent or blocked (Codex): use `/hooks` to inspect the path and trust state; never bypass the
   trust review.
 - Hook not firing (Claude Code): confirm the plugin is enabled, then check that `python3` or
   `python` is on the PATH of the process that launched Claude Code. The hook fails open, so a
   missing interpreter is silent.
+- Hook not firing (Grok Build): confirm `grok plugin list` shows `recallum-memory` enabled and
+  trusted, and that `python3` is on PATH.
