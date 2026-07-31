@@ -515,7 +515,7 @@ data = json.load(open(sys.argv[1], encoding="utf-8"))
 items = data if isinstance(data, list) else data.get("marketplaces", [])
 if not isinstance(items, list):
     raise SystemExit("error: unexpected 'grok plugin marketplace list --json' payload")
-matches = [item for item in items if isinstance(item, dict) and item.get("name") == sys.argv[2]]
+wanted_name = sys.argv[2]
 expected_root = os.path.realpath(sys.argv[3])
 remote = sys.argv[4] == "1"
 expected_source = sys.argv[5]
@@ -559,33 +559,118 @@ def source_locations(item):
             yield value
 
 
-if not matches:
-    print("missing")
-elif len(matches) != 1:
-    print("conflict")
-elif remote:
+# Same-repo remotes that should be treated as a repin target (not a hard
+# conflict with an unrelated marketplace) when switching local <-> remote.
+known_remotes = {
+    normalize_git_url("Zozi96/recallum-mcp"),
+    normalize_git_url("https://github.com/Zozi96/recallum-mcp.git"),
+    normalize_git_url("git@github.com:Zozi96/recallum-mcp.git"),
+}
+
+
+def is_local_root(item) -> bool:
+    for loc in source_locations(item):
+        if loc.startswith(("/", ".", "~")):
+            try:
+                if os.path.realpath(os.path.expanduser(loc)) == expected_root:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def is_expected_remote(item) -> bool:
     expected = normalize_git_url(expected_source)
-    if any(normalize_git_url(loc) == expected for loc in source_locations(matches[0])):
-        print("matching")
-    else:
-        print("conflict")
+    return any(normalize_git_url(loc) == expected for loc in source_locations(item))
+
+
+def is_known_remote(item) -> bool:
+    return any(normalize_git_url(loc) in known_remotes for loc in source_locations(item))
+
+
+# Grok names a local marketplace after the directory (often "recallum-mcp"),
+# not after marketplace.json's "name" ("recallum-local"). Match by name OR
+# by source pointing at this repo.
+by_name = [item for item in items if isinstance(item, dict) and item.get("name") == wanted_name]
+by_source = []
+if remote:
+    by_source = [
+        item for item in items
+        if isinstance(item, dict) and (is_expected_remote(item) or is_known_remote(item))
+    ]
 else:
-    if any(
-        os.path.realpath(os.path.expanduser(loc)) == expected_root
-        for loc in source_locations(matches[0])
-        if loc.startswith(("/", ".", "~"))
-    ):
-        print("matching")
+    by_source = [
+        item for item in items
+        if isinstance(item, dict) and (is_local_root(item) or is_known_remote(item))
+    ]
+
+# Prefer an exact name hit; otherwise any source hit for this project.
+matches = by_name or by_source
+# Emit the configured marketplace name for remove/update (may differ from
+# marketplace.json when Grok renames a local source).
+active_name = matches[0].get("name", wanted_name) if len(matches) == 1 else wanted_name
+
+if not matches:
+    print("missing\t" + wanted_name)
+elif len(matches) > 1:
+    # Dedup if name+source both found the same entry.
+    uniq = {(item.get("name"), json.dumps(item.get("source"), sort_keys=True)) for item in matches}
+    if len(uniq) == 1:
+        matches = matches[:1]
+        active_name = matches[0].get("name", wanted_name)
+        # fall through
     else:
-        # A git remote marketplace with the same name is a conflict when the
-        # installer is asked to track this local checkout.
-        print("conflict")
+        print("conflict\t" + wanted_name)
+        raise SystemExit(0)
+
+if len(matches) == 1:
+    item = matches[0]
+    if remote:
+        if is_expected_remote(item):
+            print("matching\t" + active_name)
+        elif is_local_root(item) or is_known_remote(item):
+            print("repin\t" + active_name)
+        else:
+            print("conflict\t" + active_name)
+    else:
+        if is_local_root(item):
+            print("matching\t" + active_name)
+        elif is_known_remote(item):
+            print("repin\t" + active_name)
+        else:
+            print("conflict\t" + active_name)
 PY
   )
-  [[ "$marketplace_state" != "conflict" ]] || {
-    echo "error: Grok marketplace '$marketplace_name' already points to a different location" >&2
+  # marketplace_state is "state\tactive_name"
+  local marketplace_active_name="$marketplace_name"
+  if [[ "$marketplace_state" == *$'\t'* ]]; then
+    marketplace_active_name="${marketplace_state#*$'\t'}"
+    marketplace_state="${marketplace_state%%$'\t'*}"
+  fi
+  if [[ "$marketplace_state" == "conflict" ]]; then
+    echo "error: Grok marketplace '$marketplace_active_name' already points to a different location" >&2
+    echo "  wanted: $grok_marketplace_source" >&2
+    echo "  Fix with --force-mcp to replace it, or remove it first:" >&2
+    echo "    grok plugin marketplace remove $marketplace_active_name" >&2
     exit 1
-  }
+  fi
+  if [[ "$marketplace_state" == "repin" && "$force_mcp" -ne 1 ]]; then
+    echo "error: Grok marketplace '$marketplace_active_name' tracks a different source for this repo" >&2
+    echo "  wanted: $grok_marketplace_source" >&2
+    if ((remote_marketplace)); then
+      echo "  Fix: re-run with --force-mcp to switch the marketplace to the remote repository" >&2
+    else
+      echo "  Fix (track this checkout): re-run with --force-mcp" >&2
+      echo "  Fix (keep GitHub marketplace): re-run with --remote --force-mcp" >&2
+      echo "  Note: private HTTPS clones often fail; prefer local checkout or SSH." >&2
+    fi
+    exit 1
+  fi
+  if [[ "$marketplace_state" == "repin" ]]; then
+    echo "Grok marketplace '$marketplace_active_name' will be re-pointed to $grok_marketplace_source."
+    run_action grok plugin marketplace remove "$marketplace_active_name"
+    marketplace_state="missing"
+  fi
 
   # grok mcp list --json expands ${ENV} values in headers, so matching must
   # read the unexpanded config.toml entry instead of trusting list output.
@@ -686,18 +771,33 @@ PY
   if [[ "$marketplace_state" == "missing" ]]; then
     run_action grok plugin marketplace add "$grok_marketplace_source"
   else
-    echo "Grok marketplace '$marketplace_name' already points to this repository."
+    echo "Grok marketplace '$marketplace_active_name' already points to this repository."
     if ((remote_marketplace)); then
-      run_action grok plugin marketplace update "$marketplace_name"
+      run_action grok plugin marketplace update "$marketplace_active_name"
     fi
   fi
 
+  # Local installs use the plugin path so a private GitHub marketplace that
+  # fails HTTPS clone still yields a working plugin from this checkout.
+  # Remote installs use the marketplace plugin name.
+  local plugin_install_source
+  if ((remote_marketplace)); then
+    plugin_install_source="recallum-memory"
+  else
+    plugin_install_source="$repo_root/plugins/recallum-memory"
+  fi
+
   if [[ "$plugin_state" == "missing" ]]; then
-    run_action grok plugin install recallum-memory --trust
+    run_action grok plugin install "$plugin_install_source" --trust
   else
     echo "Grok plugin 'recallum-memory' is already installed."
     if ((force_mcp)); then
-      run_action grok plugin update recallum-memory
+      if ((remote_marketplace)); then
+        run_action grok plugin update recallum-memory
+      else
+        # Path reinstall refreshes files without depending on marketplace git.
+        run_action grok plugin install "$plugin_install_source" --trust
+      fi
     fi
   fi
   # Plugins stay disabled until enabled; enable is idempotent.

@@ -1131,7 +1131,10 @@ class GrokInstallerTests(InstallerTestCase):
                 ],
             )
             self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
-            self.assertIn("dry-run: grok plugin install recallum-memory", result.stdout)
+            self.assertIn(
+                f"dry-run: grok plugin install {REPO_ROOT / 'plugins' / 'recallum-memory'}",
+                result.stdout.replace("\\", ""),
+            )
             self.assertIn("--trust", result.stdout)
             self.assertIn("dry-run: grok plugin enable recallum-memory", result.stdout)
             self.assertIn("dry-run: grok mcp add", result.stdout)
@@ -1212,6 +1215,8 @@ class GrokInstallerTests(InstallerTestCase):
             update = next(i for i, line in enumerate(planned) if "marketplace update" in line)
             install = next(i for i, line in enumerate(planned) if "plugin install" in line)
             self.assertLess(update, install)
+            # Remote installs use the marketplace plugin name.
+            self.assertIn("plugin install recallum-memory", planned[install])
 
     def test_matching_local_marketplace_is_not_updated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1220,6 +1225,34 @@ class GrokInstallerTests(InstallerTestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("marketplace update", result.stdout)
             self.assertIn("dry-run: grok plugin install", result.stdout)
+            # Local installs pin the plugin path so private git clones are unnecessary.
+            self.assertIn(str(REPO_ROOT / "plugins" / "recallum-memory"), result.stdout)
+
+    def test_remote_marketplace_requires_force_when_installing_local(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), grok_marketplace="matching")
+            result = self._run_grok(env, "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            self.assertIn("different source", result.stderr)
+            self.assertEqual(
+                self._calls(log),
+                [["grok", "plugin", "marketplace", "list", "--json"]],
+            )
+
+    def test_force_repins_remote_marketplace_to_local_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_marketplace="matching")
+            result = self._run_grok(env, "--force-mcp", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            planned = [line for line in result.stdout.splitlines() if line.startswith("dry-run:")]
+            remove = next(i for i, line in enumerate(planned) if "marketplace remove" in line)
+            add = next(i for i, line in enumerate(planned) if "marketplace add" in line)
+            install = next(i for i, line in enumerate(planned) if "plugin install" in line)
+            self.assertLess(remove, add)
+            self.assertLess(add, install)
+            self.assertIn(str(REPO_ROOT), planned[add])
+            self.assertIn(str(REPO_ROOT / "plugins" / "recallum-memory"), planned[install])
 
     def test_existing_plugin_is_not_reinstalled_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
