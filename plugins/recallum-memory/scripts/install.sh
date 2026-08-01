@@ -328,6 +328,79 @@ PY
 
 # ----------------------------------------------------------- Claude Code -----
 
+# Settings file Claude Code persists `extraKnownMarketplaces` into, per scope.
+claude_settings_file() {
+  case "$claude_scope" in
+    user) printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" ;;
+    project) printf '%s\n' "$repo_root/.claude/settings.json" ;;
+    local) printf '%s\n' "$repo_root/.claude/settings.local.json" ;;
+  esac
+}
+
+# `claude plugin marketplace add` reports success even when the registration
+# only reaches the runtime registry (~/.claude/plugins/known_marketplaces.json),
+# which Claude Code rebuilds from the settings files. A marketplace that never
+# reaches `extraKnownMarketplaces` is dropped on a later refresh, and the
+# failure is silent and confusing: Claude Code falls back to loading the plugin
+# inline from the repository checkout, so hooks and skills keep working, but the
+# loaded plugin id becomes `recallum-memory@inline` and no longer matches the
+# `pluginConfigs` key `recallum-memory@recallum-local`. `${user_config.mcp_url}`
+# in .mcp.json then stays unresolved and the bundled MCP server disappears --
+# the SessionStart hook keeps telling the agent to call tools that do not exist.
+verify_claude_marketplace_persisted() {
+  if ((dry_run)); then return 0; fi
+  python3 - "$(claude_settings_file)" "$marketplace_name" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, name = Path(sys.argv[1]), sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+except FileNotFoundError:
+    data = {}
+except ValueError as exc:
+    raise SystemExit(f"error: invalid Claude Code settings JSON at {path}: {exc}")
+if name not in (data.get("extraKnownMarketplaces") or {}):
+    raise SystemExit(
+        f"error: marketplace '{name}' was not persisted to extraKnownMarketplaces in {path}.\n"
+        "       Claude Code prunes marketplaces that only live in the runtime registry, which\n"
+        "       silently drops the plugin's MCP server on a later startup while its hooks keep\n"
+        "       running. Re-add it with an explicit scope:\n"
+        "         claude plugin marketplace add <source> --scope user"
+    )
+PY
+}
+
+# The endpoint only reaches the MCP server through the `pluginConfigs` entry
+# keyed by the installed plugin id, so an install that leaves it unset yields
+# the same silent no-tools failure as a missing marketplace.
+verify_claude_plugin_config() {
+  if ((dry_run)); then return 0; fi
+  python3 - "$(claude_settings_file)" "$url" "$claude_scope" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, expected, scope = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+plugin_id = "recallum-memory@recallum-local"
+try:
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"error: cannot read Claude Code settings at {path}: {exc}")
+options = ((data.get("pluginConfigs") or {}).get(plugin_id) or {}).get("options") or {}
+actual = options.get("mcp_url")
+if actual != expected:
+    raise SystemExit(
+        f"error: pluginConfigs['{plugin_id}'].options.mcp_url is {actual!r}, expected {expected!r}\n"
+        f"       in {path}. Without it, ${{user_config.mcp_url}} in .mcp.json cannot resolve and\n"
+        "       Claude Code starts with the Recallum hooks but no Recallum MCP tools.\n"
+        "       Repair with:\n"
+        f"         claude plugin install {plugin_id} --scope {scope} --config mcp_url={expected}"
+    )
+PY
+}
+
 install_for_claude() {
   local marketplace_file="$repo_root/.claude-plugin/marketplace.json"
   [[ -f "$marketplace_file" ]] || { echo "error: Claude Code marketplace file not found: $marketplace_file" >&2; exit 1; }
@@ -426,7 +499,19 @@ PY
   )
 
   if [[ "$plugin_state" == "installed" && "$force_mcp" -ne 1 ]]; then
-    echo "error: Claude Code plugin 'recallum-memory' is already installed; rerun with --force-mcp to reinstall it with this endpoint" >&2
+    if [[ "$marketplace_state" == "missing" ]]; then
+      # Half-installed state: the plugin record survives but its marketplace is
+      # gone, so Claude Code loads the plugin inline and the MCP server vanishes
+      # while the hooks keep running. Name the real problem instead of implying
+      # a healthy install.
+      echo "error: Claude Code still records plugin 'recallum-memory' as installed, but marketplace" >&2
+      echo "       '$marketplace_name' is no longer registered. Claude Code then loads the plugin" >&2
+      echo "       inline from this checkout: hooks and skills keep working, userConfig no longer" >&2
+      echo "       resolves, and the bundled Recallum MCP server is dropped without an error." >&2
+      echo "       Rerun with --force-mcp to re-register the marketplace and reinstall the plugin." >&2
+    else
+      echo "error: Claude Code plugin 'recallum-memory' is already installed; rerun with --force-mcp to reinstall it with this endpoint" >&2
+    fi
     exit 1
   fi
 
@@ -438,6 +523,9 @@ PY
       run_action claude plugin marketplace update "$marketplace_name"
     fi
   fi
+  # Always verify, not just after an add: an entry that reached only the runtime
+  # registry looks "matching" here yet still disappears on the next refresh.
+  verify_claude_marketplace_persisted
 
   if [[ "$plugin_state" == "installed" ]]; then
     # `claude plugin uninstall` takes no --scope flag.
@@ -446,6 +534,7 @@ PY
   run_action claude plugin install "recallum-memory@recallum-local" \
     --scope "$claude_scope" \
     --config "mcp_url=$url"
+  verify_claude_plugin_config
 }
 
 # ------------------------------------------------------------ Grok Build -----

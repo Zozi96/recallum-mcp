@@ -62,9 +62,27 @@ elif args == ["mcp", "get", "recallum", "--json"]:
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
+from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(["claude", *args]) + "\\n")
+
+
+def _settings():
+    return Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+
+
+def _load():
+    path = _settings()
+    return json.loads(path.read_text(encoding="utf-8") or "{}") if path.exists() else {}
+
+
+def _save(data):
+    path = _settings()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 if args == ["plugin", "marketplace", "list", "--json"]:
     if os.environ.get("FAKE_CLAUDE_MARKETPLACE") == "matching":
         print(json.dumps([{
@@ -86,6 +104,29 @@ elif args == ["plugin", "list", "--json"]:
     else:
         print(json.dumps([{"id": "something-else@other", "version": "1.0.0",
                            "scope": "user", "enabled": True}]))
+elif args[:3] == ["plugin", "marketplace", "add"]:
+    # Real Claude Code persists a scoped marketplace into extraKnownMarketplaces;
+    # FAKE_CLAUDE_PERSIST_MARKETPLACE=0 reproduces the runtime-registry-only add
+    # that later gets pruned.
+    if os.environ.get("FAKE_CLAUDE_PERSIST_MARKETPLACE", "1") == "1":
+        data = _load()
+        data.setdefault("extraKnownMarketplaces", {})["recallum-local"] = {
+            "source": {"source": "directory", "path": os.environ["EXPECTED_REPO_ROOT"]}
+        }
+        _save(data)
+elif args[:2] == ["plugin", "install"]:
+    if os.environ.get("FAKE_CLAUDE_PERSIST_CONFIG", "1") == "1":
+        url = ""
+        for index, value in enumerate(args):
+            if value == "--config" and index + 1 < len(args):
+                key, _, candidate = args[index + 1].partition("=")
+                if key == "mcp_url":
+                    url = candidate
+        data = _load()
+        data.setdefault("pluginConfigs", {})["recallum-memory@recallum-local"] = {
+            "options": {"mcp_url": url}
+        }
+        _save(data)
 """
 
 FAKE_GROK = """#!/usr/bin/env python3
@@ -363,9 +404,7 @@ class _StubMCPHandler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except ValueError:
             body = {}
-        type(self).requests.append(
-            {"path": self.path, "headers": dict(self.headers), "body": body}
-        )
+        type(self).requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
         failure_code = type(self).fail_with
         if failure_code is not None:
             self.send_response(failure_code)
@@ -494,9 +533,7 @@ class DigestTests(unittest.TestCase):
     def test_digest_parses_sse_framed_responses(self) -> None:
         _StubMCPHandler.sse_tools_call = True
         _StubMCPHandler.context_result = {
-            "groups": [
-                {"category": "fact", "items": [{"category": "fact", "content": "uses uv"}]}
-            ],
+            "groups": [{"category": "fact", "items": [{"category": "fact", "content": "uses uv"}]}],
             "total_items": 1,
             "omitted": 0,
             "truncated": False,
@@ -603,9 +640,7 @@ class ManifestTests(unittest.TestCase):
         source = HOOK.read_text(encoding="utf-8")
         namespace: dict[str, object] = {}
         for line in source.splitlines():
-            if line.startswith(
-                ("CODEX_TOOL_PREFIX", "CLAUDE_TOOL_PREFIX", "GROK_TOOL_PREFIX")
-            ):
+            if line.startswith(("CODEX_TOOL_PREFIX", "CLAUDE_TOOL_PREFIX", "GROK_TOOL_PREFIX")):
                 exec(line, namespace)  # noqa: S102 - constant assignments only
         self.assertEqual(namespace["CODEX_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["CLAUDE_TOOL_PREFIX"], CLAUDE_PREFIX)
@@ -620,9 +655,7 @@ class ManifestTests(unittest.TestCase):
                 self.assertIn(GROK_PREFIX, text)
 
     def test_memory_skill_covers_reusable_context_beyond_decisions(self) -> None:
-        text = (
-            PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md"
-        ).read_text(encoding="utf-8")
+        text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(encoding="utf-8")
         for kind in ("architecture", "terminology", "workflows", "root causes"):
             with self.subTest(kind=kind):
                 self.assertIn(kind, text)
@@ -773,6 +806,9 @@ class InstallerTestCase(unittest.TestCase):
                 "FAKE_GROK_PLUGIN": grok_plugin,
                 "GROK_HOME": str(grok_home),
                 "HOME": str(root),
+                # Pin the Claude config dir so the settings assertions never
+                # reach the developer's real ~/.claude.
+                "CLAUDE_CONFIG_DIR": str(root / ".claude"),
                 "EXPECTED_URL": URL,
                 "EXPECTED_TOKEN": TOKEN_ENV_VAR,
                 "EXPECTED_REPO_ROOT": str(REPO_ROOT),
@@ -886,9 +922,7 @@ class SharedInstallerTests(InstallerTestCase):
 
     def test_remote_uses_github_shorthand_for_grok(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env, _ = self._fake_clis(
-                Path(directory), stub_codex=False, stub_claude=False
-            )
+            env, _ = self._fake_clis(Path(directory), stub_codex=False, stub_claude=False)
             result = self._run(
                 env, "--target", "grok", "--remote", "--token-env-var", TOKEN_ENV_VAR, "--dry-run"
             )
@@ -1110,6 +1144,47 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertTrue(planned)
             for line in planned:
                 self.assertIn("--scope project", line)
+
+    def test_install_succeeds_when_registration_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            self.assertIn("recallum-local", settings["extraKnownMarketplaces"])
+            self.assertEqual(
+                settings["pluginConfigs"]["recallum-memory@recallum-local"]["options"]["mcp_url"],
+                URL,
+            )
+
+    def test_marketplace_add_that_is_not_persisted_fails_loudly(self) -> None:
+        # Regression: a marketplace that reaches only the runtime registry is
+        # pruned on a later startup. Claude Code then loads the plugin inline,
+        # userConfig stops resolving, and the MCP server disappears while the
+        # hooks keep instructing the agent to call tools that no longer exist.
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            env["FAKE_CLAUDE_PERSIST_MARKETPLACE"] = "0"
+            result = self._run_claude(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("extraKnownMarketplaces", result.stderr)
+
+    def test_install_that_loses_the_endpoint_config_fails_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            env["FAKE_CLAUDE_PERSIST_CONFIG"] = "0"
+            result = self._run_claude(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("mcp_url", result.stderr)
+
+    def test_missing_marketplace_with_installed_plugin_names_the_real_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), claude_plugin="installed")
+            result = self._run_claude(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no longer registered", result.stderr)
+            self.assertIn("--force-mcp", result.stderr)
 
 
 class GrokInstallerTests(InstallerTestCase):
