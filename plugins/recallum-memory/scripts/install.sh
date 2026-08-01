@@ -401,6 +401,61 @@ if actual != expected:
 PY
 }
 
+# Both credential routes can be empty while every command above reports
+# success. `.mcp.json` resolves `Bearer ${RECALLUM_API_KEY:-${user_config.api_token}}`,
+# and with both unset that is the literal string "Bearer " -- a registered
+# server whose every call fails authentication, with no error at startup. The
+# hooks keep running and keep naming tools that are not there, which reads as
+# "the plugin is installed but Claude ignores it".
+#
+# Deliberately checks RECALLUM_API_KEY and not $token_env_var: the name is
+# baked into .mcp.json, so unlike Codex and Grok, Claude Code cannot follow
+# --token-env-var.
+#
+# This warns instead of failing. The variable is read from the environment that
+# launches Claude Code, not this shell, so its absence here is not proof of a
+# broken install -- only of an unverifiable one.
+verify_claude_credential() {
+  if ((dry_run)); then return 0; fi
+  local env_set=0
+  [[ -n "${RECALLUM_API_KEY-}" ]] && env_set=1
+  python3 - "$(claude_settings_file)" "$env_set" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, env_set = Path(sys.argv[1]), sys.argv[2] == "1"
+plugin_id = "recallum-memory@recallum-local"
+try:
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+except (OSError, ValueError):
+    data = {}
+options = ((data.get("pluginConfigs") or {}).get(plugin_id) or {}).get("options") or {}
+if env_set or str(options.get("api_token") or "").strip():
+    raise SystemExit(0)
+sys.stderr.write(
+    f"""warning: no Recallum credential can resolve for Claude Code.
+         Neither RECALLUM_API_KEY (environment) nor the plugin's api_token is
+         set, so .mcp.json sends the literal "Bearer ": Claude Code registers
+         the server, starts the hooks, and then fails every tool call
+         authentication in silence.
+         Settings file: {path}
+         Config key:    pluginConfigs['{plugin_id}'].options.api_token
+         Set exactly one of:
+           * RECALLUM_API_KEY, in the environment that LAUNCHES Claude Code.
+             A GUI launch (Dock, Spotlight, Finder) inherits launchd's
+             environment, not your shell's, so an export in ~/.zshrc or
+             ~/.zshenv never reaches it -- this route fits a terminal `claude`.
+           * the masked fallback, from a terminal `claude`:
+               /plugin configure recallum-memory@recallum-local
+             which persists api_token into the settings file above.
+         Never pass the token as a command-line argument: argv is readable by
+         any process on the machine.
+"""
+)
+PY
+}
+
 install_for_claude() {
   local marketplace_file="$repo_root/.claude-plugin/marketplace.json"
   [[ -f "$marketplace_file" ]] || { echo "error: Claude Code marketplace file not found: $marketplace_file" >&2; exit 1; }
@@ -535,6 +590,7 @@ PY
     --scope "$claude_scope" \
     --config "mcp_url=$url"
   verify_claude_plugin_config
+  verify_claude_credential
 }
 
 # ------------------------------------------------------------ Grok Build -----
@@ -917,8 +973,10 @@ if ((install_codex)); then
   echo "Codex: start a new thread, open /hooks, review the Recallum hook path, and trust it."
 fi
 if ((install_claude)); then
-  echo "Claude Code: export RECALLUM_API_KEY or set a masked fallback with"
+  echo "Claude Code: export RECALLUM_API_KEY in the environment that launches Claude,"
+  echo "             or set a masked fallback with"
   echo "             '/plugin configure recallum-memory@recallum-local', then restart the session."
+  echo "             A GUI-launched Claude does not inherit your shell's exports."
 fi
 if ((install_grok)); then
   echo "Grok Build: export $token_env_var before launching Grok, then start a new session."

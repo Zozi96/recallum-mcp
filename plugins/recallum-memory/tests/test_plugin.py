@@ -123,9 +123,12 @@ elif args[:2] == ["plugin", "install"]:
                 if key == "mcp_url":
                     url = candidate
         data = _load()
-        data.setdefault("pluginConfigs", {})["recallum-memory@recallum-local"] = {
-            "options": {"mcp_url": url}
-        }
+        entry = data.setdefault("pluginConfigs", {}).setdefault(
+            "recallum-memory@recallum-local", {}
+        )
+        # --config sets one key: it must not wipe a masked api_token the user
+        # configured separately through /plugin configure.
+        entry.setdefault("options", {})["mcp_url"] = url
         _save(data)
 """
 
@@ -1185,6 +1188,55 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("no longer registered", result.stderr)
             self.assertIn("--force-mcp", result.stderr)
+
+    def test_install_without_any_credential_warns_but_still_succeeds(self) -> None:
+        # Regression: with neither route set, .mcp.json sends the literal
+        # "Bearer ". Claude Code registers the server and starts the hooks, then
+        # fails every tool call authentication in silence. The install itself is
+        # valid -- the key is read at launch, not now -- so this warns.
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            env.pop("RECALLUM_API_KEY", None)
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no Recallum credential can resolve", result.stderr)
+            self.assertIn("api_token", result.stderr)
+
+    def test_exported_key_satisfies_the_credential_check(self) -> None:
+        # RECALLUM_API_KEY, not --token-env-var: the name is baked into
+        # .mcp.json, so Claude Code cannot follow a custom one the way Codex
+        # and Grok do.
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            env["RECALLUM_API_KEY"] = "env-token-placeholder"
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("no Recallum credential", result.stderr)
+
+    def test_masked_api_token_satisfies_the_credential_check(self) -> None:
+        # The only route a GUI-launched Claude has: it inherits launchd's
+        # environment, never the shell's, so exports cannot reach it.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            env.pop("RECALLUM_API_KEY", None)
+            settings = root / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(
+                json.dumps(
+                    {
+                        "pluginConfigs": {
+                            "recallum-memory@recallum-local": {
+                                "options": {"api_token": "masked-token-placeholder"}
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("no Recallum credential", result.stderr)
 
 
 class GrokInstallerTests(InstallerTestCase):
