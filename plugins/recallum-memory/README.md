@@ -96,6 +96,8 @@ plugins/recallum-memory/scripts/install.sh --dry-run
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |
 | `--force-mcp` | off | Replace an existing setup: a differing Codex/Grok MCP definition, or an already-installed Claude Code plugin |
+| `--api-key-file PATH` | off | Read the API key from a file (preferred for non-interactive installs). Never pass the key on the command line |
+| `--no-store-api-key` | off | Skip prompting/persisting the key; only register marketplaces/MCP |
 | `--dry-run` | off | Validate and print the plan without mutating anything |
 | `--help` | | Usage |
 
@@ -138,9 +140,10 @@ Two constraints, neither cosmetic:
   the literal id `recallum-memory@recallum-local` when deciding whether the plugin is already
   present. Declared under any other name, a later `install.sh` run reads it as missing and installs
   a second copy on top.
-- **`api_token` cannot live here.** It is `sensitive` in `plugin.json`, so it goes to secure storage
-  via `/plugin configure recallum-memory@recallum-local`, or to `RECALLUM_API_KEY` in the
-  environment that launches Claude. Only the non-sensitive `mcp_url` is declarable.
+- **`api_token` cannot live here as a hand-written secret.** It is `sensitive` in `plugin.json`.
+  The installer stores it in `~/.claude/.credentials.json` under `pluginSecrets` (same place as
+  `/plugin configure recallum-memory@recallum-local`). You can also rely on `RECALLUM_API_KEY` in
+  the environment that launches Claude. Only the non-sensitive `mcp_url` is declared in settings.
 
 Replace the `github` source with `{ "source": "directory", "path": "/abs/path/to/recallum-mcp" }`
 to track a local checkout instead of the published repository. `enabledPlugins` resolves
@@ -170,47 +173,59 @@ uvicorn ... --proxy-headers --forwarded-allow-ips='<reverse-proxy-ip>'
 
 ## How the API key is handled
 
-The installer never reads, prints, or stores your key. Each client gets there differently:
+By default the installer **persists** the key so GUI and terminal clients can authenticate after
+install. It never prints the value and never passes it as `claude --config api_token=...` (that
+would put it in `argv`, shell history, and the process list).
+
+**Sources** (first match wins):
+
+1. `--api-key-file PATH` — single-line file (use mode `600`)
+2. `RECALLUM_API_KEY` or `--token-env-var` already exported in the shell running the script
+3. Interactive hidden prompt when stdin is a TTY
+
+**Persistence:**
+
+| Target | Where the key lands |
+| --- | --- |
+| Claude Code | `~/.claude/.credentials.json` → `pluginSecrets["recallum-memory@recallum-local"].api_token` (same store as `/plugin configure`; works for GUI) |
+| All selected clients | `~/.config/recallum/env` (`export …`) and, on Linux, `~/.config/environment.d/99-recallum.conf` (desktop session after re-login) |
 
 | | Codex | Claude Code | Grok Build |
 | --- | --- | --- | --- |
 | MCP registration | `codex mcp add`, separate from the plugin | `.mcp.json` bundled **inside** the plugin | `grok mcp add` → `~/.grok/config.toml` (required; Grok does not resolve Claude `${user_config.*}`) |
 | Endpoint | `--url` | `userConfig.mcp_url`, passed by the installer | `--url` written into config.toml |
-| Key | `--token-env-var` names an env var, resolved at connect time | `${RECALLUM_API_KEY:-${user_config.api_token}}` | `Authorization: Bearer ${--token-env-var}` in config.toml |
-| Key set by | you, in your shell | environment, or masked fallback via `/plugin configure` | you, in your shell |
+| Key at connect time | `--token-env-var` env var | `${RECALLUM_API_KEY:-${user_config.api_token}}` | `Authorization: Bearer ${--token-env-var}` in config.toml |
+| Key set by installer | env file + environment.d | pluginSecrets + env file | env file + environment.d |
 
-The key is deliberately **not** passed as `--config api_token=...`: that would put the credential
-into `argv`, shell history, and the process list. Only the non-sensitive endpoint is scripted.
+Pass `--no-store-api-key` to only register marketplaces/MCP and manage the secret yourself.
 
 ## After installing
 
-**Codex** — export the token, then start a new thread and trust the hook:
+**Codex** — start a new thread and trust the hook. If you used the installer default, source the
+env file (or re-login for desktop):
 
 ```bash
-export RECALLUM_API_KEY=...        # put this in your shell profile
+[ -f ~/.config/recallum/env ] && . ~/.config/recallum/env
 ```
 
 Open `/hooks`, confirm the Recallum hook path points at this installation, and trust it.
 
-**Claude Code** — export the same variable before launching Claude, or store a masked fallback,
-then restart the session:
+**Claude Code** — restart the session. With the default installer flow, the key is already in
+`pluginSecrets`, so **GUI and terminal both authenticate** without a separate
+`/plugin configure`. `RECALLUM_API_KEY` still wins when set.
+
+If you installed with `--no-store-api-key`:
 
 ```bash
 export RECALLUM_API_KEY=...
+# or, inside Claude:
+# /plugin configure recallum-memory@recallum-local
 ```
 
-```text
-/plugin configure recallum-memory@recallum-local
-```
-
-`RECALLUM_API_KEY` takes precedence. Unset it before launching Claude to use the stored
-`api_token` fallback. When the variable is set, Claude Code may still warn that one `userConfig`
-option is unset during installation; the MCP connection uses the environment variable normally.
-
-**Grok Build** — export the token, then start a new session:
+**Grok Build** — source the env file (or re-login), then start a new session:
 
 ```bash
-export RECALLUM_API_KEY=...
+[ -f ~/.config/recallum/env ] && . ~/.config/recallum/env
 grok mcp doctor recallum    # handshake OK, tools discovered
 ```
 
@@ -276,7 +291,7 @@ grok mcp remove recallum && grok plugin uninstall recallum-memory
 | `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code leaves plugin-bundled MCP tools behind `ToolSearch` instead of listing them, so a blind call to the fully qualified name fails while the server is connected. Search for the tool, then call it. `permissions.allow` does **not** make them load eagerly |
 | Stale Codex plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target codex`, then start a new session |
 | Stale Claude Code plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Rerun `plugins/recallum-memory/scripts/install.sh --target claude --force-mcp`, then start a new session |
-| Claude authentication failure | Export `RECALLUM_API_KEY` before launching Claude, or run `/plugin configure recallum-memory@recallum-local`; the environment variable wins when both exist |
+| Claude authentication failure | Re-run `install.sh` (stores pluginSecrets + env file), or export `RECALLUM_API_KEY`, or run `/plugin configure recallum-memory@recallum-local`; the environment variable wins when both exist |
 | Grok authentication / handshake failure | Export `RECALLUM_API_KEY` and ensure `~/.grok/config.toml` has a real URL plus `Bearer ${RECALLUM_API_KEY}` — not `${user_config.mcp_url}`. Rerun `install.sh --target grok` |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |

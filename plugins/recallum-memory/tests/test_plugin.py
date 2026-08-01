@@ -796,6 +796,11 @@ class InstallerTestCase(unittest.TestCase):
             raise AssertionError(f"unknown grok_mcp state: {grok_mcp}")
 
         env = os.environ.copy()
+        # Never inherit the developer's live Recallum credentials into installer
+        # tests — they would make "missing credential" cases pass and could be
+        # written into the temp HOME's pluginSecrets.
+        env.pop("RECALLUM_API_KEY", None)
+        env.pop(TOKEN_ENV_VAR, None)
         env.update(
             {
                 # Isolate from any real codex/claude/grok on the developer's PATH.
@@ -812,6 +817,7 @@ class InstallerTestCase(unittest.TestCase):
                 # Pin the Claude config dir so the settings assertions never
                 # reach the developer's real ~/.claude.
                 "CLAUDE_CONFIG_DIR": str(root / ".claude"),
+                "XDG_CONFIG_HOME": str(root / ".config"),
                 "EXPECTED_URL": URL,
                 "EXPECTED_TOKEN": TOKEN_ENV_VAR,
                 "EXPECTED_REPO_ROOT": str(REPO_ROOT),
@@ -1084,13 +1090,27 @@ class ClaudeInstallerTests(InstallerTestCase):
             result = self._run_claude(env, "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             combined = result.stdout + result.stderr + log.read_text(encoding="utf-8")
-            self.assertNotIn("api_token", combined)
+            # Storage talks about pluginSecrets / api_token as destination names,
+            # but the secret value itself must never appear.
             self.assertNotIn("not-printed", combined)
+            self.assertNotIn("--config api_token=", combined)
+            for line in log.read_text(encoding="utf-8").splitlines():
+                self.assertNotIn("api_token=", line)
 
-    def test_completion_notice_points_at_plugin_configure(self) -> None:
+    def test_dry_run_plans_to_store_api_key_without_printing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
             result = self._run_claude(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: store API key in Claude Code pluginSecrets", result.stdout)
+            self.assertIn("dry-run: write", result.stdout)
+            self.assertNotIn("not-printed", result.stdout + result.stderr)
+
+    def test_completion_notice_when_key_is_not_stored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory))
+            env.pop(TOKEN_ENV_VAR, None)
+            result = self._run_claude(env, "--no-store-api-key", "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("/plugin configure recallum-memory@recallum-local", result.stdout)
 
@@ -1145,7 +1165,10 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             planned = [line for line in result.stdout.splitlines() if line.startswith("dry-run:")]
             self.assertTrue(planned)
-            for line in planned:
+            # Secret/env persistence is user-global and does not take --scope.
+            claude_steps = [line for line in planned if "claude plugin" in line]
+            self.assertTrue(claude_steps, msg=planned)
+            for line in claude_steps:
                 self.assertIn("--scope project", line)
 
     def test_install_succeeds_when_registration_is_persisted(self) -> None:
@@ -1160,6 +1183,50 @@ class ClaudeInstallerTests(InstallerTestCase):
                 settings["pluginConfigs"]["recallum-memory@recallum-local"]["options"]["mcp_url"],
                 URL,
             )
+
+    def test_install_stores_api_key_in_claude_plugin_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._fake_clis(root)
+            env["RECALLUM_API_KEY"] = "secret-from-env"
+            env.pop(TOKEN_ENV_VAR, None)
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            creds = json.loads((root / ".claude" / ".credentials.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                creds["pluginSecrets"]["recallum-memory@recallum-local"]["api_token"],
+                "secret-from-env",
+            )
+            self.assertEqual((root / ".claude" / ".credentials.json").stat().st_mode & 0o777, 0o600)
+            env_file = root / ".config" / "recallum" / "env"
+            self.assertTrue(env_file.is_file())
+            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+            body = env_file.read_text(encoding="utf-8")
+            self.assertIn("export RECALLUM_API_KEY=", body)
+            self.assertIn("secret-from-env", body)
+            # Never on the claude CLI argv.
+            for line in log.read_text(encoding="utf-8").splitlines():
+                self.assertNotIn("secret-from-env", line)
+            self.assertIn("pluginSecrets", result.stdout)
+            self.assertNotIn("secret-from-env", result.stdout)
+
+    def test_api_key_file_is_used_without_env(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            env.pop(TOKEN_ENV_VAR, None)
+            env.pop("RECALLUM_API_KEY", None)
+            key_file = root / "key.txt"
+            key_file.write_text("file-secret-key\n", encoding="utf-8")
+            key_file.chmod(0o600)
+            result = self._run_claude(env, "--api-key-file", str(key_file))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            creds = json.loads((root / ".claude" / ".credentials.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                creds["pluginSecrets"]["recallum-memory@recallum-local"]["api_token"],
+                "file-secret-key",
+            )
+            self.assertNotIn("file-secret-key", result.stdout + result.stderr)
 
     def test_marketplace_add_that_is_not_persisted_fails_loudly(self) -> None:
         # Regression: a marketplace that reaches only the runtime registry is
@@ -1197,7 +1264,8 @@ class ClaudeInstallerTests(InstallerTestCase):
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
             env.pop("RECALLUM_API_KEY", None)
-            result = self._run_claude(env)
+            env.pop(TOKEN_ENV_VAR, None)
+            result = self._run_claude(env, "--no-store-api-key")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("no Recallum credential can resolve", result.stderr)
             self.assertIn("api_token", result.stderr)
@@ -1209,17 +1277,18 @@ class ClaudeInstallerTests(InstallerTestCase):
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
             env["RECALLUM_API_KEY"] = "env-token-placeholder"
-            result = self._run_claude(env)
+            # Skip persistence so this only covers the env-based check path.
+            result = self._run_claude(env, "--no-store-api-key")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("no Recallum credential", result.stderr)
 
     def test_masked_api_token_satisfies_the_credential_check(self) -> None:
-        # The only route a GUI-launched Claude has: it inherits launchd's
-        # environment, never the shell's, so exports cannot reach it.
+        # Legacy location: some installs put api_token in settings.json options.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env, _ = self._fake_clis(root)
             env.pop("RECALLUM_API_KEY", None)
+            env.pop(TOKEN_ENV_VAR, None)
             settings = root / ".claude" / "settings.json"
             settings.parent.mkdir(parents=True, exist_ok=True)
             settings.write_text(
@@ -1234,7 +1303,33 @@ class ClaudeInstallerTests(InstallerTestCase):
                 ),
                 encoding="utf-8",
             )
-            result = self._run_claude(env)
+            result = self._run_claude(env, "--no-store-api-key")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("no Recallum credential", result.stderr)
+
+    def test_plugin_secrets_satisfy_the_credential_check(self) -> None:
+        # Real /plugin configure path: sensitive values live in .credentials.json.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            env.pop("RECALLUM_API_KEY", None)
+            env.pop(TOKEN_ENV_VAR, None)
+            creds = root / ".claude" / ".credentials.json"
+            creds.parent.mkdir(parents=True, exist_ok=True)
+            creds.write_text(
+                json.dumps(
+                    {
+                        "pluginSecrets": {
+                            "recallum-memory@recallum-local": {
+                                "api_token": "secret-in-credentials"
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            creds.chmod(0o600)
+            result = self._run_claude(env, "--no-store-api-key")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("no Recallum credential", result.stderr)
 

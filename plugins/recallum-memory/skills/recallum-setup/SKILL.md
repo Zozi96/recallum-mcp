@@ -8,10 +8,16 @@ description: Set up or diagnose the Recallum plugin and remote MCP connection fo
 Diagnose without exposing credentials. Never print, echo, interpolate, or store an API key value.
 
 Prefer the bundled `scripts/install.sh` for configuration. It validates the endpoint, registers the
-repo marketplace, installs the plugin, and configures the bearer-token environment variable
-reference without storing the token. Use `--target codex`, `--target claude`, `--target grok`,
-`--target both` (Codex + Claude Code), or the default `--target auto` (every detected CLI). Run it
-with `--dry-run` first to see the planned actions.
+repo marketplace, installs the plugin, configures the bearer-token environment variable reference,
+and by default **stores the API key** (from `--api-key-file`, the current environment, or a hidden
+prompt) so clients can authenticate after install:
+
+- Claude Code → `~/.claude/.credentials.json` `pluginSecrets` (GUI-safe; same as `/plugin configure`)
+- All targets → `~/.config/recallum/env` and Linux `~/.config/environment.d/99-recallum.conf`
+
+Never pass the key as `claude --config api_token=...` or as a CLI flag (argv / process list). Use
+`--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `both`, or
+default `auto`. Run with `--dry-run` first to see the planned actions.
 
 ## Setup — Codex
 
@@ -57,11 +63,11 @@ enabling the plugin prompts for it rather than pointing at someone else's.
 1. Confirm the plugin marketplace and installation:
    `claude plugin marketplace list --json` must contain `recallum-local` at this repository root,
    and `claude plugin list --json` must contain the id `recallum-memory@recallum-local`.
-2. Check whether `RECALLUM_API_KEY` was exported before Claude Code started, or set a masked
-   fallback with `/plugin configure recallum-memory@recallum-local`. `api_token` is declared
-   `sensitive`, so Claude Code masks explicit values. Never pass the key with
+2. Check whether a credential can resolve: `RECALLUM_API_KEY` in the process environment, or
+   `pluginSecrets["recallum-memory@recallum-local"].api_token` in `~/.claude/.credentials.json`
+   (written by `install.sh` or `/plugin configure`). Never pass the key with
    `--config api_token=...`: that puts the credential in argv, shell history, and the process list.
-   Only `mcp_url` is safe to pass that way, and `scripts/install.sh` does exactly that.
+   Only `mcp_url` is safe on the CLI, and `scripts/install.sh` does exactly that.
 
    **With neither set, the failure is silent until the first tool call.** The server's bearer
    middleware only guards tool invocation, so the MCP connection still reports healthy and

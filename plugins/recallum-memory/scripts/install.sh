@@ -22,16 +22,31 @@ Options:
   --remote                  Register the private GitHub repository instead of the local checkout
   --force-mcp               Replace an existing recallum setup: a differing Codex/Grok MCP
                             definition, or an already-installed Claude Code plugin
+  --api-key-file PATH       Read the API key from PATH (mode 600 recommended). Safer than
+                            putting the key on the command line.
+  --no-store-api-key        Do not prompt for or persist the API key (MCP registration only)
   --dry-run                 Validate and print safe actions without mutating anything
   --help                    Show this help
 
-This script never reads, prints, or stores the API key.
+API key handling (default: store when a key is available or can be prompted):
+
+  The key is never passed as a CLI flag or as claude --config api_token=... (that
+  would put it in argv, shell history, and the process list). Sources, in order:
+    1. --api-key-file
+    2. existing RECALLUM_API_KEY / --token-env-var in this shell
+    3. interactive hidden prompt when stdin is a TTY
+
+  Persistence:
+    Claude Code  ~/.claude/.credentials.json → pluginSecrets
+                 (same store as /plugin configure; works for GUI launches)
+    Codex/Grok   ~/.config/recallum/env  (export of the token env var)
+                 and, on Linux, ~/.config/environment.d/99-recallum.conf
+                 so desktop sessions also see the variable
 
   Codex        registers the MCP server against --token-env-var, and resolves that
                environment variable at connection time.
   Claude Code  carries the MCP server inside the plugin. It prefers RECALLUM_API_KEY,
-               with a masked fallback set through
-               `/plugin configure recallum-memory@recallum-local`.
+               with a masked fallback in pluginSecrets (installer or /plugin configure).
   Grok Build   registers the MCP server in ~/.grok/config.toml against
                --token-env-var (same env-var pattern as Codex). Claude-style
                ${user_config.*} placeholders in the plugin .mcp.json are not
@@ -49,6 +64,8 @@ claude_scope="user"
 remote_marketplace=0
 force_mcp=0
 dry_run=0
+store_api_key=1
+api_key_file=""
 
 while (($#)); do
   case "$1" in
@@ -78,6 +95,15 @@ while (($#)); do
       ;;
     --force-mcp)
       force_mcp=1
+      shift
+      ;;
+    --api-key-file)
+      (($# >= 2)) || { echo "error: --api-key-file requires a value" >&2; exit 2; }
+      api_key_file=$2
+      shift 2
+      ;;
+    --no-store-api-key)
+      store_api_key=0
       shift
       ;;
     --dry-run)
@@ -204,6 +230,274 @@ run_action() {
     printf '\n'
   else
     "$@"
+  fi
+}
+
+# Resolved API key material (never printed). Empty when store is skipped or
+# no source was available.
+resolved_api_key=""
+api_key_stored=0
+claude_secret_stored=0
+env_file_stored=0
+
+claude_config_dir() {
+  printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+
+# Read a key from a file without echoing it. Trims a single trailing newline.
+read_api_key_file() {
+  local path=$1
+  [[ -f "$path" ]] || { echo "error: --api-key-file not found: $path" >&2; exit 2; }
+  [[ -r "$path" ]] || { echo "error: --api-key-file is not readable: $path" >&2; exit 2; }
+  python3 - "$path" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+if text.endswith("\n"):
+    text = text[:-1]
+if text.endswith("\r"):
+    text = text[:-1]
+if not text.strip():
+    raise SystemExit("error: --api-key-file is empty")
+if "\n" in text or "\r" in text:
+    raise SystemExit("error: --api-key-file must contain a single-line key")
+sys.stdout.write(text)
+PY
+}
+
+prompt_api_key() {
+  local key="" confirm=""
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+  # Prompt on stderr so stdout stays free for dry-run plans / scripting.
+  printf 'Recallum API key (input hidden): ' >&2
+  # -r: raw; -s: silent. Available in bash.
+  IFS= read -r -s key || true
+  printf '\n' >&2
+  if [[ -z "$key" ]]; then
+    echo "error: API key cannot be empty" >&2
+    return 1
+  fi
+  printf 'Confirm API key (input hidden): ' >&2
+  IFS= read -r -s confirm || true
+  printf '\n' >&2
+  if [[ "$key" != "$confirm" ]]; then
+    echo "error: API keys do not match" >&2
+    return 1
+  fi
+  printf '%s' "$key"
+}
+
+resolve_api_key() {
+  resolved_api_key=""
+  ((store_api_key)) || return 0
+
+  if [[ -n "$api_key_file" ]]; then
+    resolved_api_key=$(read_api_key_file "$api_key_file")
+    echo "Using API key from --api-key-file (value not printed)."
+    return 0
+  fi
+
+  # Prefer the name Claude's .mcp.json hard-codes, then the Codex/Grok env var.
+  if [[ -n "${RECALLUM_API_KEY-}" ]]; then
+    resolved_api_key=$RECALLUM_API_KEY
+    echo "Using existing RECALLUM_API_KEY from the environment (value not printed)."
+    return 0
+  fi
+  if [[ "$token_env_var" != "RECALLUM_API_KEY" && -n "${!token_env_var-}" ]]; then
+    resolved_api_key=${!token_env_var}
+    echo "Using existing $token_env_var from the environment (value not printed)."
+    return 0
+  fi
+
+  if ((dry_run)); then
+    if [[ -t 0 ]]; then
+      echo "dry-run: would prompt for Recallum API key (hidden input)"
+    else
+      echo "dry-run: no API key source; would skip persistence (non-interactive)"
+    fi
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    echo "No API key in the environment. Enter it to auto-configure the selected clients."
+    if ! resolved_api_key=$(prompt_api_key); then
+      echo "warning: no API key stored; MCP registration will still proceed" >&2
+      resolved_api_key=""
+      return 0
+    fi
+    return 0
+  fi
+
+  echo "warning: no API key available (non-interactive, no --api-key-file, env unset);" >&2
+  echo "         MCP registration will proceed, but clients will not authenticate until" >&2
+  echo "         you export $token_env_var or re-run without --no-store-api-key." >&2
+}
+
+# Write Claude Code's sensitive pluginSecrets entry (same store as
+# /plugin configure). Path is always the user credentials file; scope only
+# affects marketplace/plugin install, not secret storage.
+store_claude_plugin_secret() {
+  local key=$1
+  local creds
+  creds="$(claude_config_dir)/.credentials.json"
+  if ((dry_run)); then
+    echo "dry-run: store API key in Claude Code pluginSecrets at $creds"
+    return 0
+  fi
+  # Pass the key via a 0600 temp file, never argv.
+  local key_path="$tmp_dir/api-key"
+  umask 077
+  printf '%s' "$key" >"$key_path"
+  chmod 600 "$key_path"
+  python3 - "$creds" "$key_path" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+creds_path = Path(sys.argv[1])
+key = Path(sys.argv[2]).read_text(encoding="utf-8")
+if not key:
+    raise SystemExit("error: refused to store an empty API key")
+creds_path.parent.mkdir(parents=True, exist_ok=True)
+try:
+    data = json.loads(creds_path.read_text(encoding="utf-8") or "{}")
+except FileNotFoundError:
+    data = {}
+except ValueError as exc:
+    raise SystemExit(f"error: invalid Claude credentials JSON at {creds_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: Claude credentials JSON must be an object: {creds_path}")
+secrets = data.setdefault("pluginSecrets", {})
+if not isinstance(secrets, dict):
+    raise SystemExit(f"error: pluginSecrets must be an object in {creds_path}")
+entry = secrets.setdefault("recallum-memory@recallum-local", {})
+if not isinstance(entry, dict):
+    entry = {}
+    secrets["recallum-memory@recallum-local"] = entry
+entry["api_token"] = key
+tmp = creds_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(creds_path)
+os.chmod(creds_path, 0o600)
+PY
+  rm -f -- "$key_path"
+  claude_secret_stored=1
+  echo "Stored API key in Claude Code pluginSecrets (GUI-safe; value not printed)."
+}
+
+# Persist env-var form for Codex/Grok (and terminal Claude). Desktop Linux also
+# gets environment.d so GUI-launched processes inherit the variable.
+store_env_key_files() {
+  local key=$1
+  local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  local env_dir="$config_home/recallum"
+  local env_file="$env_dir/env"
+  local systemd_dir="$config_home/environment.d"
+  local systemd_file="$systemd_dir/99-recallum.conf"
+
+  # Names that must resolve to this key for the selected clients.
+  local -a names=()
+  if ((install_claude)) || [[ "$token_env_var" == "RECALLUM_API_KEY" ]]; then
+    names+=("RECALLUM_API_KEY")
+  fi
+  if ((install_codex || install_grok)); then
+    local found=0
+    local n
+    if ((${#names[@]} > 0)); then
+      for n in "${names[@]}"; do
+        [[ "$n" == "$token_env_var" ]] && found=1
+      done
+    fi
+    ((found)) || names+=("$token_env_var")
+  fi
+  ((${#names[@]} > 0)) || return 0
+
+  if ((dry_run)); then
+    echo "dry-run: write $env_file (export ${names[*]})"
+    echo "dry-run: write $systemd_file (desktop session env)"
+    return 0
+  fi
+
+  local key_path="$tmp_dir/api-key-env"
+  umask 077
+  printf '%s' "$key" >"$key_path"
+  chmod 600 "$key_path"
+  python3 - "$env_file" "$systemd_file" "$key_path" "${names[@]}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+env_file = Path(sys.argv[1])
+systemd_file = Path(sys.argv[2])
+key = Path(sys.argv[3]).read_text(encoding="utf-8")
+names = sys.argv[4:]
+if not key:
+    raise SystemExit("error: refused to store an empty API key")
+
+def shell_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+env_file.parent.mkdir(parents=True, exist_ok=True)
+lines = [
+    "# Managed by recallum install.sh — do not commit. chmod 600.",
+    "# Source from your shell profile:  [ -f ~/.config/recallum/env ] && . ~/.config/recallum/env",
+]
+for name in names:
+    lines.append(f"export {name}={shell_single_quote(key)}")
+tmp = env_file.with_suffix(".env.tmp")
+tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(env_file)
+os.chmod(env_file, 0o600)
+
+# systemd user environment.d: KEY=value, no export, loaded at login.
+systemd_file.parent.mkdir(parents=True, exist_ok=True)
+sys_lines = ["# Managed by recallum install.sh — re-login for desktop apps to pick this up."]
+for name in names:
+    # Values with newlines are already rejected; escape nothing beyond that.
+    if any(ch in key for ch in "\n\r"):
+        raise SystemExit("error: API key must be a single line")
+    sys_lines.append(f"{name}={key}")
+tmp_s = systemd_file.with_suffix(".conf.tmp")
+tmp_s.write_text("\n".join(sys_lines) + "\n", encoding="utf-8")
+os.chmod(tmp_s, 0o600)
+tmp_s.replace(systemd_file)
+os.chmod(systemd_file, 0o600)
+PY
+  rm -f -- "$key_path"
+  env_file_stored=1
+  echo "Wrote $env_file and $systemd_file (values not printed)."
+  echo "  Shell:    source $env_file   (or add that line to your profile)"
+  echo "  Desktop:  re-login so systemd user environment.d reloads"
+}
+
+persist_api_key() {
+  api_key_stored=0
+  claude_secret_stored=0
+  env_file_stored=0
+  ((store_api_key)) || return 0
+  [[ -n "$resolved_api_key" ]] || return 0
+
+  if ((install_claude)); then
+    store_claude_plugin_secret "$resolved_api_key"
+  fi
+  if ((install_codex || install_grok || install_claude)); then
+    store_env_key_files "$resolved_api_key"
+  fi
+  api_key_stored=1
+
+  # Make the key visible to this process so post-install credential checks pass
+  # without a re-login. Do not export onto argv of later commands as a flag.
+  if ((install_claude)) || [[ "$token_env_var" == "RECALLUM_API_KEY" ]]; then
+    export RECALLUM_API_KEY="$resolved_api_key"
+  fi
+  if [[ "$token_env_var" != "RECALLUM_API_KEY" ]]; then
+    # shellcheck disable=SC2086
+    export "$token_env_var=$resolved_api_key"
   fi
 }
 
@@ -419,36 +713,42 @@ verify_claude_credential() {
   if ((dry_run)); then return 0; fi
   local env_set=0
   [[ -n "${RECALLUM_API_KEY-}" ]] && env_set=1
-  python3 - "$(claude_settings_file)" "$env_set" <<'PY'
+  local creds
+  creds="$(claude_config_dir)/.credentials.json"
+  python3 - "$(claude_settings_file)" "$creds" "$env_set" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-path, env_set = Path(sys.argv[1]), sys.argv[2] == "1"
+path, creds_path, env_set = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3] == "1"
 plugin_id = "recallum-memory@recallum-local"
 try:
     data = json.loads(path.read_text(encoding="utf-8") or "{}")
 except (OSError, ValueError):
     data = {}
 options = ((data.get("pluginConfigs") or {}).get(plugin_id) or {}).get("options") or {}
-if env_set or str(options.get("api_token") or "").strip():
+secret = ""
+try:
+    creds = json.loads(creds_path.read_text(encoding="utf-8") or "{}")
+    secret = str(
+        ((creds.get("pluginSecrets") or {}).get(plugin_id) or {}).get("api_token") or ""
+    ).strip()
+except (OSError, ValueError):
+    secret = ""
+if env_set or str(options.get("api_token") or "").strip() or secret:
     raise SystemExit(0)
 sys.stderr.write(
     f"""warning: no Recallum credential can resolve for Claude Code.
-         Neither RECALLUM_API_KEY (environment) nor the plugin's api_token is
-         set, so .mcp.json sends the literal "Bearer ": Claude Code registers
-         the server, starts the hooks, and then fails every tool call
-         authentication in silence.
-         Settings file: {path}
-         Config key:    pluginConfigs['{plugin_id}'].options.api_token
-         Set exactly one of:
-           * RECALLUM_API_KEY, in the environment that LAUNCHES Claude Code.
-             A GUI launch (Dock, Spotlight, Finder) inherits launchd's
-             environment, not your shell's, so an export in ~/.zshrc or
-             ~/.zshenv never reaches it -- this route fits a terminal `claude`.
-           * the masked fallback, from a terminal `claude`:
-               /plugin configure recallum-memory@recallum-local
-             which persists api_token into the settings file above.
+         Neither RECALLUM_API_KEY (environment) nor a stored api_token is set,
+         so .mcp.json sends the literal "Bearer ": Claude Code registers the
+         server, starts the hooks, and then fails every tool call authentication
+         in silence.
+         Settings file:     {path}
+         Credentials file:  {creds_path}  (pluginSecrets['{plugin_id}'].api_token)
+         Fix with one of:
+           * re-run install.sh (it prompts and stores the key for GUI + terminal)
+           * RECALLUM_API_KEY in the environment that LAUNCHES Claude Code
+           * /plugin configure recallum-memory@recallum-local
          Never pass the token as a command-line argument: argv is readable by
          any process on the machine.
 """
@@ -964,21 +1264,40 @@ PY
   esac
 }
 
+resolve_api_key
+persist_api_key
+
 if ((install_codex)); then install_for_codex; fi
 if ((install_claude)); then install_for_claude; fi
 if ((install_grok)); then install_for_grok; fi
+
+# Drop the in-memory copy once clients are configured. Files already hold it.
+resolved_api_key=""
 
 echo
 if ((install_codex)); then
   echo "Codex: start a new thread, open /hooks, review the Recallum hook path, and trust it."
 fi
 if ((install_claude)); then
-  echo "Claude Code: export RECALLUM_API_KEY in the environment that launches Claude,"
-  echo "             or set a masked fallback with"
-  echo "             '/plugin configure recallum-memory@recallum-local', then restart the session."
-  echo "             A GUI-launched Claude does not inherit your shell's exports."
+  if ((claude_secret_stored)); then
+    echo "Claude Code: API key stored in pluginSecrets (works for GUI and terminal)."
+    echo "             Restart the Claude session to load the plugin and MCP tools."
+  elif ((api_key_stored)) || [[ -n "${RECALLUM_API_KEY-}" ]]; then
+    echo "Claude Code: RECALLUM_API_KEY is set for this process; restart Claude to load tools."
+    echo "             GUI launches still need pluginSecrets or a desktop env var — re-run"
+    echo "             without --no-store-api-key, or use '/plugin configure recallum-memory@recallum-local'."
+  else
+    echo "Claude Code: export RECALLUM_API_KEY in the environment that launches Claude,"
+    echo "             or set a masked fallback with"
+    echo "             '/plugin configure recallum-memory@recallum-local', then restart the session."
+    echo "             A GUI-launched Claude does not inherit your shell's exports."
+  fi
 fi
 if ((install_grok)); then
-  echo "Grok Build: export $token_env_var before launching Grok, then start a new session."
+  if ((env_file_stored)); then
+    echo "Grok Build: token env file written; source it (or re-login for desktop), then start a new session."
+  else
+    echo "Grok Build: export $token_env_var before launching Grok, then start a new session."
+  fi
   echo "            Verify with: grok mcp doctor recallum"
 fi
