@@ -104,6 +104,9 @@ class Container(containers.DeclarativeContainer):
             timedelta, seconds=config.web.absolute_seconds.as_int()
         ),
         rotation_threshold=config.web.rotation_threshold.as_float(),
+        rotation_grace=providers.Callable(
+            timedelta, seconds=config.web.rotation_grace_seconds.as_int()
+        ),
     )
     admin_service = providers.Singleton(
         AdminService,

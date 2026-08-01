@@ -61,6 +61,9 @@ async def test_session_expiry_rotation_reuse_and_logout():
     assert rotated.rotated_token is not None
     assert rotated.session.absolute_expires_at == issued.session.absolute_expires_at
 
+    # Past the grace window the superseded token is a real reuse signal, and it
+    # takes the successor down with it.
+    now[0] += timedelta(minutes=5)
     assert await service.resolve(issued.token) is None
     assert await service.resolve(rotated.rotated_token) is None
 
@@ -76,6 +79,43 @@ async def test_session_expiry_rotation_reuse_and_logout():
     absolute.session.absolute_expires_at = now[0] + timedelta(hours=1)
     now[0] += timedelta(hours=1)
     assert await service.resolve(absolute.token) is None
+
+
+async def test_requests_in_flight_during_rotation_keep_the_session():
+    """The logout nobody ordered: one page load, several requests, one cookie."""
+    now = [datetime(2026, 1, 1, tzinfo=UTC)]
+    users = FakeUserRepository()
+    user = await users.create_user("concurrent@example.com")
+    repository = FakeWebSessionRepository(users)
+    service = WebSessionService(
+        repository,
+        idle_window=timedelta(days=7),
+        absolute_window=timedelta(days=30),
+        rotation_threshold=0.5,
+        rotation_grace=timedelta(seconds=30),
+        clock=lambda: now[0],
+    )
+    issued = await service.create(user.id)
+    now[0] += timedelta(days=4)
+
+    rotated = await service.resolve(issued.token)
+    assert rotated.rotated_token is not None
+
+    # The sibling requests left the browser carrying the same cookie and land a
+    # moment later. They authenticate on the successor and must not re-issue a
+    # cookie: only the request that won the rotation holds the new token in the
+    # clear, so re-sending here would hand the browser a value nobody has.
+    now[0] += timedelta(seconds=5)
+    for _ in range(3):
+        concurrent = await service.resolve(issued.token)
+        assert concurrent is not None
+        assert concurrent.user.id == user.id
+        assert concurrent.session.id == rotated.session.id
+        assert concurrent.rotated_token is None
+
+    # Nothing was revoked, and the token the browser actually holds still works.
+    assert await service.resolve(rotated.rotated_token) is not None
+    assert all(row.revoked_at is None for row in repository.sessions.values())
 
 
 async def test_losing_rotation_race_revokes_the_winning_successor():
@@ -132,6 +172,9 @@ def test_web_endpoints_cookie_scope_and_cors():
         assert "SameSite=lax" in cookie
         assert "Path=/api/v1" in cookie
         assert "Domain=" not in cookie
+        # Persistent, not a session cookie: quitting the browser must not end a
+        # session the server still considers good for days.
+        assert f"Max-Age={Settings().web.idle_seconds}" in cookie
         assert client.get("/api/v1/auth/me").json()["email"] == "web@example.com"
         wrong = client.post(
             "/api/v1/auth/login",

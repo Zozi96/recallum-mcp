@@ -46,6 +46,10 @@ class WebSessionRepository:
             ).one_or_none()
             return (row.WebSession, row.User) if row else None
 
+    async def find_by_id(self, session_id: uuid.UUID) -> WebSession | None:
+        async with self._sessions.admin() as session:
+            return await session.get(WebSession, session_id)
+
     async def rotate(
         self,
         previous_id: uuid.UUID,

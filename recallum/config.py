@@ -85,6 +85,11 @@ class WebSettings(BaseModel):
     idle_seconds: int = Field(default=7 * 24 * 60 * 60, gt=0, le=31 * 24 * 60 * 60)
     absolute_seconds: int = Field(default=30 * 24 * 60 * 60, gt=0, le=366 * 24 * 60 * 60)
     rotation_threshold: float = Field(default=0.5, gt=0, lt=1)
+    # How long the just-superseded token keeps working after a rotation. A page
+    # load fires several requests at once, all carrying the same cookie: one
+    # rotates and the rest land holding a token that went stale in flight. That
+    # is concurrency, not replay, so it must not trip reuse detection.
+    rotation_grace_seconds: int = Field(default=30, ge=0, le=300)
     argon2_memory_cost: int = Field(default=19456, ge=8192, le=1048576)
     argon2_time_cost: int = Field(default=2, ge=1, le=10)
     argon2_parallelism: int = Field(default=1, ge=1, le=16)

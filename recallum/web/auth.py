@@ -2,6 +2,7 @@
 
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -37,10 +38,15 @@ class WebIdentity:
         )
 
 
-def _set_cookie(response: Response, name: str, token: str) -> None:
+def _set_cookie(response: Response, name: str, token: str, max_age: timedelta) -> None:
     response.set_cookie(
         name,
         token,
+        # Without Max-Age this is a session cookie: the browser drops it on
+        # quit, so a server-side session good for days died at the end of the
+        # afternoon. It tracks the idle window and is re-issued on rotation,
+        # so the cookie expires alongside the session it stands for.
+        max_age=int(max_age.total_seconds()),
         httponly=True,
         secure=True,
         samesite="lax",
@@ -65,7 +71,9 @@ class WebAuthenticator:
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
             )
         if resolved.rotated_token:
-            _set_cookie(response, self._cookie_name, resolved.rotated_token)
+            _set_cookie(
+                response, self._cookie_name, resolved.rotated_token, self._sessions.idle_window
+            )
         return WebIdentity(resolved.user, resolved.session.id)
 
 
@@ -86,7 +94,7 @@ def create_auth_router(
                 detail="Invalid email or password",
             )
         issued = await sessions.create(user.id)
-        _set_cookie(response, cookie_name, issued.token)
+        _set_cookie(response, cookie_name, issued.token, sessions.idle_window)
         return IdentityResponse(id=user.id, email=user.email, is_admin=user.is_admin)
 
     @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

@@ -814,6 +814,9 @@ class FakeWebSessionRepository:
         row = next((row for row in self.sessions.values() if row.token_hash == token_hash), None)
         return (row, self.users.users[row.user_id]) if row else None
 
+    async def find_by_id(self, session_id):
+        return self.sessions.get(session_id)
+
     async def rotate(
         self, previous_id, user_id, token_hash, now, idle_expires_at, absolute_expires_at
     ):
