@@ -298,6 +298,38 @@ grok mcp remove recallum && grok plugin uninstall recallum-memory
 
 ## Development
 
+### Mid-task retrieval checkpoint evaluation
+
+Checkpoints are semantic `recall` calls made when the active retrieval key
+(`project + active objective + subsystem/hypothesis/decision`) changes materially. They are
+different from the initial `context` digest and from ranking quality: the flow evaluation checks
+whether an agent retrieved a critical memory before a decision, applied its observable criteria,
+avoided unnecessary calls and repeated exposures (including duplicate-exposure rate and duplicated
+served-character cost), and how many characters it received. It does
+not replace MRR or recall@k from `recallum-admin eval`, which measure whether a known query ranks
+the expected memories.
+
+Run the deterministic, provider-independent fixture comparison from the repository root:
+
+```bash
+python3 scripts/eval_agent_workflow.py
+```
+
+Use `--scenarios PATH --runs PATH` to evaluate another pair. Scenario files are versioned JSON
+with identified `corpus_keys`, initial context, ordered phases, an optional pivot, critical
+memory keys, and observable application criteria. Run files must use the same scenarios for each
+policy and contain only `scenario`, `policy`, `phase`, `tool`, returned memory keys, served
+character counts, and applied criterion keys. Prompts, full memory content, reasoning,
+credentials, and unknown fields are rejected so versioned traces remain privacy-safe. To extend
+the evaluation, add a synthetic scenario and one run for every policy, then run the command and
+review critical-retrieval misses alongside calls, duplicate exposures, and served characters; a
+higher call count is not success by itself.
+
+The checked-in fixtures currently report baseline `critical=0.67`, `applied=0.67`,
+`unnecessary=2`, `repeated=1`, `dup-rate=0.33`, `dup-chars=100`, `recalls=3`, `chars=440`,
+versus checkpoints `critical=1.00`, `applied=1.00`, `unnecessary=0`, `repeated=0`,
+`dup-rate=0.00`, `dup-chars=0`, `recalls=2`, `chars=420`.
+
 ```bash
 python3 plugins/recallum-memory/tests/test_plugin.py     # hook, manifest, and installer tests
 claude plugin validate . --strict                        # Claude marketplace manifest

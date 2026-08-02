@@ -1,0 +1,39 @@
+{
+  "version": "1",
+  "project": "remote:6da6a46335d49d55",
+  "scenarios": [
+    {
+      "id": "session-rotation-pivot",
+      "corpus_keys": ["memory:session-rotation-ttl", "memory:api-auth"],
+      "initial_context_keys": ["memory:api-auth"],
+      "phases": ["triage", "session-rotation", "decision"],
+      "pivot_phase": "session-rotation",
+      "decision_phase": "decision",
+      "critical_memory_keys": ["memory:session-rotation-ttl"],
+      "application_criteria_keys": ["criterion:preserve-session-ttl"],
+      "expected_checkpoint": true
+    },
+    {
+      "id": "covered-by-initial-context",
+      "corpus_keys": ["memory:api-auth"],
+      "initial_context_keys": ["memory:api-auth"],
+      "phases": ["triage", "implementation", "decision"],
+      "pivot_phase": null,
+      "decision_phase": "decision",
+      "critical_memory_keys": ["memory:api-auth"],
+      "application_criteria_keys": ["criterion:use-hashed-keys"],
+      "expected_checkpoint": false
+    },
+    {
+      "id": "repeated-checkpoint-results",
+      "corpus_keys": ["memory:deploy-dokploy", "memory:release-window"],
+      "initial_context_keys": ["memory:deploy-dokploy"],
+      "phases": ["triage", "deployment", "verification", "decision"],
+      "pivot_phase": "deployment",
+      "decision_phase": "decision",
+      "critical_memory_keys": ["memory:release-window"],
+      "application_criteria_keys": ["criterion:use-dokploy", "criterion:respect-release-window"],
+      "expected_checkpoint": true
+    }
+  ]
+}

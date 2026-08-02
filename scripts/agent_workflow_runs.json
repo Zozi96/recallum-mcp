@@ -1,0 +1,65 @@
+{
+  "version": "1",
+  "runs": [
+    {
+      "run_id": "baseline-session-rotation",
+      "policy": "baseline",
+      "scenario": "session-rotation-pivot",
+      "events": [
+        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
+        {"phase": "session-rotation", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": []},
+        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": []}
+      ]
+    },
+    {
+      "run_id": "baseline-covered",
+      "policy": "baseline",
+      "scenario": "covered-by-initial-context",
+      "events": [
+        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
+        {"phase": "implementation", "tool": "recall", "returned_memory_keys": ["memory:api-auth"], "served_chars": 40, "applied_criterion_keys": []},
+        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-hashed-keys"]}
+      ]
+    },
+    {
+      "run_id": "baseline-repeated",
+      "policy": "baseline",
+      "scenario": "repeated-checkpoint-results",
+      "events": [
+        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:deploy-dokploy"], "served_chars": 80, "applied_criterion_keys": ["criterion:use-dokploy"]},
+        {"phase": "deployment", "tool": "recall", "returned_memory_keys": ["memory:release-window"], "served_chars": 100, "applied_criterion_keys": []},
+        {"phase": "verification", "tool": "recall", "returned_memory_keys": ["memory:release-window"], "served_chars": 100, "applied_criterion_keys": []},
+        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-dokploy", "criterion:respect-release-window"]}
+      ]
+    },
+    {
+      "run_id": "checkpoint-session-rotation",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "events": [
+        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
+        {"phase": "session-rotation", "tool": "recall", "returned_memory_keys": ["memory:session-rotation-ttl"], "served_chars": 120, "applied_criterion_keys": []},
+        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:preserve-session-ttl"]}
+      ]
+    },
+    {
+      "run_id": "checkpoint-covered",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "events": [
+        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
+        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-hashed-keys"]}
+      ]
+    },
+    {
+      "run_id": "checkpoint-repeated",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "events": [
+        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:deploy-dokploy"], "served_chars": 80, "applied_criterion_keys": ["criterion:use-dokploy"]},
+        {"phase": "deployment", "tool": "recall", "returned_memory_keys": ["memory:release-window"], "served_chars": 100, "applied_criterion_keys": []},
+        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-dokploy", "criterion:respect-release-window"]}
+      ]
+    }
+  ]
+}

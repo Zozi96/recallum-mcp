@@ -679,6 +679,45 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("identifiers, commands, file paths, error", text)
         self.assertIn("Translating an existing, still-true memory is not a reason", text)
 
+    def test_memory_skill_contract_covers_mid_task_checkpoints(self) -> None:
+        text = " ".join(
+            (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        required = (
+            "project + active objective + current subsystem/hypothesis/decision",
+            "new subsystem",
+            "replacing a causal hypothesis",
+            "sensitive security, data, compatibility, deployment, or public-interface decision",
+            "time passed",
+            "one isolated failure",
+            "limit=3",
+            "short English query",
+            "identifiers verbatim",
+            "equivalent query keys",
+            "served memory ids",
+            "later checkpoint would return the same ids",
+            "Do not automatically increase the limit",
+            "resume|clear|compact",
+            "context(focus=...)",
+            "fail-open",
+            "stale, contradictory, or truncated memory",
+            "current code and instructions win",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_checkpoint_guidance_has_all_client_prefixes_and_discovery(self) -> None:
+        text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, GROK_PREFIX):
+            self.assertIn(prefix, text)
+        self.assertIn("search_tool", text)
+        self.assertIn("use_tool", text)
+
     def test_all_marketplaces_point_at_the_same_local_plugin(self) -> None:
         codex = self._load(CODEX_MARKETPLACE)
         claude = self._load(CLAUDE_MARKETPLACE)

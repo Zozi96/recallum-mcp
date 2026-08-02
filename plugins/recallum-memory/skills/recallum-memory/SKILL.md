@@ -95,8 +95,43 @@ Translating an existing, still-true memory is not a reason to call `update`.
    recoverable and the two never both look current. Passing only `importance`, `category`, or
    `metadata` edits in place and keeps the id. Scope and project cannot be changed.
 10. Use `list_memories` only to browse or diagnose stored entries. Use `forget` only when the user
-   requests removal or confirms an entry is wrong with nothing replacing it -- if something
-   replaces it, that is `update`.
+    requests removal or confirms an entry is wrong with nothing replacing it -- if something
+    replaces it, that is `update`.
+
+## Mid-task retrieval checkpoints
+
+Keep an ephemeral conceptual retrieval key for the active task:
+`project + active objective + current subsystem/hypothesis/decision`. A checkpoint is warranted
+only when that key changes materially and durable context could affect the next action. Positive
+triggers include entering a new subsystem, replacing a causal hypothesis, or approaching a
+sensitive security, data, compatibility, deployment, or public-interface decision when plausible
+history may exist. Do not checkpoint merely because time passed, more tools ran, one isolated
+failure occurred, or a `resume|clear|compact` digest already covers the active focus.
+
+For a checkpoint, call `recall` with the canonical project key and a short English query that
+describes the task delta, next decision, and identifiers verbatim. Start with `limit=3`; use a
+scope or category filter only when the task makes it unambiguous. Keep an ephemeral set of
+equivalent query keys and served memory ids: suppress an equivalent query and do not re-analyse a
+memory already covered by the active context. If a later checkpoint would return the same ids,
+skip it unless new evidence changes the active key. This state is not durable memory and need not be
+persisted by the server.
+
+If a checkpoint returns no applicable result, continue fail-open. Do not automatically increase
+the limit or chain reformulated queries without new evidence. After `resume`, `clear`, or
+`compact`, treat the injected digest as generic session context, not necessarily a task snapshot:
+do not call `context` or `recall` again when it covers the active subsystem, hypothesis, or
+decision; when it does not, make one focused recovery with `context(focus=...)` or a specific
+`recall` before the dependent decision. If Recallum is unavailable, tell the user once and keep
+working without blocking.
+
+Before using any retrieved memory, reconcile it with current instructions and current repository
+evidence. A stale, contradictory, or truncated memory is historical context until verified; fetch
+truncated text with `get_memory` when needed, and let current code and instructions win over an
+outdated memory. A memory that agrees with both can be applied without rediscovering its content.
+
+This checkpoint policy is identical for Codex (`mcp__recallum__`), Claude Code
+(`mcp__plugin_recallum-memory_recallum__`), and Grok Build (`recallum__` via `search_tool` /
+`use_tool`): only the tool prefix and discovery step differ.
 
 ## Delegation
 
