@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "recallum-memory",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "description": "Recall durable project context across Grok Build sessions via the Recallum MCP server. Claude Code is not required.",
       "category": "productivity",
       "keywords": [
