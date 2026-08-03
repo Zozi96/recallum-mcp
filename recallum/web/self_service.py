@@ -20,6 +20,7 @@ from recallum.memory.schemas import (
     ListResult,
     MemoryGraphResponse,
     MemoryOut,
+    ProfileBlock,
     ReassignResult,
     RecallResult,
     RememberResult,
@@ -251,6 +252,13 @@ def create_self_service_router(
             category=category,
             limit=limit,
         )
+
+    @router.get("/memory-profile", response_model=ProfileBlock)
+    async def memory_profile(
+        current: identity,
+        project: Annotated[str | None, Query()] = None,
+    ) -> ProfileBlock:
+        return await memories.get_profile(current.user.id, project=project)
 
     @router.get("/memories/search", response_model=RecallResult)
     async def search_memories(

@@ -10,15 +10,15 @@ _READINESS_SQL = text(
     SELECT
         NOT role.rolsuper
         AND NOT role.rolbypassrls
-        AND count(table_info.oid) = 3
+        AND count(table_info.oid) = 4
         AND bool_and(table_info.relowner = role.oid)
         AND bool_and(
-            table_info.relname <> 'memories'
+            table_info.relname NOT IN ('memories', 'memory_profiles')
             OR (table_info.relrowsecurity AND table_info.relforcerowsecurity)
         )
     FROM pg_roles AS role
     LEFT JOIN pg_class AS table_info
-      ON table_info.relname IN ('users', 'api_keys', 'memories')
+      ON table_info.relname IN ('users', 'api_keys', 'memories', 'memory_profiles')
      AND table_info.relnamespace = 'public'::regnamespace
     WHERE role.rolname = current_user
     GROUP BY role.rolsuper, role.rolbypassrls

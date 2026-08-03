@@ -22,6 +22,7 @@ from recallum.db.repositories.memory_repo import (
     CandidatePools,
     GraphPair,
     GraphSnapshot,
+    ProfileGenerationConflict,
     ScoredMemory,
 )
 from recallum.embeddings.ollama import EmbeddingError
@@ -148,7 +149,13 @@ class FakeMemoryRepository:
 
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, Memory] = {}
+        self.profiles: dict[tuple[uuid.UUID, str], Any] = {}
         self.last_list_offset: int | None = None
+        self.profile_rebuild_failures: int = 0
+        self.generations: dict[uuid.UUID, int] = {}
+
+    def _bump(self, user_id: uuid.UUID) -> None:
+        self.generations[user_id] = self.generations.get(user_id, 0) + 1
 
     def _active(self, user_id: uuid.UUID) -> list[Memory]:
         return [m for m in self.rows.values() if m.user_id == user_id and not m.is_deleted]
@@ -191,6 +198,7 @@ class FakeMemoryRepository:
             **kwargs,
         )
         self.rows[memory.id] = memory
+        self._bump(user_id)
         return memory
 
     async def find_active_by_hash(
@@ -448,6 +456,7 @@ class FakeMemoryRepository:
         for row in found:
             row.deleted_at = now
             row.superseded_by = replacement.id
+        self._bump(user_id)
         return replacement, [row.id for row in found]
 
     async def mark_reconfirmed(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
@@ -455,6 +464,7 @@ class FakeMemoryRepository:
         if memory is None or memory.user_id != user_id or memory.is_deleted:
             return None
         memory.reconfirmed_at = datetime.now(UTC)
+        self._bump(user_id)
         return memory
 
     async def mark_recalled(self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]) -> None:
@@ -465,6 +475,7 @@ class FakeMemoryRepository:
                 continue
             memory.recall_count = (memory.recall_count or 0) + 1
             memory.last_recalled_at = now
+            self._bump(user_id)
 
     async def mark_seen_in_context(
         self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
@@ -513,6 +524,87 @@ class FakeMemoryRepository:
     ) -> int:
         return len(self._filtered(user_id, visibility, None))
 
+    async def get_profile(
+        self, user_id: uuid.UUID, *, project: str | None = None
+    ) -> Any:
+        key = (user_id, project or "")
+        row = self.profiles.get(key)
+        if row is None:
+            return None
+        # Return a lightweight stand-in with the same attributes.
+        return row
+
+    async def get_memory_generation(self, user_id: uuid.UUID) -> int:
+        return self.generations.get(user_id, 0)
+
+    async def list_profile_projects(self, user_id: uuid.UUID) -> Sequence[str]:
+        return sorted(project for (owner, project) in self.profiles if owner == user_id and project)
+
+    async def upsert_profile(
+        self,
+        user_id: uuid.UUID,
+        *,
+        project: str | None,
+        static_items: list,
+        dynamic_items: list,
+        source_memory_ids,
+        content_hash: str,
+        expected_generation: int,
+    ) -> Any:
+        from types import SimpleNamespace
+
+        if self.profile_rebuild_failures > 0:
+            self.profile_rebuild_failures -= 1
+            raise RuntimeError("simulated profile rebuild failure")
+        if expected_generation != self.generations.get(user_id, 0):
+            raise ProfileGenerationConflict
+        key = (user_id, project or "")
+        row = SimpleNamespace(
+            user_id=user_id,
+            project=project or "",
+            static_items=list(static_items),
+            dynamic_items=list(dynamic_items),
+            source_memory_ids=list(source_memory_ids),
+            content_hash=content_hash,
+            generation=expected_generation,
+            built_at=datetime.now(UTC),
+        )
+        self.profiles[key] = row
+        return row
+
+    async def list_active_for_profile(
+        self,
+        user_id: uuid.UUID,
+        *,
+        visibility: MemoryVisibility,
+        static_limit: int,
+        dynamic_limit: int,
+        dynamic_since: datetime,
+        static_min_importance: int = 8,
+    ):
+        rows = self._filtered(user_id, visibility, None)
+        static = [
+            m for m in rows
+            if m.category in {"preference", "constraint"} or m.importance >= static_min_importance
+        ]
+        dynamic = [
+            m for m in rows
+            if m.last_recalled_at is not None and m.last_recalled_at >= dynamic_since
+        ]
+        static.sort(key=lambda m: str(m.id))
+        static.sort(key=lambda m: m.reconfirmed_at or m.created_at, reverse=True)
+        static.sort(key=lambda m: m.importance, reverse=True)
+        dynamic.sort(key=lambda m: str(m.id))
+        dynamic.sort(key=lambda m: m.created_at, reverse=True)
+        dynamic.sort(key=lambda m: m.last_recalled_at, reverse=True)
+        unique = {}
+        for memory in [
+            *static[:static_limit],
+            *dynamic[: dynamic_limit + static_limit],
+        ]:
+            unique.setdefault(memory.id, memory)
+        return list(unique.values())
+
     async def reassign_project(
         self,
         user_id: uuid.UUID,
@@ -541,6 +633,8 @@ class FakeMemoryRepository:
                 continue
             memory.project = to_project
             moved += 1
+        if moved:
+            self._bump(user_id)
         return moved, [m.id for m in conflicts]
 
     async def update_attributes(
@@ -561,6 +655,8 @@ class FakeMemoryRepository:
             memory.category = category
         if metadata is not None:
             memory.metadata_ = metadata
+        if any(value is not None for value in (importance, category, metadata)):
+            self._bump(user_id)
         return memory
 
     async def supersede(
@@ -611,6 +707,7 @@ class FakeMemoryRepository:
         self.rows[replacement.id] = replacement
         original.deleted_at = datetime.now(UTC)
         original.superseded_by = replacement.id
+        self._bump(user_id)
         return replacement
 
     async def most_important_active(
@@ -630,6 +727,7 @@ class FakeMemoryRepository:
         if memory is None or memory.user_id != user_id or memory.is_deleted:
             return False
         memory.deleted_at = datetime.now(UTC)
+        self._bump(user_id)
         return True
 
     async def count_active(self, user_id: uuid.UUID) -> int:

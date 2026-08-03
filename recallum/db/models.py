@@ -13,6 +13,7 @@ from typing import Any
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CHAR,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Computed,
@@ -26,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
@@ -45,11 +46,17 @@ class User(Base):
     )
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
+    memory_generation: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("0"), nullable=False
+    )
 
     api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     memories: Mapped[list[Memory]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    memory_profiles: Mapped[list[MemoryProfile]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     tool_activity: Mapped[list[ToolActivity]] = relationship(
@@ -194,6 +201,37 @@ class Memory(Base):
     @property
     def is_deleted(self) -> bool:
         return self.deleted_at is not None
+
+
+class MemoryProfile(Base):
+    """Materialized always-on profile projection for one user key.
+
+    ``project == ""`` is the user-global profile; a non-empty string is a
+    project-scoped key. Items are denormalized snapshots of active memories.
+    """
+
+    __tablename__ = "memory_profiles"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    project: Mapped[str] = mapped_column(Text, primary_key=True, default="")
+    static_items: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    dynamic_items: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    source_memory_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=False, default=list
+    )
+    content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    built_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=-1)
+
+    user: Mapped[User] = relationship(back_populates="memory_profiles")
 
 
 class ToolActivity(Base):

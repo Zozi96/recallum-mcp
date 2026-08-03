@@ -196,9 +196,44 @@ class ContextGroup(BaseModel):
     items: list[ContextItem]
 
 
+class ProfileItem(BaseModel):
+    """One always-on profile line (verbatim memory snapshot)."""
+
+    id: uuid.UUID
+    category: Literal["preference", "decision", "constraint", "fact"]
+    content: str
+    scope: Literal["global", "project"]
+    project: str | None = None
+    importance: int
+    content_truncated: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        """Canonical JSONB representation shared by selection and storage."""
+        return self.model_dump(mode="json")
+
+
+class ProfileBlock(BaseModel):
+    """Materialized profile as returned by ``context`` and profile reads.
+
+    When ``available`` is false the slices are empty and rebuild failed or was
+    skipped; callers fall back to groups alone. ``digest`` is a stable
+    integrity fingerprint of the rendered slices (not a memory content hash).
+    """
+
+    available: bool
+    project: str | None = None
+    static: list[ProfileItem] = Field(default_factory=list)
+    dynamic: list[ProfileItem] = Field(default_factory=list)
+    source_memory_ids: list[uuid.UUID] = Field(default_factory=list)
+    digest: str | None = None
+    built_at: datetime | None = None
+
+
 class ContextResult(BaseModel):
     """Compact session context within the requested budget.
 
+    ``profile`` is the always-on layer (reserved budget); ``groups`` is the
+    category-ranked task/project snapshot after excluding profile sources.
     ``total_available`` counts every active memory visible to the request;
     ``omitted`` is how many of those the budget left out. When ``omitted`` is
     positive, ``recall`` with a focused query is the way to reach the rest.
@@ -208,6 +243,9 @@ class ContextResult(BaseModel):
 
     project: str | None = None
     focus: str | None = None
+    profile: ProfileBlock = Field(
+        default_factory=lambda: ProfileBlock(available=False)
+    )
     groups: list[ContextGroup]
     total_items: int
     total_available: int

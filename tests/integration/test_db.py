@@ -18,8 +18,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from recallum.config import TEXT_SEARCH_CONFIG
 from recallum.db.readiness import DatabaseReadiness
+from recallum.db.repositories.memory_repo import ProfileGenerationConflict
 from recallum.memory import MemoryVisibility
+from recallum.memory.limits import MemoryLimits
 from recallum.memory.schemas import RememberResult
+from recallum.memory.service import MemoryService
 
 pytestmark = pytest.mark.integration
 
@@ -271,7 +274,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0010_trigram_leg"
+        assert version == "0012_memory_profile_generation"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -291,7 +294,8 @@ async def test_migrations_applied(container):
             await connection.execute(
                 text(
                     "SELECT relname, pg_get_userbyid(relowner) FROM pg_class "
-                    "WHERE relname IN ('users', 'api_keys', 'memories', 'web_sessions') "
+                    "WHERE relname IN ('users', 'api_keys', 'memories', "
+                    "'memory_profiles', 'web_sessions') "
                     "ORDER BY relname"
                 )
             )
@@ -299,6 +303,7 @@ async def test_migrations_applied(container):
         assert owners == [
             ("api_keys", "recallum"),
             ("memories", "recallum"),
+            ("memory_profiles", "recallum"),
             ("users", "recallum"),
             ("web_sessions", "recallum"),
         ]
@@ -310,7 +315,9 @@ async def test_migrations_applied(container):
                 )
             )
         ).scalars().all()
-        assert columns == ["id", "email", "created_at", "password_hash", "is_admin"]
+        assert columns == [
+            "id", "email", "created_at", "password_hash", "is_admin", "memory_generation"
+        ]
         dims = (
             await connection.execute(
                 text(
@@ -333,13 +340,18 @@ async def test_database_readiness_rejects_superuser_and_missing_force_rls(
     try:
         assert await DatabaseReadiness(admin_engine).is_ready() is False
 
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text("ALTER TABLE memories NO FORCE ROW LEVEL SECURITY"))
-            assert await container.database_readiness().is_ready() is False
-        finally:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text("ALTER TABLE memories FORCE ROW LEVEL SECURITY"))
+        for table in ("memories", "memory_profiles"):
+            try:
+                async with admin_engine.begin() as connection:
+                    await connection.execute(
+                        text(f"ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY")
+                    )
+                assert await container.database_readiness().is_ready() is False
+            finally:
+                async with admin_engine.begin() as connection:
+                    await connection.execute(
+                        text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+                    )
 
         assert await container.database_readiness().is_ready() is True
     finally:
@@ -422,6 +434,16 @@ async def test_isolation_between_two_users(container):
 
     alice_recall = await service.recall(alice_id, query="secreto nota")
     assert all(r.content != "nota de bob" for r in alice_recall.results)
+    alice_profile = await service.get_profile(alice_id)
+    bob_profile = await service.get_profile(bob_id)
+    assert all(
+        item.content != "nota de bob"
+        for item in alice_profile.static + alice_profile.dynamic
+    )
+    assert all(
+        item.content != "secreto de alice"
+        for item in bob_profile.static + bob_profile.dynamic
+    )
 
     bob_forget = await service.forget(bob_id, alice_list.items[0].id)
     assert bob_forget.forgotten is False
@@ -432,6 +454,9 @@ async def test_isolation_between_two_users(container):
             await connection.execute(text("SELECT count(*) FROM memories"))
         ).scalar_one()
         assert unseen == 0
+        assert (
+            await connection.execute(text("SELECT count(*) FROM memory_profiles"))
+        ).scalar_one() == 0
 
         await connection.execute(
             text("SELECT set_config('app.current_user_id', :uid, true)"),
@@ -441,6 +466,96 @@ async def test_isolation_between_two_users(container):
             await connection.execute(text("SELECT count(*) FROM memories"))
         ).scalar_one()
         assert visible == 1
+        assert (
+            await connection.execute(text("SELECT count(*) FROM memory_profiles"))
+        ).scalar_one() == 1
+
+
+async def test_profile_static_overflow_can_enter_dynamic_in_postgres(container):
+    user_id = await _make_user_with_key(
+        container, f"profile-overflow-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = MemoryService(
+        repository=container.memory_repository(),
+        embeddings=container.embedding_client(),
+        limits=MemoryLimits(profile_static_max_items=1, profile_dynamic_max_items=1),
+    )
+    static = await service.remember(
+        user_id,
+        content="highest priority database preference",
+        category="preference",
+        importance=10,
+    )
+    overflow = await service.remember(
+        user_id,
+        content="recent database overflow preference",
+        category="preference",
+        importance=9,
+    )
+    await container.memory_repository().mark_recalled(user_id, [overflow.memory.id])
+
+    profile = await service.get_profile(user_id)
+
+    assert [item.id for item in profile.static] == [static.memory.id]
+    assert [item.id for item in profile.dynamic] == [overflow.memory.id]
+
+
+async def test_profile_upsert_rejects_stale_generation_after_concurrent_forget(container):
+    user_id = await _make_user_with_key(
+        container, f"profile-cas-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    repository = container.memory_repository()
+    remembered = await service.remember(
+        user_id,
+        content="concurrent profile content must disappear",
+        category="preference",
+    )
+    stale_generation = await repository.get_memory_generation(user_id)
+    stale_item = {
+        "id": str(remembered.memory.id),
+        "category": "preference",
+        "content": remembered.memory.content,
+        "scope": "global",
+        "project": None,
+        "importance": remembered.memory.importance,
+        "content_truncated": False,
+    }
+
+    async with container.engine().begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :uid, true)"),
+            {"uid": str(user_id)},
+        )
+        await connection.execute(
+            text("UPDATE memories SET deleted_at = now() WHERE id = :memory_id"),
+            {"memory_id": remembered.memory.id},
+        )
+        await connection.execute(
+            text(
+                "UPDATE users SET memory_generation = memory_generation + 1 "
+                "WHERE id = :user_id"
+            ),
+            {"user_id": user_id},
+        )
+        stale_upsert = asyncio.create_task(
+            repository.upsert_profile(
+                user_id,
+                project=None,
+                static_items=[stale_item],
+                dynamic_items=[],
+                source_memory_ids=[remembered.memory.id],
+                content_hash="0" * 64,
+                expected_generation=stale_generation,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not stale_upsert.done()
+
+    with pytest.raises(ProfileGenerationConflict):
+        await stale_upsert
+    profile = await service.get_profile(user_id)
+    assert remembered.memory.id not in profile.source_memory_ids
 
 
 async def test_forget_excludes_from_all_queries(container):

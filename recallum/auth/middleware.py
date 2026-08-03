@@ -1,4 +1,4 @@
-"""FastMCP middleware enforcing ``Authorization: Bearer`` on every tool call."""
+"""FastMCP middleware enforcing ``Authorization: Bearer`` on tools and resources."""
 
 from __future__ import annotations
 
@@ -141,17 +141,37 @@ def _extract_bearer(headers: dict[str, str]) -> str | None:
 
 
 class BearerAuthMiddleware(Middleware):
-    """Validates the bearer token before any tool executes and binds identity.
+    """Validates the bearer token before tools and resources run, binds identity.
 
     Rejected calls raise ``ToolError`` so no memory logic runs. The header is
     read with ``include={"authorization"}`` because FastMCP strips it from the
     default header view to avoid accidental forwarding.
+
+    Resource list/read share the same authenticator as tools so a profile
+    resource cannot be reached without a valid API key.
     """
 
     def __init__(self, authenticator: TokenAuthenticator) -> None:
         self._authenticator = authenticator
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: Any) -> Any:
+        identity = await self._resolve_identity()
+        with identity_scope(identity):
+            return await call_next(context)
+
+    async def on_read_resource(self, context: MiddlewareContext, call_next: Any) -> Any:
+        identity = await self._resolve_identity()
+        with identity_scope(identity):
+            return await call_next(context)
+
+    async def on_list_resources(self, context: MiddlewareContext, call_next: Any) -> Any:
+        identity = await self._resolve_identity()
+        with identity_scope(identity):
+            return await call_next(context)
+
+    async def on_list_resource_templates(
+        self, context: MiddlewareContext, call_next: Any
+    ) -> Any:
         identity = await self._resolve_identity()
         with identity_scope(identity):
             return await call_next(context)

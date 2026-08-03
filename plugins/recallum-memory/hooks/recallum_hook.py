@@ -280,14 +280,38 @@ def _context_payload(result: dict[str, object]) -> dict[str, object] | None:
     return None
 
 
+def _digest_item_line(item: object) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    content = str(item.get("content") or "").strip()
+    if not content:
+        return None
+    marker = "…" if item.get("content_truncated") else ""
+    return f"- [{item.get('category', '?')}] {content}{marker}"
+
+
 def _render_digest(payload: dict[str, object] | None) -> str | None:
-    """Render a compact digest; '' means "valid but empty", None means failure."""
+    """Render a compact digest; '' means "valid but empty", None means failure.
+
+    When ``profile`` is available, static then dynamic lines come first so
+    always-on preferences survive the digest character cap.
+    """
     if not isinstance(payload, dict):
         return None
     groups = payload.get("groups")
     if not isinstance(groups, list):
         return None
     lines: list[str] = []
+    profile = payload.get("profile")
+    if isinstance(profile, dict) and profile.get("available"):
+        for key in ("static", "dynamic"):
+            items = profile.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                line = _digest_item_line(item)
+                if line is not None:
+                    lines.append(line)
     for group in groups:
         if not isinstance(group, dict):
             continue
@@ -295,13 +319,9 @@ def _render_digest(payload: dict[str, object] | None) -> str | None:
         if not isinstance(items, list):
             continue
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content") or "").strip()
-            if not content:
-                continue
-            marker = "…" if item.get("content_truncated") else ""
-            lines.append(f"- [{item.get('category', '?')}] {content}{marker}")
+            line = _digest_item_line(item)
+            if line is not None:
+                lines.append(line)
     if not lines:
         return ""
     omitted = payload.get("omitted")

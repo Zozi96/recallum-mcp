@@ -44,6 +44,8 @@ class SessionContextBudget:
         total_available: int,
         focus: str | None = None,
         stale_before: datetime | None = None,
+        exclude_ids: set[uuid.UUID] | None = None,
+        profile_item_count: int = 0,
     ) -> ContextResult:
         """Dedup, group by category and apply the budget to produce a snapshot.
 
@@ -70,10 +72,11 @@ class SessionContextBudget:
         # statement of priority -- an importance-9 project constraint must
         # not sit behind importance-1 globals at the cliff. Globals keep
         # winning exact ties (stable sorts preserve their lead).
+        skip = exclude_ids or set()
         merged = [*global_memories, *project_memories]
         merged.sort(key=lambda m: m.created_at, reverse=True)
         merged.sort(key=lambda m: m.importance, reverse=True)
-        seen: set[uuid.UUID] = set()
+        seen: set[uuid.UUID] = set(skip)
         ordered: list[Memory] = []
         for memory in (*focus_memories, *merged):
             if memory.id in seen:
@@ -134,12 +137,15 @@ class SessionContextBudget:
             if kept:
                 groups.append(ContextGroup(category=category, items=kept))
 
-        omitted = max(total_available - total_items, 0)
+        # Profile items count toward total_items for budget transparency; the
+        # caller assembles the profile block separately and passes the count.
+        combined_items = total_items + profile_item_count
+        omitted = max(total_available - combined_items, 0)
         return ContextResult(
             project=project,
             focus=focus,
             groups=groups,
-            total_items=total_items,
+            total_items=combined_items,
             total_available=total_available,
             omitted=omitted,
             truncated=exhausted or omitted > 0,

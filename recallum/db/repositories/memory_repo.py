@@ -10,11 +10,12 @@ from typing import Any
 
 from sqlalchemy import cast, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 
 from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
-from recallum.db.models import Memory
+from recallum.db.models import Memory, MemoryProfile, User
 from recallum.db.session import SessionProvider
 from recallum.memory import MemoryVisibility
 
@@ -73,6 +74,10 @@ class BucketMismatchError(ValueError):
     """
 
 
+class ProfileGenerationConflict(RuntimeError):
+    """A profile rebuild raced a memory mutation and lost its CAS."""
+
+
 @dataclass(slots=True)
 class ScoredMemory:
     """A memory row plus a per-signal score (cosine similarity or text rank)."""
@@ -116,6 +121,14 @@ class MemoryRepository:
 
     def __init__(self, sessions: SessionProvider) -> None:
         self._sessions = sessions
+
+    @staticmethod
+    async def _increment_generation(session: AsyncSession, user_id: uuid.UUID) -> None:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(memory_generation=User.memory_generation + 1)
+        )
 
     async def count_active(self, user_id: uuid.UUID) -> int:
         """Count active rows inside exactly one user's forced-RLS context."""
@@ -325,6 +338,7 @@ class MemoryRepository:
             )
             session.add(memory)
             await session.flush()
+            await self._increment_generation(session, user_id)
             # Only ``created_at`` is server-generated and actually read back.
             # A bare refresh() would re-select the 768-dimension vector that
             # was just written, plus the generated tsvector nobody reads.
@@ -727,6 +741,8 @@ class MemoryRepository:
                 memory.category = category
             if metadata is not None:
                 memory.metadata_ = metadata
+            if any(value is not None for value in (importance, category, metadata)):
+                await self._increment_generation(session, user_id)
             await session.flush()
             return memory
 
@@ -795,6 +811,7 @@ class MemoryRepository:
             original.deleted_at = func.now()
             await session.flush()
             original.superseded_by = replacement.id
+            await self._increment_generation(session, user_id)
             await session.flush()
             await session.refresh(replacement, attribute_names=["created_at"])
             return replacement
@@ -812,6 +829,8 @@ class MemoryRepository:
                 .values(deleted_at=func.now())
             )
             result = await session.execute(stmt)
+            if result.rowcount == 1:
+                await self._increment_generation(session, user_id)
             return result.rowcount == 1
 
     async def merge_memories(
@@ -892,6 +911,7 @@ class MemoryRepository:
                 .where(Memory.user_id == user_id, Memory.id.in_(unique_ids))
                 .values(superseded_by=replacement.id)
             )
+            await self._increment_generation(session, user_id)
             await session.refresh(replacement, attribute_names=["created_at"])
             return replacement, [row.id for row in rows]
 
@@ -916,6 +936,7 @@ class MemoryRepository:
             )
             if result.rowcount != 1:
                 return None
+            await self._increment_generation(session, user_id)
             return (
                 await session.execute(
                     select(Memory)
@@ -940,7 +961,7 @@ class MemoryRepository:
         if not memory_ids:
             return
         async with self._sessions.for_user(user_id) as session:
-            await session.execute(
+            result = await session.execute(
                 update(Memory)
                 .where(
                     Memory.user_id == user_id,
@@ -952,6 +973,8 @@ class MemoryRepository:
                     last_recalled_at=func.now(),
                 )
             )
+            if result.rowcount:
+                await self._increment_generation(session, user_id)
 
     async def mark_seen_in_context(
         self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
@@ -1030,7 +1053,178 @@ class MemoryRepository:
                 .where(*source_filters, Memory.content_hash.not_in(target_hashes))
                 .values(project=to_project)
             )
+            if moved.rowcount:
+                await self._increment_generation(session, user_id)
             return int(moved.rowcount or 0), conflicts
+
+    # ------------------------------------------------------------------
+    # materialized profiles
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _profile_key(project: str | None) -> str:
+        """Empty string is the user-global profile key in storage."""
+        return project or ""
+
+    async def get_profile(
+        self, user_id: uuid.UUID, *, project: str | None = None
+    ) -> MemoryProfile | None:
+        """Return the materialized profile for a key, or None if missing."""
+        key = self._profile_key(project)
+        async with self._sessions.for_user(user_id) as session:
+            return (
+                await session.execute(
+                    select(MemoryProfile).where(
+                        MemoryProfile.user_id == user_id,
+                        MemoryProfile.project == key,
+                    )
+                )
+            ).scalar_one_or_none()
+
+    async def get_memory_generation(self, user_id: uuid.UUID) -> int:
+        async with self._sessions.for_user(user_id) as session:
+            value = (
+                await session.execute(
+                    select(User.memory_generation).where(User.id == user_id)
+                )
+            ).scalar_one()
+            return int(value)
+
+    async def list_profile_projects(self, user_id: uuid.UUID) -> Sequence[str]:
+        """Return existing non-global profile keys for eager global rebuilds."""
+        async with self._sessions.for_user(user_id) as session:
+            rows = await session.execute(
+                select(MemoryProfile.project)
+                .where(MemoryProfile.user_id == user_id, MemoryProfile.project != "")
+                .order_by(MemoryProfile.project)
+            )
+            return rows.scalars().all()
+
+    async def upsert_profile(
+        self,
+        user_id: uuid.UUID,
+        *,
+        project: str | None,
+        static_items: list[dict[str, Any]],
+        dynamic_items: list[dict[str, Any]],
+        source_memory_ids: Sequence[uuid.UUID],
+        content_hash: str,
+        expected_generation: int,
+    ) -> MemoryProfile:
+        """Insert or replace only if the source generation is still current."""
+        key = self._profile_key(project)
+        ids = list(source_memory_ids)
+        async with self._sessions.for_user(user_id) as session:
+            current = (
+                await session.execute(
+                    select(User.memory_generation)
+                    .where(User.id == user_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if int(current) != expected_generation:
+                raise ProfileGenerationConflict
+            stmt = (
+                pg_insert(MemoryProfile)
+                .values(
+                    user_id=user_id,
+                    project=key,
+                    static_items=static_items,
+                    dynamic_items=dynamic_items,
+                    source_memory_ids=ids,
+                    content_hash=content_hash,
+                    generation=expected_generation,
+                    built_at=func.now(),
+                )
+                .on_conflict_do_update(
+                    index_elements=[MemoryProfile.user_id, MemoryProfile.project],
+                    set_={
+                        "static_items": static_items,
+                        "dynamic_items": dynamic_items,
+                        "source_memory_ids": ids,
+                        "content_hash": content_hash,
+                        "generation": expected_generation,
+                        "built_at": func.now(),
+                    },
+                )
+                .returning(MemoryProfile)
+            )
+            row = (await session.execute(stmt)).scalar_one()
+            await session.refresh(row, attribute_names=["built_at"])
+            return row
+
+    async def list_active_for_profile(
+        self,
+        user_id: uuid.UUID,
+        *,
+        visibility: MemoryVisibility,
+        static_limit: int,
+        dynamic_limit: int,
+        dynamic_since: datetime,
+        static_min_importance: int = 8,
+    ) -> Sequence[Memory]:
+        """Fetch bounded static and recent-dynamic candidates in their own orders."""
+        async with self._sessions.for_user(user_id) as session:
+            filters = self._filters(user_id, visibility=visibility, category=None)
+            static_stmt = (
+                select(Memory)
+                .options(*_light())
+                .where(
+                    *filters,
+                    (Memory.category.in_(("preference", "constraint")))
+                    | (Memory.importance >= static_min_importance),
+                )
+                .order_by(
+                    Memory.importance.desc(),
+                    func.coalesce(Memory.reconfirmed_at, Memory.created_at).desc(),
+                    Memory.id,
+                )
+                .limit(static_limit)
+            )
+            dynamic_stmt = (
+                select(Memory)
+                .options(*_light())
+                .where(
+                    *filters,
+                    Memory.last_recalled_at.is_not(None),
+                    Memory.last_recalled_at >= dynamic_since,
+                )
+                .order_by(Memory.last_recalled_at.desc(), Memory.created_at.desc(), Memory.id)
+                # Up to ``static_limit`` recent rows may also win the static
+                # slice. Fetch that bounded overlap so selection can still fill
+                # dynamic from lower-ranked recent rows.
+                .limit(dynamic_limit + static_limit)
+            )
+            static = (await session.execute(static_stmt)).scalars().all()
+            dynamic = (await session.execute(dynamic_stmt)).scalars().all()
+            unique: dict[uuid.UUID, Memory] = {}
+            for memory in (*static, *dynamic):
+                unique.setdefault(memory.id, memory)
+            return list(unique.values())
+
+    def _visibility_filters(
+        self,
+        user_id: uuid.UUID,
+        *,
+        visibility: MemoryVisibility,
+        active_only: bool,
+    ) -> list[Any]:
+        filters: list[Any] = [Memory.user_id == user_id]
+        if active_only:
+            filters.append(Memory.deleted_at.is_(None))
+        if visibility.mode == "global":
+            filters.append(Memory.scope == "global")
+        elif visibility.mode == "project":
+            filters.append(Memory.scope == "project")
+            filters.append(Memory.project == visibility.project)
+        elif visibility.mode == "global_and_project":
+            filters.append(
+                or_(
+                    Memory.scope == "global",
+                    (Memory.scope == "project") & (Memory.project == visibility.project),
+                )
+            )
+        return filters
 
     def _filters(
         self,
@@ -1040,18 +1234,9 @@ class MemoryRepository:
         category: str | None,
     ) -> list[Any]:
         """Translate domain visibility into PostgreSQL adapter expressions."""
-        filters: list[Any] = [Memory.user_id == user_id, Memory.deleted_at.is_(None)]
-        if visibility.mode == "global":
-            filters.append(Memory.scope == "global")
-        elif visibility.mode == "project":
-            filters.extend(
-                (Memory.scope == "project", Memory.project == visibility.project)
-            )
-        elif visibility.mode == "global_and_project":
-            filters.append(
-                (Memory.scope == "global")
-                | ((Memory.scope == "project") & (Memory.project == visibility.project))
-            )
+        filters = self._visibility_filters(
+            user_id, visibility=visibility, active_only=True
+        )
         if category is not None:
             filters.append(Memory.category == category)
         return filters

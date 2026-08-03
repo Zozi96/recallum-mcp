@@ -95,8 +95,9 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         app.state.container = resolved_container
         app.state.mcp_server = mcp_server
         await validate_no_user_inputs(mcp_server)
-        # Bearer auth only guards on_call_tool, so any other surface would be
-        # unauthenticated. Fail closed at startup rather than in production.
+        # Only the profile resource (and its project template) may be exposed;
+        # Bearer auth covers tool calls and resource list/read. Fail closed at
+        # startup rather than in production.
         await validate_only_tools_are_exposed(mcp_server)
         telemetry = resolved_container.telemetry_buffer()
         await telemetry.start()

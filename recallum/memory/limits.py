@@ -57,6 +57,22 @@ class MemoryLimits(BaseModel):
     # skipping long items and back-filling with shorter, less important ones.
     context_truncate_floor: int = Field(default=200, gt=0)
 
+    # Materialized profile selection (static = always-on, dynamic = recent).
+    # Static prefers preference/constraint; other categories need high
+    # importance. Caps keep the always-on layer small so context remainder
+    # stays usable for task/project snapshot.
+    profile_static_min_importance: int = Field(default=8, ge=0, le=10)
+    profile_static_max_items: int = Field(default=12, gt=0, le=50)
+    profile_static_max_chars: int = Field(default=2000, gt=0)
+    profile_dynamic_window_days: int = Field(default=14, gt=0)
+    profile_dynamic_max_items: int = Field(default=8, gt=0, le=50)
+    profile_dynamic_max_chars: int = Field(default=1500, gt=0)
+    # Reserved share of a context call for the assembled profile block.
+    # Defaults sit under ~40% of context_default_max_chars so focus/importance
+    # still receive budget.
+    profile_context_max_items: int = Field(default=16, gt=0, le=50)
+    profile_context_max_chars: int = Field(default=2400, gt=0)
+
     # Upper bound on ``remember_batch`` items. Small on purpose: a capture scan
     # should be a few high-signal atoms, not a session recap.
     batch_max_items: int = Field(default=10, gt=0, le=20)

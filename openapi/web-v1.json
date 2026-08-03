@@ -989,6 +989,137 @@
         "title": "MemoryVolume",
         "type": "object"
       },
+      "ProfileBlock": {
+        "description": "Materialized profile as returned by ``context`` and profile reads.\n\nWhen ``available`` is false the slices are empty and rebuild failed or was\nskipped; callers fall back to groups alone. ``digest`` is a stable\nintegrity fingerprint of the rendered slices (not a memory content hash).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "built_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Built At"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "dynamic": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileItem"
+            },
+            "title": "Dynamic",
+            "type": "array"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "source_memory_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Source Memory Ids",
+            "type": "array"
+          },
+          "static": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileItem"
+            },
+            "title": "Static",
+            "type": "array"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "ProfileBlock",
+        "type": "object"
+      },
+      "ProfileItem": {
+        "description": "One always-on profile line (verbatim memory snapshot).",
+        "properties": {
+          "category": {
+            "enum": [
+              "preference",
+              "decision",
+              "constraint",
+              "fact"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_truncated": {
+            "default": false,
+            "title": "Content Truncated",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "importance": {
+            "title": "Importance",
+            "type": "integer"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "category",
+          "content",
+          "scope",
+          "importance"
+        ],
+        "title": "ProfileItem",
+        "type": "object"
+      },
       "ReassignProjectRequest": {
         "properties": {
           "from_project": {
@@ -2752,6 +2883,55 @@
           }
         },
         "summary": "Memory Graph",
+        "tags": [
+          "self-service"
+        ]
+      }
+    },
+    "/me/memory-profile": {
+      "get": {
+        "operationId": "memory_profile_me_memory_profile_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileBlock"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Memory Profile",
         "tags": [
           "self-service"
         ]

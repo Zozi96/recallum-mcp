@@ -25,10 +25,17 @@ repositorio sólo como último recurso.
 Cuando la configuración opt-in del digest está presente, el hook de sesión MUST intentar obtener un
 digest compacto del contexto del proyecto directamente del servidor Recallum e inyectarlo como
 contexto adicional; el intento MUST ser fail-open y no exceder el presupuesto de tiempo del hook.
+Cuando la respuesta de contexto incluye un perfil materializado disponible, el digest MUST priorizar
+las líneas del perfil (static antes que dynamic) frente al resto del snapshot dentro del presupuesto
+de caracteres del digest.
 
 #### Scenario: Digest disponible
 - **WHEN** las variables de configuración del digest están definidas y el servidor responde a tiempo
 - **THEN** el hook inyecta el digest compacto junto con la instrucción de usar `recall` para detalle
+
+#### Scenario: Digest con perfil
+- **WHEN** el digest se construye a partir de un `context` que incluye perfil disponible con ítems
+- **THEN** el texto inyectado incluye primero contenido del perfil hasta el presupuesto del digest
 
 #### Scenario: Servidor inaccesible o lento
 - **WHEN** el servidor no responde, responde con error o excede el presupuesto de tiempo
@@ -59,4 +66,3 @@ escribir memorias: el líder consolida la captura al final.
 #### Scenario: Captura centralizada
 - **WHEN** un subagente descubre contexto reutilizable durante su tarea
 - **THEN** la guía vigente indica reportarlo al líder, que decide y ejecuta la captura única
-

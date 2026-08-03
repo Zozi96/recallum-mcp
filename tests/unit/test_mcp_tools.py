@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -15,6 +18,7 @@ from dependency_injector import providers
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from mcp.shared.exceptions import McpError
 
 from recallum.app import create_app
 from recallum.config import Settings
@@ -74,9 +78,38 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _stop_uvicorn(uv_server: uvicorn.Server, thread: threading.Thread) -> None:
+    """Stop the isolated server loop without leaking work into the test loop."""
+    uv_server.should_exit = True
+    thread.join(timeout=5.0)
+    if not thread.is_alive():
+        return
+    uv_server.force_exit = True
+    thread.join(timeout=2.0)
+    if thread.is_alive():
+        raise RuntimeError("uvicorn test server did not stop")
+
+
+def _wait_server_started(uv_server: uvicorn.Server, thread: threading.Thread) -> None:
+    """Wait until uvicorn is accepting connections, or fail fast."""
+    for _ in range(250):  # ~5s
+        if uv_server.started:
+            return
+        if not thread.is_alive():
+            raise RuntimeError("uvicorn exited before start")
+        time.sleep(0.02)
+    raise RuntimeError("uvicorn failed to start within 5s")
+
+
 def mcp_client(base_url: str, token: str | None = None) -> Client:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return Client(StreamableHttpTransport(url=f"{base_url}/mcp/", headers=headers))
+
+
+async def _read_profile_resource(client: Client, uri: str) -> dict[str, Any]:
+    contents = await client.read_resource(uri)
+    assert len(contents) == 1
+    return json.loads(contents[0].text)
 
 
 @pytest.fixture
@@ -92,12 +125,18 @@ async def server() -> ServerInfo:
 
     app = create_app(Settings(), container)
     port = _free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="error",
+        timeout_graceful_shutdown=1,
+    )
     uv_server = uvicorn.Server(config)
-    task = asyncio.create_task(uv_server.serve())
+    thread = threading.Thread(target=uv_server.run, daemon=True)
+    thread.start()
     try:
-        while not uv_server.started:
-            await asyncio.sleep(0.02)
+        await asyncio.to_thread(_wait_server_started, uv_server, thread)
         yield ServerInfo(
             url=f"http://127.0.0.1:{port}",
             alice_token=alice_token,
@@ -107,8 +146,7 @@ async def server() -> ServerInfo:
             buffer=container.telemetry_buffer(),
         )
     finally:
-        uv_server.should_exit = True
-        await task
+        await asyncio.to_thread(_stop_uvicorn, uv_server, thread)
 
 
 class _ExplodingMemoryService:
@@ -145,12 +183,18 @@ async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
     app = create_app(Settings(), container)
     port = _free_port()
     uv_server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="error",
+            timeout_graceful_shutdown=1,
+        )
     )
-    task = asyncio.create_task(uv_server.serve())
+    thread = threading.Thread(target=uv_server.run, daemon=True)
+    thread.start()
     try:
-        while not uv_server.started:
-            await asyncio.sleep(0.02)
+        await asyncio.to_thread(_wait_server_started, uv_server, thread)
         yield ServerInfo(
             url=f"http://127.0.0.1:{port}",
             alice_token=token,
@@ -160,8 +204,7 @@ async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
             buffer=container.telemetry_buffer(),
         )
     finally:
-        uv_server.should_exit = True
-        await task
+        await asyncio.to_thread(_stop_uvicorn, uv_server, thread)
 
 
 async def test_forget_now_translates_validation_errors():
@@ -227,6 +270,8 @@ async def test_missing_token_is_rejected(server: ServerInfo):
     async with mcp_client(server.url) as client:
         with pytest.raises(ToolError):
             await client.call_tool("remember", {"content": "x", "category": "fact"})
+        with pytest.raises(McpError, match="authentication required"):
+            await client.list_resources()
     assert server.telemetry.events == []
     assert server.buffer.pending_count == 0
 
@@ -235,6 +280,8 @@ async def test_invalid_token_is_rejected(server: ServerInfo):
     async with mcp_client(server.url, "rcl_not-a-real-key") as client:
         with pytest.raises(ToolError):
             await client.call_tool("list_memories", {})
+        with pytest.raises(McpError, match="invalid or revoked API key"):
+            await client.read_resource("recallum://profile")
     assert server.telemetry.events == []
     assert server.buffer.pending_count == 0
 
@@ -243,8 +290,52 @@ async def test_revoked_token_is_rejected(server: ServerInfo):
     async with mcp_client(server.url, server.alice_revoked_token) as client:
         with pytest.raises(ToolError):
             await client.call_tool("list_memories", {})
+        with pytest.raises(McpError, match="invalid or revoked API key"):
+            await client.list_resource_templates()
     assert server.telemetry.events == []
     assert server.buffer.pending_count == 0
+
+
+async def test_profile_resource_is_registered_and_context_includes_profile(server: ServerInfo):
+    """Authenticated list/read work and project profiles include global memory."""
+    async with mcp_client(server.url, server.alice_token) as client:
+        resources = await client.list_resources()
+        assert any(str(r.uri) == "recallum://profile" for r in resources)
+        templates = await client.list_resource_templates()
+        assert any(
+            str(t.uriTemplate) == "recallum://profile/{project}" for t in templates
+        )
+        await client.call_tool(
+            "remember",
+            {"content": "prefer English commit messages", "category": "preference"},
+        )
+        await client.call_tool(
+            "remember",
+            {
+                "content": "alpha deploys require a canary",
+                "category": "constraint",
+                "project": "alpha",
+            },
+        )
+        global_profile = await _read_profile_resource(client, "recallum://profile")
+        project_profile = await _read_profile_resource(client, "recallum://profile/alpha")
+        assert global_profile["project"] is None
+        assert project_profile["project"] == "alpha"
+        assert [item["content"] for item in global_profile["static"]] == [
+            "prefer English commit messages"
+        ]
+        assert {item["content"] for item in project_profile["static"]} == {
+            "prefer English commit messages",
+            "alpha deploys require a canary",
+        }
+        context = await client.call_tool("context", {})
+        profile = context.structured_content.get("profile") or {}
+        assert profile.get("available") is True
+        static = profile.get("static") or []
+        assert any(
+            "prefer English commit messages" in (item.get("content") or "")
+            for item in static
+        )
 
 
 async def test_valid_token_full_flow(server: ServerInfo):
@@ -266,8 +357,12 @@ async def test_valid_token_full_flow(server: ServerInfo):
         assert any(item["id"] == memory_id for item in recall.structured_content["results"])
 
         context = await client.call_tool("context", {"project": "recallum"})
-        flat = [item for group in context.structured_content["groups"] for item in group["items"]]
-        assert any(item["id"] == memory_id for item in flat)
+        payload = context.structured_content
+        flat = [item for group in payload["groups"] for item in group["items"]]
+        profile = payload.get("profile") or {}
+        profile_items = list(profile.get("static") or []) + list(profile.get("dynamic") or [])
+        assert any(item["id"] == memory_id for item in flat + profile_items)
+        assert "profile" in payload
 
         listing = await client.call_tool("list_memories", {"project": "recallum"})
         assert listing.structured_content["total"] == 1
@@ -277,7 +372,10 @@ async def test_valid_token_full_flow(server: ServerInfo):
 
         after = await client.call_tool("list_memories", {})
         assert after.structured_content["total"] == 0
-    while await server.buffer.flush():
+    # Bound the flush: empty pending is success, but never spin forever if
+    # insert_batch keeps requeueing under load from leftover tasks.
+    for _ in range(32):
+        await server.buffer.flush()
         if server.buffer.pending_count == 0:
             break
     events = server.telemetry.events
@@ -298,11 +396,14 @@ async def test_valid_token_full_flow(server: ServerInfo):
 async def test_no_cross_user_access(server: ServerInfo):
     async with mcp_client(server.url, server.alice_token) as alice:
         remembered = await alice.call_tool(
-            "remember", {"content": "secreto de alice", "category": "fact"}
+            "remember",
+            {"content": "secreto de alice", "category": "fact", "importance": 8},
         )
         memory_id = remembered.structured_content["memory"]["id"]
 
     async with mcp_client(server.url, server.bob_token) as bob:
+        bob_profile = await _read_profile_resource(bob, "recallum://profile")
+        assert bob_profile["source_memory_ids"] == []
         listing = await bob.call_tool("list_memories", {})
         assert listing.structured_content["total"] == 0
 
@@ -317,5 +418,7 @@ async def test_no_cross_user_access(server: ServerInfo):
 
     # Alice's memory survived Bob's forget attempt.
     async with mcp_client(server.url, server.alice_token) as alice:
+        alice_profile = await _read_profile_resource(alice, "recallum://profile")
+        assert memory_id in alice_profile["source_memory_ids"]
         listing = await alice.call_tool("list_memories", {})
         assert listing.structured_content["total"] == 1

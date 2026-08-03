@@ -84,6 +84,18 @@ def test_memories_are_session_scoped_and_responses_are_filtered():
         assert listed.json()["total"] == 1
         assert listed.json()["limit"] == Settings().limits.list_max_limit
 
+        profile = client.get(
+            "/api/v1/me/memory-profile",
+            params={"project": "ui"},
+        )
+        assert profile.status_code == 200
+        profile_body = profile.json()
+        assert profile_body["available"] is True
+        assert profile_body["project"] == "ui"
+        assert [item["id"] for item in profile_body["static"]] == [memory_id]
+        assert "embedding" not in profile.text
+        assert "content_hash" not in profile.text
+
         corrected = client.patch(
             f"/api/v1/me/memories/{memory_id}",
             json={
@@ -105,6 +117,13 @@ def test_memories_are_session_scoped_and_responses_are_filtered():
         assert client.delete(f"/api/v1/me/memories/{memory_id}").status_code == 404
         assert client.get("/api/v1/me/memories").json()["total"] == 0
         assert client.get("/api/v1/me/memory-graph").json()["total"] == 0
+        assert (
+            client.get(
+                "/api/v1/me/memory-profile",
+                params={"project": "ui"},
+            ).json()["source_memory_ids"]
+            == []
+        )
 
 
 def test_supersession_history_duplicate_and_statistics():
@@ -228,6 +247,7 @@ def test_router_requires_session_and_empty_statistics_are_zeroed():
     with TestClient(app, base_url="https://recallum.test") as client:
         assert client.get("/api/v1/me/memories").status_code == 401
         assert client.get("/api/v1/me/memory-graph").status_code == 401
+        assert client.get("/api/v1/me/memory-profile").status_code == 401
         _login(client, user.email)
         assert client.get("/api/v1/me/memory-graph").json() == {
             "nodes": [],
@@ -378,6 +398,7 @@ def test_versioned_openapi_matches_web_app_only():
     assert OUTPUT.read_text() == expected
     schema = json.loads(expected)
     assert "/me/memories" in schema["paths"]
+    assert "/me/memory-profile" in schema["paths"]
     assert "/healthz" not in schema["paths"]
     assert "/readyz" not in schema["paths"]
     assert "/mcp" not in schema["paths"]

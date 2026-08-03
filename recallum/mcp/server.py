@@ -1,13 +1,15 @@
-"""FastMCP server exposing exactly nine tools, none accepting a user id.
+"""FastMCP server exposing nine tools and a read-only profile resource.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
-``BearerAuthMiddleware``); tools fail closed when the identity is missing.
+``BearerAuthMiddleware``); tools and resources fail closed when the identity is
+missing. No tool accepts a user id.
 """
 
 from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import unquote
 
 from fastmcp import FastMCP
 
@@ -28,6 +30,18 @@ from recallum.memory.schemas import (
 )
 from recallum.telemetry.middleware import UsageTelemetryMiddleware
 
+# Only these resource URIs may be registered (auth covers list/read).
+ALLOWED_PROFILE_RESOURCE_URIS = frozenset(
+    {
+        "recallum://profile",
+    }
+)
+ALLOWED_PROFILE_RESOURCE_TEMPLATES = frozenset(
+    {
+        "recallum://profile/{project}",
+    }
+)
+
 if TYPE_CHECKING:
     from recallum.container import Container
 
@@ -40,11 +54,14 @@ save a future agent rediscovery — never full conversations, logs, or guesses.
 Ask before storing secrets, credentials, personal data, sensitive business
 information, or ambiguous content; never infer consent from a prompt or file.
 Use recall to search, context to bootstrap a session (pass the task as
-`focus` to bias the snapshot toward it), get_memory to fetch one memory by
-id (full text and, on request, what it replaced), list_memories to browse,
-update to correct or replace, forget to remove, and remember_batch for the
-end-of-session capture scan. When context reports omitted > 0, the budget
-left memories out: recall with a focused query reaches them.
+`focus` to bias the snapshot toward it; the response always includes a
+`profile` always-on block that focus cannot evict), get_memory to fetch one
+memory by id (full text and, on request, what it replaced), list_memories to
+browse, update to correct or replace, forget to remove, and remember_batch
+for the end-of-session capture scan. When context reports omitted > 0, the
+budget left memories out: recall with a focused query reaches them. The
+read-only resource recallum://profile (and recallum://profile/{project})
+exposes the materialized profile without a tool call.
 
 Write every memory in English and phrase every recall query in English,
 whatever language the session speaks: dedup is an exact hash of the stored
@@ -173,16 +190,16 @@ def build_mcp_server(container: Container) -> FastMCP:
         max_items: int | None = None,
         max_chars: int | None = None,
     ) -> ContextResult:
-        """Get compact session context: key global memories plus project ones.
+        """Get compact session context: always-on profile plus project snapshot.
 
-        Call this when starting or resuming work on a project, and pass the
-        task at hand as `focus` to also pull in memories relevant to it (the
-        importance-ranked snapshot is never displaced, only extended). Results
-        are grouped by category and truncated to the requested budget; when
-        `omitted` > 0 there are more memories than the budget allowed — use
-        recall with a focused query to reach them. Items marked
-        `content_truncated` were clipped; fetch the full text with
-        get_memory.
+        Call this when starting or resuming work on a project. The response
+        includes a `profile` block (static/dynamic always-on memories) that
+        focus and importance ranking cannot evict, then category groups for
+        the remaining budget. Pass `focus` to also pull task-relevant
+        memories into those groups. When `omitted` > 0, use recall for the
+        rest. Items marked `content_truncated` were clipped; fetch the full
+        text with get_memory. Profile-only reads can use the
+        recallum://profile resource instead.
         """
         return await service().context(
             require_identity().user_id,
@@ -191,6 +208,30 @@ def build_mcp_server(container: Container) -> FastMCP:
             max_items=max_items,
             max_chars=max_chars,
         )
+
+    @mcp.resource(
+        "recallum://profile",
+        name="memory_profile",
+        description="Materialized always-on memory profile for the authenticated user (global).",
+        mime_type="application/json",
+    )
+    @translates_domain_errors
+    async def memory_profile_global() -> str:
+        block = await service().get_profile(require_identity().user_id, project=None)
+        return block.model_dump_json()
+
+    @mcp.resource(
+        "recallum://profile/{project}",
+        name="memory_profile_project",
+        description="Materialized memory profile for one project key (owner only).",
+        mime_type="application/json",
+    )
+    @translates_domain_errors
+    async def memory_profile_project(project: str) -> str:
+        block = await service().get_profile(
+            require_identity().user_id, project=unquote(project)
+        )
+        return block.model_dump_json()
 
     @mcp.tool
     @translates_domain_errors
@@ -335,23 +376,37 @@ async def tool_names(mcp: FastMCP) -> list[str]:
 
 
 async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
-    """Fail fast if the server exposes resources or prompts.
+    """Fail fast if the server exposes unexpected resources or any prompts.
 
-    ``BearerAuthMiddleware`` only guards ``on_call_tool``, so any resource or
-    prompt would be reachable without authentication.
+    Profile resources are allowed; BearerAuthMiddleware authenticates list/read.
+    Uses the local registry (``_list_*``) so startup validation does not need
+    a bearer token. Prompts remain forbidden until designed.
     """
-    resources = await mcp.list_resources()
-    if resources:
-        names = [resource.name for resource in resources]
-        raise RuntimeError(f"unauthenticated resources exposed: {names}")
-    templates = await mcp.list_resource_templates()
-    if templates:
-        names = [template.name for template in templates]
-        raise RuntimeError(f"unauthenticated resource templates exposed: {names}")
-    prompts = await mcp.list_prompts()
+    resources = await mcp._list_resources()
+    resource_uris = {str(resource.uri) for resource in resources}
+    unexpected = resource_uris - ALLOWED_PROFILE_RESOURCE_URIS
+    if unexpected:
+        raise RuntimeError(f"unexpected resources exposed: {sorted(unexpected)}")
+    templates = await mcp._list_resource_templates()
+    template_uris = {
+        str(getattr(template, "uri_template", "") or getattr(template, "uriTemplate", ""))
+        for template in templates
+    }
+    unexpected_templates = {
+        uri for uri in template_uris if uri and uri not in ALLOWED_PROFILE_RESOURCE_TEMPLATES
+    }
+    if unexpected_templates:
+        raise RuntimeError(
+            f"unexpected resource templates exposed: {sorted(unexpected_templates)}"
+        )
+    prompts = (
+        await mcp._list_prompts()
+        if hasattr(mcp, "_list_prompts")
+        else await mcp.list_prompts()
+    )
     if prompts:
         names = [prompt.name for prompt in prompts]
-        raise RuntimeError(f"unauthenticated prompts exposed: {names}")
+        raise RuntimeError(f"prompts exposed: {names}")
 
 
 __all__: list[Any] = [

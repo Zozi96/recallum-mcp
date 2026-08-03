@@ -1,34 +1,4 @@
-# Agent Memory Retrieval
-
-## Purpose
-
-Definir la recuperación híbrida, filtrada y compacta de memorias privadas para agentes.
-## Requirements
-### Requirement: Búsqueda híbrida de memorias
-El sistema MUST recuperar memorias mediante señales vectoriales y textuales, aplicando aislamiento de usuario antes de ordenar los resultados.
-
-#### Scenario: Recuperar por significado
-- **WHEN** un usuario llama `recall` con una consulta semánticamente relacionada pero con palabras diferentes
-- **THEN** el sistema puede devolver sus memorias vectorialmente relevantes dentro del límite solicitado
-
-#### Scenario: Recuperar término exacto
-- **WHEN** una consulta contiene un término técnico exacto presente en una memoria
-- **THEN** la señal textual participa en el orden de relevancia del resultado
-
-#### Scenario: Consulta sin resultados
-- **WHEN** ninguna memoria activa del usuario satisface la consulta y los filtros
-- **THEN** el sistema devuelve una lista vacía sin incluir memorias de otros usuarios
-
-### Requirement: Filtros de recuperación
-El sistema MUST permitir filtrar recuperación por ámbito global, proyecto y categoría sin aceptar un identificador de usuario proporcionado por el cliente.
-
-#### Scenario: Recuperar contexto de proyecto
-- **WHEN** un usuario consulta un proyecto concreto
-- **THEN** el sistema considera sus memorias globales y las memorias de ese proyecto, excluyendo las de proyectos distintos
-
-#### Scenario: Recuperar sólo decisiones
-- **WHEN** un usuario filtra `recall` por la categoría `decision`
-- **THEN** el sistema devuelve únicamente decisiones activas del ámbito solicitado
+## MODIFIED Requirements
 
 ### Requirement: Contexto compacto de sesión
 El sistema MUST generar contexto compacto con memorias globales y del proyecto respetando límites de
@@ -70,12 +40,14 @@ cuando el perfil está disponible).
 - **THEN** la respuesta informa el total disponible y cuántas quedaron omitidas, además del indicador de truncado
 
 #### Scenario: Ítem largo truncado con marca
-- **WHEN** un ítem no cabe completo en el presupuesto de caracteres restante pero queda espacio razonable
+- **WHEN** un ítem del snapshot categorizado no cabe completo en el presupuesto de caracteres restante pero queda espacio razonable
 - **THEN** el sistema incluye el ítem recortado marcándolo como truncado, en lugar de omitirlo y rellenar con ítems menos importantes
 
 #### Scenario: Perfil no disponible
 - **WHEN** el perfil materializado no puede obtenerse ni reconstruirse
 - **THEN** `context` devuelve el snapshot categorizado como hasta ahora e indica perfil no disponible sin fallar la llamada
+
+## ADDED Requirements
 
 ### Requirement: Uso al servir el perfil en contexto
 Cuando un ítem del perfil materializado se incluye en una respuesta de `context`, el sistema MUST registrarlo como uso de la memoria fuente con las mismas reglas de no-fallo que el registro de uso del snapshot categorizado.
@@ -83,31 +55,3 @@ Cuando un ítem del perfil materializado se incluye en una respuesta de `context
 #### Scenario: Perfil cuenta como uso
 - **WHEN** una memoria fuente aparece en el bloque de perfil de `context`
 - **THEN** su contador de uso incrementa y su fecha de último uso se actualiza, o el fallo de registro no impide devolver el contexto
-
-### Requirement: Degradación textual
-El sistema MUST mantener búsquedas textuales disponibles cuando PostgreSQL funciona pero Ollama no puede generar el embedding de una consulta.
-
-#### Scenario: Ollama no disponible durante recall
-- **WHEN** el servicio de embeddings falla al procesar una consulta
-- **THEN** `recall` devuelve resultados textuales marcando el modo degradado en la respuesta
-
-### Requirement: Registro de uso al servir memorias
-El sistema MUST registrar por memoria cuántas veces y cuándo fue servida en resultados de `recall` o
-`context`, MUST exponer esos campos en las respuestas, y el registro MUST NOT hacer fallar la
-lectura que lo origina.
-
-#### Scenario: Memoria servida en recall
-- **WHEN** una memoria aparece en el resultado final de `recall`
-- **THEN** su contador de uso incrementa y su fecha de último uso se actualiza
-
-#### Scenario: Memoria servida en contexto
-- **WHEN** una memoria aparece en un snapshot de `context`
-- **THEN** su contador de uso incrementa y su fecha de último uso se actualiza
-
-#### Scenario: Registro de uso falla
-- **WHEN** el registro de uso no puede completarse
-- **THEN** el resultado de la lectura se devuelve igualmente sin error
-
-#### Scenario: Enumeración no cuenta como uso
-- **WHEN** una memoria aparece únicamente en `list_memories`
-- **THEN** su contador de uso no cambia

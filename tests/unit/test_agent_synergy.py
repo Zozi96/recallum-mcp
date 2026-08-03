@@ -28,7 +28,11 @@ def make_service(
 ) -> tuple[MemoryService, FakeMemoryRepository, object]:
     repo = repo or FakeMemoryRepository()
     embedder = embedder or FakeEmbeddingClient(dimensions=8)
-    return MemoryService(repository=repo, embeddings=embedder, limits=limits), repo, embedder
+    # Focus/usage tests pin group order by importance; keep high-importance
+    # facts out of the always-on profile so they still compete in groups.
+    # importance 9 facts must stay in category groups for these tests.
+    resolved = limits or MemoryLimits(profile_static_min_importance=10)
+    return MemoryService(repository=repo, embeddings=embedder, limits=resolved), repo, embedder
 
 
 # ---------------------------------------------------------------------------

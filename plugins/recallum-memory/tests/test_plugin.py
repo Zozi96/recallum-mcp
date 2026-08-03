@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import re
+import runpy
 import subprocess
 import tempfile
 import threading
@@ -479,10 +480,15 @@ class DigestTests(unittest.TestCase):
         _StubMCPHandler.fail_with = None
         _StubMCPHandler.sse_tools_call = False
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StubMCPHandler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(self.server.shutdown)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._close_server)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/mcp"
+
+    def _close_server(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
 
     def _digest_env(self) -> dict[str, str]:
         return {
@@ -517,6 +523,35 @@ class DigestTests(unittest.TestCase):
         self.assertIn("+3 more stored memories", context)
         self.assertIn("already loaded", context)
         self.assertNotIn("before planning, call", context)
+
+    def test_digest_prefers_profile_static_before_groups(self) -> None:
+        _StubMCPHandler.context_result = {
+            "project": "local:abc",
+            "profile": {
+                "available": True,
+                "static": [
+                    {
+                        "category": "preference",
+                        "content": "prefer conventional commits",
+                    }
+                ],
+                "dynamic": [],
+            },
+            "groups": [
+                {
+                    "category": "fact",
+                    "items": [{"category": "fact", "content": "uses FastAPI"}],
+                }
+            ],
+            "total_items": 2,
+            "total_available": 2,
+            "omitted": 0,
+            "truncated": False,
+        }
+        context = self._session_context()
+        pref = context.index("prefer conventional commits")
+        fact = context.index("uses FastAPI")
+        self.assertLess(pref, fact)
         # Every request carried the bearer key; the follow-ups carried the
         # session id the stub handed out.
         self.assertTrue(
@@ -532,6 +567,22 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(
             _StubMCPHandler.requests[-1]["headers"].get("Mcp-Session-Id"), "stub-session"
         )
+
+    def test_digest_render_exercises_character_cap(self) -> None:
+        hook = runpy.run_path(str(HOOK))
+        payload = {
+            "profile": {
+                "available": True,
+                "static": [{"category": "preference", "content": "S" * 1200}],
+                "dynamic": [{"category": "fact", "content": "D" * 1200}],
+            },
+            "groups": [],
+            "omitted": 0,
+        }
+        digest = hook["_render_digest"](payload)
+        assert digest is not None
+        self.assertEqual(len(digest), hook["DIGEST_RENDER_CAP"])
+        self.assertTrue(digest.startswith("- [preference] S"))
 
     def test_digest_parses_sse_framed_responses(self) -> None:
         _StubMCPHandler.sse_tools_call = True

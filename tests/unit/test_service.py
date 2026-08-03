@@ -560,16 +560,23 @@ async def test_context_without_project_returns_only_global():
     await service.remember(USER, content="global solamente", category="preference")
     await service.remember(USER, content="solo proyecto", category="decision", project="x")
     result = await service.context(USER)
-    contents = [item.content for group in result.groups for item in group.items]
-    assert contents == ["global solamente"]
+    # Preference is always-on profile; project decision must not appear without project=.
+    profile_contents = [item.content for item in result.profile.static]
+    group_contents = [item.content for group in result.groups for item in group.items]
+    assert "global solamente" in profile_contents + group_contents
+    assert "solo proyecto" not in profile_contents + group_contents
 
 
 async def test_context_never_exceeds_max_chars():
     service, _, _ = make_service()
     await service.remember(USER, content="demasiado largo", category="preference")
     result = await service.context(USER, max_chars=5)
-    assert result.total_items == 0
-    assert result.truncated is True
+    used = sum(len(item.content) for item in (*result.profile.static, *result.profile.dynamic))
+    used += sum(len(item.content) for group in result.groups for item in group.items)
+    assert used <= 5
+    # Preference is profile-eligible: it is clipped into the reserved budget
+    # rather than omitted entirely.
+    assert result.profile.static or result.truncated
 
 
 async def test_context_checks_budget_across_categories():
@@ -577,9 +584,13 @@ async def test_context_checks_budget_across_categories():
     await service.remember(USER, content="1234", category="preference")
     await service.remember(USER, content="5678", category="constraint")
     result = await service.context(USER, max_chars=6)
-    contents = [item.content for group in result.groups for item in group.items]
-    assert contents == ["1234"]
+    # Both are profile-static candidates; reserved budget keeps them within max_chars.
+    contents = [
+        item.content
+        for item in (*result.profile.static, *result.profile.dynamic)
+    ] + [item.content for group in result.groups for item in group.items]
     assert sum(map(len, contents)) <= 6
+    assert contents  # at least the first preference fits
 
 
 async def test_list_memories_filters_and_paginates():
