@@ -26,7 +26,16 @@ _SCENARIO_FIELDS = {
     "application_criteria_keys",
     "expected_checkpoint",
 }
-_RUN_FIELDS = {"run_id", "policy", "scenario", "events"}
+_RUN_FIELDS = {
+    "run_id",
+    "policy",
+    "scenario",
+    "events",
+    "source",
+    "client",
+    "client_version",
+    "status",
+}
 _EVENT_FIELDS = {
     "phase",
     "tool",
@@ -36,6 +45,7 @@ _EVENT_FIELDS = {
 }
 _FORBIDDEN_FIELDS = {"prompt", "content", "reasoning", "credentials", "credential"}
 _RECALL_TOOLS = {"recall"}
+_ALLOWED_TOOLS = {"context", "recall", "checks", "other"}
 MAX_SCENARIOS = 100
 MAX_RUNS = 1000
 MAX_EVENTS = 100
@@ -83,6 +93,10 @@ class WorkflowRun:
     scenario: str
     events: tuple[TraceEvent, ...]
     run_id: str | None = None
+    source: str = "fixture"
+    client: str | None = None
+    client_version: str | None = None
+    status: str = "complete"
 
 
 @dataclass(slots=True)
@@ -108,6 +122,12 @@ class PolicyReport:
     incomplete_runs: list[str] = field(default_factory=list)
     expected_scenario_count: int = 0
     expected_critical_count: int = 0
+    source: str = "fixture"
+    client: str | None = None
+    client_version: str | None = None
+    repetitions: int = 1
+    completed_runs: int = 0
+    _replicate_scores: list[ScenarioScore] = field(default_factory=list, repr=False)
 
     @property
     def scenario_count(self) -> int:
@@ -115,45 +135,66 @@ class PolicyReport:
 
     @property
     def critical_retrieval_rate(self) -> float:
+        scores = self._replicate_scores or self.scenarios
+        denominator = self.expected_critical_count * max(self.repetitions, 1)
         return (
-            sum(s.critical_retrieved for s in self.scenarios if s.critical_applicable)
-            / self.expected_critical_count
-            if self.expected_critical_count
+            sum(s.critical_retrieved for s in scores if s.critical_applicable) / denominator
+            if denominator
             else 0.0
         )
 
     @property
     def application_criteria_rate(self) -> float:
+        scores = self._replicate_scores or self.scenarios
+        denominator = self.expected_scenario_count * max(self.repetitions, 1)
         return (
-            sum(s.application_criteria_satisfied for s in self.scenarios)
-            / self.expected_scenario_count
-            if self.expected_scenario_count
+            sum(s.application_criteria_satisfied for s in scores) / denominator
+            if denominator
             else 0.0
         )
 
     @property
     def unnecessary_calls(self) -> int:
-        return sum(s.unnecessary_checkpoint_calls for s in self.scenarios)
+        return sum(
+            s.unnecessary_checkpoint_calls for s in (self._replicate_scores or self.scenarios)
+        )
 
     @property
     def duplicate_exposures(self) -> int:
-        return sum(s.duplicate_memory_exposures for s in self.scenarios)
+        return sum(s.duplicate_memory_exposures for s in (self._replicate_scores or self.scenarios))
 
     @property
     def duplicate_served_characters(self) -> int:
-        return sum(s.duplicate_served_characters for s in self.scenarios)
+        return sum(
+            s.duplicate_served_characters for s in (self._replicate_scores or self.scenarios)
+        )
 
     @property
     def total_recall_calls(self) -> int:
-        return sum(s.total_recall_calls for s in self.scenarios)
+        return sum(s.total_recall_calls for s in (self._replicate_scores or self.scenarios))
 
     @property
     def served_characters(self) -> int:
-        return sum(s.served_characters for s in self.scenarios)
+        return sum(s.served_characters for s in (self._replicate_scores or self.scenarios))
+
+    @property
+    def coverage_rate(self) -> float:
+        expected = self.expected_scenario_count * max(self.repetitions, 1)
+        return self.completed_runs / expected if expected else 0.0
+
+    @property
+    def average_recall_calls(self) -> float:
+        count = len(self._replicate_scores or self.scenarios)
+        return self.total_recall_calls / count if count else 0.0
+
+    @property
+    def average_served_characters(self) -> float:
+        count = len(self._replicate_scores or self.scenarios)
+        return self.served_characters / count if count else 0.0
 
     @property
     def duplicate_exposure_rate(self) -> float:
-        exposures = sum(s.memory_exposures for s in self.scenarios)
+        exposures = sum(s.memory_exposures for s in (self._replicate_scores or self.scenarios))
         return self.duplicate_exposures / exposures if exposures else 0.0
 
     @property
@@ -162,7 +203,7 @@ class PolicyReport:
         result.extend(
             f"{self.policy}/{scenario}: incomplete run" for scenario in self.incomplete_runs
         )
-        for score in self.scenarios:
+        for score in self._replicate_scores or self.scenarios:
             result.extend(f"{self.policy}/{score.scenario}: {miss}" for miss in score.misses)
         return result
 
@@ -171,8 +212,21 @@ class PolicyReport:
 class ComparisonReport:
     policies: list[PolicyReport]
 
-    def by_policy(self) -> dict[str, PolicyReport]:
-        return {report.policy: report for report in self.policies}
+    def by_policy(self) -> dict[object, PolicyReport]:
+        grouped: dict[object, PolicyReport] = {}
+        counts = Counter(report.policy for report in self.policies)
+        for report in self.policies:
+            key: object = report.policy
+            if counts[report.policy] > 1:
+                key = (report.source, report.client, report.policy)
+            grouped[key] = report
+        return grouped
+
+    def by_group(self) -> dict[tuple[str, str | None, str], PolicyReport]:
+        return {
+            (report.source, report.client, report.policy): report
+            for report in self.policies
+        }
 
 
 def _object(value: Any, label: str) -> Mapping[str, Any]:
@@ -305,17 +359,33 @@ def validate_runs(
     if len(raw_runs) > MAX_RUNS:
         raise ValueError(f"run dataset exceeds {MAX_RUNS} runs")
     result: list[WorkflowRun] = []
-    seen_pairs: set[tuple[str, str]] = set()
+    seen_pairs: dict[tuple[str, str, str, str], int] = {}
+    pairs_without_run_id: set[tuple[str, str, str, str]] = set()
     seen_ids: set[str] = set()
     for index, raw in enumerate(raw_runs):
         item = _object(raw, f"run[{index}]")
         _fields(item, _RUN_FIELDS, f"run[{index}]")
         policy = _string(item.get("policy"), f"run[{index}].policy")
         scenario_id = _string(item.get("scenario"), f"run[{index}].scenario")
-        pair = (policy, scenario_id)
-        if pair in seen_pairs:
+        source = item.get("source", "fixture")
+        source = _string(source, f"run[{index}].source")
+        if source not in {"fixture", "observed"}:
+            raise ValueError("run.source must be 'fixture' or 'observed'")
+        client = item.get("client")
+        if client is not None:
+            client = _string(client, f"run[{index}].client")
+        pair = (source, client or "", policy, scenario_id)
+        run_id = item.get("run_id")
+        if run_id is not None:
+            run_id = _string(run_id, f"run[{index}].run_id")
+            if run_id in seen_ids:
+                raise ValueError(f"duplicate run_id '{run_id}'")
+            seen_ids.add(run_id)
+        if pair in seen_pairs and (run_id is None or pair in pairs_without_run_id):
             raise ValueError(f"duplicate run for policy '{policy}' and scenario '{scenario_id}'")
-        seen_pairs.add(pair)
+        seen_pairs[pair] = seen_pairs.get(pair, 0) + 1
+        if run_id is None:
+            pairs_without_run_id.add(pair)
         if dataset is not None and scenario_id not in dataset.by_id:
             raise ValueError(f"run[{index}] references unknown scenario '{scenario_id}'")
         events_payload = item.get("events")
@@ -330,6 +400,8 @@ def validate_runs(
             _fields(event, _EVENT_FIELDS, f"run[{index}].events[{event_index}]")
             phase = _string(event.get("phase"), "event.phase")
             tool = _string(event.get("tool"), "event.tool")
+            if tool not in _ALLOWED_TOOLS:
+                raise ValueError(f"event.tool '{tool}' is not allowed")
             returned = _string_list(
                 event.get("returned_memory_keys", []), "event.returned_memory_keys"
             )
@@ -355,17 +427,22 @@ def validate_runs(
                         f"event applied unknown criterion keys: {sorted(unknown_criteria)}"
                     )
             events.append(TraceEvent(phase, tool, returned, served, criteria))
-        run_id = item.get("run_id")
-        if run_id is not None:
-            run_id = _string(run_id, f"run[{index}].run_id")
-            if run_id in seen_ids:
-                raise ValueError(f"duplicate run_id '{run_id}'")
-            seen_ids.add(run_id)
+        client_version = item.get("client_version")
+        if client_version is not None:
+            client_version = _string(client_version, f"run[{index}].client_version")
+        status = item.get("status", "complete")
+        status = _string(status, f"run[{index}].status")
+        if status not in {"complete", "incomplete", "skipped"}:
+            raise ValueError("run.status must be complete, incomplete, or skipped")
         if scenario is not None:
             positions = [scenario.phases.index(event.phase) for event in events]
             if positions != sorted(positions):
                 raise ValueError(f"run[{index}].events must be in scenario phase order")
-        result.append(WorkflowRun(policy, scenario_id, tuple(events), run_id))
+        result.append(
+            WorkflowRun(
+                policy, scenario_id, tuple(events), run_id, source, client, client_version, status
+            )
+        )
     return tuple(result)
 
 
@@ -373,7 +450,9 @@ def load_runs(path: Path | str, dataset: ScenarioDataset | None = None) -> tuple
     return validate_runs(_load_json(Path(path)), dataset)
 
 
-def _score_scenario(scenario: Scenario, run: WorkflowRun) -> ScenarioScore:
+def _score_scenario(
+    scenario: Scenario, run: WorkflowRun, *, completed: bool = True
+) -> ScenarioScore:
     order = {phase: index for index, phase in enumerate(scenario.phases)}
     decision_index = order[scenario.decision_phase]
     pivot_index = order[scenario.pivot_phase] if scenario.pivot_phase else None
@@ -385,7 +464,7 @@ def _score_scenario(scenario: Scenario, run: WorkflowRun) -> ScenarioScore:
     ]
     retrieved = set(scenario.initial_context_keys) & set(scenario.critical_memory_keys)
     retrieved.update(key for event in eligible for key in event.returned_memory_keys)
-    critical_ok = (
+    critical_ok = completed and (
         not scenario.critical_memory_keys or set(scenario.critical_memory_keys) <= retrieved
     )
     criteria: set[str] = set()
@@ -396,7 +475,7 @@ def _score_scenario(scenario: Scenario, run: WorkflowRun) -> ScenarioScore:
             if order[event.phase] >= decision_index
             for key in event.applied_criterion_keys
         )
-    criteria_ok = set(scenario.application_criteria_keys) <= criteria
+    criteria_ok = completed and set(scenario.application_criteria_keys) <= criteria
     unnecessary = 0
     for event in recall_events:
         phase_index = order[event.phase]
@@ -455,19 +534,36 @@ def score_policy(
     for run in selected:
         by_scenario.setdefault(run.scenario, []).append(run)
     scores: list[ScenarioScore] = []
+    all_scores: list[ScenarioScore] = []
     missing: list[str] = []
     incomplete: list[str] = []
+    completed = 0
     for scenario in dataset.scenarios:
         candidates = by_scenario.get(scenario.id, [])
         if not candidates:
             missing.append(scenario.id)
             continue
-        run = candidates[0]
-        decision_phase = scenario.decision_phase
-        if not run.events or not any(event.phase == decision_phase for event in run.events):
-            incomplete.append(scenario.id)
-            continue
-        scores.append(_score_scenario(scenario, run))
+        scenario_scores: list[ScenarioScore] = []
+        for run in candidates:
+            decision_phase = scenario.decision_phase
+            if (
+                run.status != "complete"
+                or not run.events
+                or not any(event.phase == decision_phase for event in run.events)
+            ):
+                incomplete.append(run.run_id or scenario.id)
+                all_scores.append(_score_scenario(scenario, run, completed=False))
+                continue
+            completed += 1
+            scenario_scores.append(_score_scenario(scenario, run))
+        all_scores.extend(scenario_scores)
+        if scenario_scores:
+            scores.append(scenario_scores[0])
+    source = selected[0].source if selected else "fixture"
+    client = selected[0].client if selected else None
+    versions = {run.client_version for run in selected}
+    client_version = next(iter(versions)) if len(versions) == 1 else None
+    repetitions = max((len(by_scenario.get(s.id, [])) for s in dataset.scenarios), default=1)
     return PolicyReport(
         policy,
         scores,
@@ -477,33 +573,75 @@ def score_policy(
         expected_critical_count=sum(
             bool(scenario.critical_memory_keys) for scenario in dataset.scenarios
         ),
+        source=source,
+        client=client,
+        client_version=client_version,
+        repetitions=repetitions,
+        completed_runs=completed,
+        _replicate_scores=all_scores,
     )
 
 
 def compare_policies(dataset: ScenarioDataset, runs: Sequence[WorkflowRun]) -> ComparisonReport:
-    policies = sorted({run.policy for run in runs})
-    return ComparisonReport([score_policy(dataset, runs, policy) for policy in policies])
+    groups = sorted(
+        {(run.source, run.client, run.policy) for run in runs},
+        key=lambda group: (group[0], group[1] or "", group[2]),
+    )
+    return ComparisonReport(
+        [
+            score_policy(
+                dataset,
+                [
+                    run
+                    for run in runs
+                    if (run.source, run.client, run.policy) == group
+                ],
+                group[2],
+            )
+            for group in groups
+        ]
+    )
 
 
 def render_comparison(report: ComparisonReport) -> str:
     lines = ["workflow evaluation (ranking metrics are intentionally separate)"]
+    legacy = all(item.source == "fixture" and item.client is None for item in report.policies)
     header = (
         "policy                  critical  applied  unnecessary  repeated  dup-rate  dup-chars  "
         "recalls  chars  missing/incomplete"
+        if legacy
+        else (
+            "source   client        policy             coverage  critical  applied  "
+            "avg-recalls  avg-chars  incomplete"
+        )
     )
     lines.extend([header, "-" * len(header)])
     for item in sorted(report.policies, key=lambda value: value.policy):
-        lines.append(
-            f"{item.policy:<23} {item.critical_retrieval_rate:>8.2f}  "
-            f"{item.application_criteria_rate:>7.2f} {item.unnecessary_calls:>12} "
-            f"{item.duplicate_exposures:>9} {item.duplicate_exposure_rate:>7.2f} "
-            f"{item.duplicate_served_characters:>6} {item.total_recall_calls:>8}"
-            f" {item.served_characters:>6} {len(item.missing_runs) + len(item.incomplete_runs):>18}"
-        )
+        if legacy:
+            lines.append(
+                f"{item.policy:<23} {item.critical_retrieval_rate:>8.2f}  "
+                f"{item.application_criteria_rate:>7.2f} {item.unnecessary_calls:>12} "
+                f"{item.duplicate_exposures:>9} {item.duplicate_exposure_rate:>7.2f} "
+                f"{item.duplicate_served_characters:>6} {item.total_recall_calls:>8}"
+                f" {item.served_characters:>6} "
+                f"{len(item.missing_runs) + len(item.incomplete_runs):>18}"
+            )
+        else:
+            lines.append(
+                f"{item.source:<8} {(item.client or '-'): <12} {item.policy:<18} "
+                f"{item.coverage_rate:>8.2f} {item.critical_retrieval_rate:>8.2f} "
+                f"{item.application_criteria_rate:>7.2f} {item.average_recall_calls:>11.2f} "
+                f"{item.average_served_characters:>9.2f} {len(item.incomplete_runs):>10}"
+            )
     for item in sorted(report.policies, key=lambda value: value.policy):
         if item.misses:
             lines.append("")
-            lines.append(f"misses [{item.policy}]:")
+            label = (
+                item.policy
+                if legacy
+                else f"{item.source}/{item.client or '-'}/{item.policy}"
+            )
+            lines.append(f"misses [{label}]:")
             lines.extend(f"  - {miss}" for miss in item.misses)
     return "\n".join(lines)
 

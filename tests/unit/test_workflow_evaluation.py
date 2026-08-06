@@ -334,3 +334,171 @@ def test_render_is_deterministic_and_mentions_separation() -> None:
     text = render_comparison(compare_policies(scenarios, runs))
     assert "ranking metrics are intentionally separate" in text
     assert text.index("baseline") < text.index("checkpoints")
+
+
+def test_observed_repetitions_are_grouped_by_client_and_provenance() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    event = {
+        "phase": "session-rotation",
+        "tool": "recall",
+        "returned_memory_keys": ["memory:session-rotation-ttl"],
+    }
+    decision = {
+        "phase": "decision",
+        "tool": "checks",
+        "applied_criterion_keys": ["criterion:preserve-session-ttl"],
+    }
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {
+                    "run_id": "observed-1",
+                    "source": "observed",
+                    "client": "codex",
+                    "client_version": "1",
+                    "policy": "checkpoints",
+                    "scenario": "session-rotation-pivot",
+                    "events": [event, decision],
+                },
+                {
+                    "run_id": "observed-2",
+                    "source": "observed",
+                    "client": "codex",
+                    "client_version": "1",
+                    "policy": "checkpoints",
+                    "scenario": "session-rotation-pivot",
+                    "events": [event, decision],
+                },
+            ],
+        },
+        scenarios,
+    )
+    report = compare_policies(scenarios, runs).by_group()[("observed", "codex", "checkpoints")]
+    assert report.repetitions == 2
+    assert report.completed_runs == 2
+    assert report.coverage_rate == pytest.approx(2 / 6)
+    assert report.critical_retrieval_rate == 2 / 6
+    assert report.average_recall_calls == 1
+
+
+def test_metadata_status_and_source_are_bounded() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    base = {
+        "version": "1",
+        "runs": [
+            {
+                "run_id": "x",
+                "source": "observed",
+                "client": "codex",
+                "status": "skipped",
+                "policy": "x",
+                "scenario": "covered-by-initial-context",
+                "events": [],
+            }
+        ],
+    }
+    assert validate_runs(base, scenarios)[0].status == "skipped"
+    for field, value in (("source", "manual"), ("status", "running"), ("prompt", "secret")):
+        payload = json.loads(json.dumps(base))
+        payload["runs"][0][field] = value
+        with pytest.raises(ValueError):
+            validate_runs(payload, scenarios)
+
+
+def test_fixture_and_observed_runs_can_share_policy_and_scenario() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    base = {
+        "policy": "x",
+        "scenario": "covered-by-initial-context",
+        "events": [],
+    }
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [base, {**base, "source": "observed", "client": "codex", "run_id": "obs"}],
+        },
+        scenarios,
+    )
+    report = compare_policies(scenarios, runs)
+    assert len(report.policies) == 2
+    assert len(report.by_policy()) == 2
+
+
+def test_same_source_groups_with_and_without_client_sort_and_render_distinctly() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    base = {
+        "source": "observed",
+        "policy": "x",
+        "scenario": "covered-by-initial-context",
+        "events": [],
+    }
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {**base, "run_id": "anonymous"},
+                {**base, "run_id": "codex", "client": "codex"},
+            ],
+        },
+        scenarios,
+    )
+    report = compare_policies(scenarios, runs)
+    assert set(report.by_group()) == {
+        ("observed", None, "x"),
+        ("observed", "codex", "x"),
+    }
+    rendered = render_comparison(report)
+    assert "misses [observed/-/x]:" in rendered
+    assert "misses [observed/codex/x]:" in rendered
+
+
+def test_incomplete_observed_trace_counts_cost_without_success() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {
+                    "source": "observed",
+                    "client": "codex",
+                    "run_id": "incomplete",
+                    "policy": "x",
+                    "scenario": "session-rotation-pivot",
+                    "status": "incomplete",
+                    "events": [
+                        {
+                            "phase": "session-rotation",
+                            "tool": "recall",
+                            "returned_memory_keys": ["memory:session-rotation-ttl"],
+                            "served_chars": 44,
+                        }
+                    ],
+                }
+            ],
+        },
+        scenarios,
+    )
+    report = compare_policies(scenarios, runs).policies[0]
+    assert report.total_recall_calls == 1
+    assert report.served_characters == 44
+    assert report.critical_retrieval_rate == 0
+    assert report.application_criteria_rate == 0
+
+
+def test_tool_allowlist_rejects_secret_sentinel() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    with pytest.raises(ValueError, match="not allowed"):
+        validate_runs(
+            {
+                "version": "1",
+                "runs": [
+                    {
+                        "policy": "x",
+                        "scenario": "covered-by-initial-context",
+                        "events": [{"phase": "triage", "tool": "secret-sentinel"}],
+                    }
+                ],
+            },
+            scenarios,
+        )

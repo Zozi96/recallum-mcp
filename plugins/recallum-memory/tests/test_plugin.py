@@ -211,6 +211,8 @@ class HookTests(unittest.TestCase):
     def test_session_start_emits_project_context_instruction(self) -> None:
         context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn(f"{CODEX_PREFIX}context with project='local:", context)
+        self.assertLess(context.index("before planning"), context.index("Checkpoint:"))
+        self.assertLess(context.index("Checkpoint:"), context.index("After substantial work"))
 
     def test_session_start_prompts_for_reusable_context_capture(self) -> None:
         context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
@@ -240,6 +242,7 @@ class HookTests(unittest.TestCase):
             }
         )
         self.assertIn(f"{CODEX_PREFIX}context", context)
+        self.assertIn(f"{CODEX_PREFIX}recall", context)
         self.assertNotIn(CLAUDE_PREFIX, context)
         # Bare Grok names are a substring of mcp__recallum__*, so check the
         # call-site form the hook actually emits.
@@ -248,6 +251,7 @@ class HookTests(unittest.TestCase):
     def test_claude_is_told_the_plugin_namespaced_tool_name(self) -> None:
         context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn(f"{CLAUDE_PREFIX}context", context)
+        self.assertIn(f"{CLAUDE_PREFIX}recall", context)
         # The Codex spelling is a strict prefix-free substring check away, so
         # assert on a boundary that only the bare Codex name can satisfy.
         self.assertNotIn(f"call {CODEX_PREFIX}context", context)
@@ -263,6 +267,7 @@ class HookTests(unittest.TestCase):
             }
         )
         self.assertIn(f"call {GROK_PREFIX}context", context)
+        self.assertIn(f"{GROK_PREFIX}recall", context)
         self.assertNotIn(CLAUDE_PREFIX, context)
         self.assertNotIn(CODEX_PREFIX, context)
 
@@ -272,6 +277,9 @@ class HookTests(unittest.TestCase):
         self.assertIn(f"{CODEX_PREFIX}context", context)
         self.assertIn(f"{CLAUDE_PREFIX}context", context)
         self.assertIn(f"{GROK_PREFIX}context", context)
+        self.assertIn(f"{CODEX_PREFIX}recall", context)
+        self.assertIn(f"{CLAUDE_PREFIX}recall", context)
+        self.assertIn(f"{GROK_PREFIX}recall", context)
 
     def test_claude_is_told_how_to_find_an_unlisted_tool(self) -> None:
         """Naming the tool is not enough on Claude Code.
@@ -523,6 +531,8 @@ class DigestTests(unittest.TestCase):
         self.assertIn("+3 more stored memories", context)
         self.assertIn("already loaded", context)
         self.assertNotIn("before planning, call", context)
+        self.assertLess(context.index("already loaded"), context.index("Checkpoint:"))
+        self.assertLess(context.index("Checkpoint:"), context.index("After substantial work"))
 
     def test_digest_prefers_profile_static_before_groups(self) -> None:
         _StubMCPHandler.context_result = {
@@ -605,12 +615,33 @@ class DigestTests(unittest.TestCase):
         context = self._session_context()
         self.assertIn("no stored memories", context)
         self.assertNotIn("before planning, call", context)
+        self.assertLess(context.index("no stored memories"), context.index("Checkpoint:"))
+        self.assertLess(context.index("Checkpoint:"), context.index("After substantial work"))
 
     def test_server_failure_falls_back_to_the_standard_hint(self) -> None:
         _StubMCPHandler.fail_with = 500
         context = self._session_context()
         self.assertIn("before planning, call", context)
         self.assertIn("ToolSearch", context)
+        self.assertLess(context.index("before planning"), context.index("Checkpoint:"))
+        self.assertLess(context.index("Checkpoint:"), context.index("After substantial work"))
+
+    def test_checkpoint_hint_describes_pivot_and_suppresses_redundant_recall(self) -> None:
+        context = self._session_context()
+        self.assertIn("Checkpoint:", context)
+        self.assertIn("limit=3", context)
+        self.assertIn("English query", context)
+        self.assertIn("skip it when the active context already covers", context)
+
+    def test_digest_keeps_checkpoint_without_repeating_generic_context(self) -> None:
+        _StubMCPHandler.context_result = {
+            "groups": [{"category": "fact", "items": [{"category": "fact", "content": "uses uv"}]}],
+            "omitted": 0,
+        }
+        context = self._session_context()
+        self.assertIn("Checkpoint:", context)
+        self.assertIn("limit=3", context)
+        self.assertNotIn("before planning, call", context)
 
     def test_missing_configuration_never_touches_the_network(self) -> None:
         result = run_hook(
@@ -659,6 +690,19 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("do **not** need Claude Code", text)
         self.assertIn("plugin.json", text)
         self.assertIn(".grok-plugin/marketplace.json", text)
+
+    def test_readme_documents_isolated_agent_benchmark_invocations(self) -> None:
+        text = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
+        for value in (
+            "{codex_mcp_url_config}",
+            "{codex_mcp_token_config}",
+            "{plugin_dir}",
+            "{prompt_file}",
+        ):
+            self.assertIn(value, text)
+        self.assertIn("no shell interpolation", text)
+        self.assertNotIn("--pass-env RECALLUM_API_KEY", text)
+        self.assertNotIn('$RECALLUM_BENCHMARK_PROMPT', text)
 
     def test_claude_manifest_declares_endpoint_and_masked_token(self) -> None:
         user_config = self._load(CLAUDE_MANIFEST)["userConfig"]

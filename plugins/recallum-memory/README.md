@@ -248,6 +248,64 @@ MCP path is the config.toml entry, not the Claude `userConfig` placeholder.
 The `recallum-setup` skill walks the full diagnostic path, including a cross-session check, without
 ever revealing the key.
 
+## Optional agent-adherence benchmark
+
+`scripts/agent_workflow_benchmark.py` is an opt-in, local-probe runner. It creates a temporary
+workspace and loopback-only MCP probe, then executes only the argv supplied after `--`; it never
+changes persistent client configuration or starts a commercial client by itself. The runner makes
+no external requests, although a supplied commercial agent normally will. The probe uses an
+ephemeral `RECALLUM_BENCHMARK_TOKEN` and exposes these temporary variables to the command:
+
+| Variable | Meaning |
+| --- | --- |
+| `RECALLUM_BENCHMARK_URL` | loopback probe URL |
+| `RECALLUM_BENCHMARK_TOKEN` | per-run bearer token |
+| `RECALLUM_BENCHMARK_WORKSPACE` | temporary fixture workspace |
+| `RECALLUM_BENCHMARK_PROMPT` | synthetic task prompt |
+| `RECALLUM_BENCHMARK_PROJECT` | canonical project key |
+
+The child receives only a minimal process environment plus benchmark variables. Pass a client
+credential explicitly with one or more `--pass-env NAME` flags; arbitrary parent secrets are not
+inherited.
+
+For example, using the bundled fake agent (no network):
+
+```bash
+python3 scripts/agent_workflow_benchmark.py --scenario session-rotation-pivot \
+  --client codex --policy checkpoints --repeat 3 -- \
+  python3 "$PWD/scripts/fake_workflow_agent.py"
+```
+
+The runner replaces only exact placeholder arguments; it performs no shell interpolation. It
+creates temporary prompt, MCP, Grok, and plugin configuration files inside the disposable
+workspace. These are concrete isolated invocation patterns for currently supported client CLIs:
+
+```bash
+python3 scripts/agent_workflow_benchmark.py --scenario session-rotation-pivot --client codex \
+  --policy checkpoints -- codex exec --ephemeral --skip-git-repo-check \
+  --sandbox workspace-write -c '{codex_mcp_url_config}' \
+  -c '{codex_mcp_token_config}' '{prompt}'
+
+python3 scripts/agent_workflow_benchmark.py --scenario session-rotation-pivot --client claude-code \
+  --policy checkpoints -- claude --setting-sources project --plugin-dir '{plugin_dir}' \
+  --no-session-persistence --permission-mode acceptEdits -p '{prompt}'
+
+python3 scripts/agent_workflow_benchmark.py --scenario session-rotation-pivot --client grok-build \
+  --policy checkpoints -- grok --no-memory --no-subagents \
+  --permission-mode acceptEdits --prompt-file '{prompt_file}'
+```
+
+The Codex and Grok examples expect the Recallum plugin to be installed so its session hook is
+active. Claude receives a temporary copy through `--plugin-dir`; its bundled MCP endpoint is
+rewritten only in that copy. If a client reads its model credential from an environment variable,
+add `--pass-env NAME` before `--`. Never pass `RECALLUM_API_KEY`: the probe uses only its ephemeral
+benchmark token. The `--policy` value is a result label, so use distinct labels for the policy or
+plugin variants you intentionally compare.
+
+Repeat each scenario three times for a useful adherence sample. Fixture traces test evaluator
+math; observed traces test a supplied process against the probe. Neither is a ranking or production
+telemetry measurement, and prompts, queries, credentials, and memory content are never persisted.
+
 ### Tool names differ per client
 
 Codex registers the server under its bare name; Claude Code namespaces a plugin-bundled server as

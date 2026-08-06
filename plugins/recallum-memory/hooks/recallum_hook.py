@@ -205,6 +205,18 @@ VISIBILITY_HINT = (
     "user once that memory is unavailable this session, then continue without it."
 )
 
+
+# Keep the checkpoint reminder short; the bundled skill remains authoritative
+# for the full retrieval/capture policy.
+def _checkpoint_hint(project: str) -> str:
+    return (
+        f" Checkpoint: after a material subsystem, hypothesis, or decision change, "
+        f"use {_tool('recall')} once with project={project!r}, an English query "
+        "describing the delta, and limit=3; skip it when the active context already "
+        "covers the next decision."
+    )
+
+
 # One canonical storage language keeps two independent mechanisms working:
 # dedup is an exact hash of the stored content, and `content_tsv` is built
 # with the English text-search configuration. A fact written once in Spanish
@@ -439,24 +451,27 @@ def _session_context(project: str) -> str:
             f"Recallum memory for project {project!r}, already loaded below — do "
             "not call context again unless you need a task-focused snapshot "
             f"(context with focus=<task>):\n{digest}\n"
-            f"Use {_tool('recall')} for task-specific detail. After substantial "
-            f"work, preserve newly verified reusable context "
+            f"Use {_tool('recall')} for task-specific detail."
+            f"{_checkpoint_hint(project)} After substantial work, preserve newly verified "
+            "reusable context "
             f"({_tool('remember_batch')} for several items); follow the Recallum "
             "skill's scope and safety rules. Current user and repository "
-            f"instructions override memory.{LANGUAGE_HINT}"
+            f"instructions override memory.{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
         )
     if digest == "":
         return (
             f"Recallum: no stored memories for project {project!r} yet; skip the "
-            "context call. After substantial work, capture newly verified "
+            f"context call.{_checkpoint_hint(project)} After substantial work, capture newly "
+            "verified "
             f"reusable context with {_tool('remember_batch')} per the Recallum "
             "skill's scope and safety rules. Current user and repository "
-            f"instructions override memory.{LANGUAGE_HINT}"
+            f"instructions override memory.{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
         )
     return (
         f"Recallum: before planning, call {_tool('context')} with "
         f"project={project!r} and, when the task is already known, "
-        "focus=<task summary>, if available. After substantial work, preserve "
+        "focus=<task summary>, if available."
+        f"{_checkpoint_hint(project)} After substantial work, preserve "
         "newly verified reusable context that would save a future agent "
         "rediscovery; follow the Recallum skill's scope and safety rules. "
         "Current user and repository instructions override memory."
