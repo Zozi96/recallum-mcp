@@ -139,14 +139,19 @@ def test_probe_rejects_bad_auth_and_bounded_or_nonobject_requests(
 ) -> None:
     probe, url = probe_server
 
-    def rejected(body: bytes, token: str, status: int) -> None:
+    def rejected(
+        body: bytes, token: str, status: int, content_length: int | None = None
+    ) -> None:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        if content_length is not None:
+            headers["Content-Length"] = str(content_length)
         request = urllib.request.Request(
             url,
             data=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
         with pytest.raises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request, timeout=2)  # noqa: S310
@@ -154,7 +159,7 @@ def test_probe_rejects_bad_auth_and_bounded_or_nonobject_requests(
 
     rejected(b"{}", "wrong", 401)
     rejected(b"[]", "token", 400)
-    rejected(b"x" * (MAX_REQUEST_BYTES + 1), "token", 413)
+    rejected(b"x", "token", 413, MAX_REQUEST_BYTES + 1)
     assert probe.events == []
 
 
