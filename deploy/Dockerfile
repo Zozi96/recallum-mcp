@@ -29,7 +29,7 @@ USER recallum
 
 EXPOSE 8000
 
-# Deliberately no CMD: the entrypoint migrates and then execs uvicorn itself.
+# Deliberately no CMD: the entrypoint migrates and then execs Granian itself.
 # A "run command" field on a managed deployment replaces CMD, so leaving one
 # here is what allows a stray command to silently take the server's place.
 # One-off commands go through `docker compose exec` (which bypasses the

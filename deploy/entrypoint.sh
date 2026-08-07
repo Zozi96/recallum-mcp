@@ -15,13 +15,14 @@
 # override, so the only way to skip the migration is to replace the entrypoint
 # itself, which is explicit and hard to do by accident.
 #
-# `exec` matters: uvicorn replaces this shell as PID 1, so SIGTERM reaches it
+# `exec` matters: Granian replaces this shell as PID 1, so SIGTERM reaches it
 # directly and the lifespan shutdown (telemetry flush, engine dispose) runs.
 set -eu
 
 serve() {
-    exec uv run --no-sync uvicorn recallum.app:create_app \
-        --factory --host 0.0.0.0 --port 8000
+    exec uv run --no-sync granian \
+        --interface asgi --factory --host 0.0.0.0 --port 8000 \
+        recallum.app:create_app
 }
 
 if [ "${RECALLUM_SKIP_MIGRATIONS:-0}" = "1" ]; then

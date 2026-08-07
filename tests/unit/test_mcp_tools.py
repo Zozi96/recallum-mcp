@@ -5,19 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
-import threading
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
-import uvicorn
 from dependency_injector import providers
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from granian.server.embed import Server as GranianServer
 from mcp.shared.exceptions import McpError
 
 from recallum.app import create_app
@@ -78,27 +76,39 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _stop_uvicorn(uv_server: uvicorn.Server, thread: threading.Thread) -> None:
-    """Stop the isolated server loop without leaking work into the test loop."""
-    uv_server.should_exit = True
-    thread.join(timeout=5.0)
-    if not thread.is_alive():
-        return
-    uv_server.force_exit = True
-    thread.join(timeout=2.0)
-    if thread.is_alive():
-        raise RuntimeError("uvicorn test server did not stop")
-
-
-def _wait_server_started(uv_server: uvicorn.Server, thread: threading.Thread) -> None:
-    """Wait until uvicorn is accepting connections, or fail fast."""
+async def _wait_server_started(port: int, task: asyncio.Task[None]) -> None:
+    """Wait until Granian is accepting connections, or fail fast."""
     for _ in range(250):  # ~5s
-        if uv_server.started:
-            return
-        if not thread.is_alive():
-            raise RuntimeError("uvicorn exited before start")
-        time.sleep(0.02)
-    raise RuntimeError("uvicorn failed to start within 5s")
+        if task.done():
+            await task
+        try:
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.02)
+            continue
+        writer.close()
+        await writer.wait_closed()
+        return
+    raise RuntimeError("Granian failed to start within 5s")
+
+
+@asynccontextmanager
+async def _serve(app: Any) -> AsyncIterator[str]:
+    port = _free_port()
+    server = GranianServer(
+        app,
+        address="127.0.0.1",
+        port=port,
+        interface="asgi",
+        log_enabled=False,
+    )
+    task = asyncio.create_task(server.serve())
+    try:
+        await _wait_server_started(port, task)
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.stop()
+        await asyncio.wait_for(task, timeout=5)
 
 
 def mcp_client(base_url: str, token: str | None = None) -> Client:
@@ -124,29 +134,15 @@ async def server() -> ServerInfo:
     await key_service.revoke_key(revoked.key.id)
 
     app = create_app(Settings(), container)
-    port = _free_port()
-    config = uvicorn.Config(
-        app,
-        host="127.0.0.1",
-        port=port,
-        log_level="error",
-        timeout_graceful_shutdown=1,
-    )
-    uv_server = uvicorn.Server(config)
-    thread = threading.Thread(target=uv_server.run, daemon=True)
-    thread.start()
-    try:
-        await asyncio.to_thread(_wait_server_started, uv_server, thread)
+    async with _serve(app) as url:
         yield ServerInfo(
-            url=f"http://127.0.0.1:{port}",
+            url=url,
             alice_token=alice_token,
             bob_token=bob_token,
             alice_revoked_token=revoked.plaintext,
             telemetry=fakes["telemetry"],
             buffer=container.telemetry_buffer(),
         )
-    finally:
-        await asyncio.to_thread(_stop_uvicorn, uv_server, thread)
 
 
 class _ExplodingMemoryService:
@@ -181,30 +177,15 @@ async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
     container.memory_service.override(providers.Object(_ExplodingMemoryService(exc)))
 
     app = create_app(Settings(), container)
-    port = _free_port()
-    uv_server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-            timeout_graceful_shutdown=1,
-        )
-    )
-    thread = threading.Thread(target=uv_server.run, daemon=True)
-    thread.start()
-    try:
-        await asyncio.to_thread(_wait_server_started, uv_server, thread)
+    async with _serve(app) as url:
         yield ServerInfo(
-            url=f"http://127.0.0.1:{port}",
+            url=url,
             alice_token=token,
             bob_token=token,
             alice_revoked_token=token,
             telemetry=fakes["telemetry"],
             buffer=container.telemetry_buffer(),
         )
-    finally:
-        await asyncio.to_thread(_stop_uvicorn, uv_server, thread)
 
 
 async def test_forget_now_translates_validation_errors():

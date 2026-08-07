@@ -160,15 +160,18 @@ https://recallum.zozbit.com/mcp
 ```
 
 Starlette's `redirect_slashes` builds that `Location` from the scheme it sees, which is `http`
-because the reverse proxy in front of it does not forward `X-Forwarded-Proto` (or uvicorn does not
-trust it). A 307 preserves method, body **and headers**, so a client starting at the slashless URL
-either resends `Authorization: Bearer <key>` over cleartext HTTP, or strips it on the scheme change
-and then fails to authenticate. Requesting `/mcp/` directly avoids the redirect.
+because the reverse proxy in front of it does not forward `X-Forwarded-Proto` (or Granian is not
+configured to trust it). A 307 preserves method, body **and headers**, so a client starting at the
+slashless URL either resends `Authorization: Bearer <key>` over cleartext HTTP, or strips it on the
+scheme change and then fails to authenticate. Requesting `/mcp/` directly avoids the redirect.
 
-The real fix belongs on the server:
+Granian has no forwarded-header CLI switch. The server-side fix is to wrap the ASGI app and trust
+only the reverse proxy's address:
 
-```bash
-uvicorn ... --proxy-headers --forwarded-allow-ips='<reverse-proxy-ip>'
+```python
+from granian.utils.proxies import wrap_asgi_with_proxy_headers
+
+app = wrap_asgi_with_proxy_headers(app, trusted_hosts="<reverse-proxy-ip>")
 ```
 
 ## How the API key is handled

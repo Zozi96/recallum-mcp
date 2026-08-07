@@ -52,5 +52,3 @@ def setup_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
-    # Keep noisy access logs consistent with the same format/level policy.
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

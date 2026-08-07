@@ -163,7 +163,7 @@ idempotently on every deploy.
 "Embedding model" above), then verify `/readyz` returns `ready`.
 
 Deploy order: **postgres → role SQL (step 1) → ollama (+ model pull) → recallum
-(its entrypoint migrates, then uvicorn starts)**.
+(its entrypoint migrates, then Granian starts)**.
 
 ## Changing the embedding model
 
