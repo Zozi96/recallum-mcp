@@ -1,0 +1,27 @@
+# Dynamic routes for the pinned Traefik CI contract.
+http:
+  routers:
+    mcp:
+      rule: Host(`mcp.recallum.test`)
+      entryPoints:
+        - web
+      service: recallum
+      middlewares:
+        - strip-test-prefix
+    mcp-host-reject:
+      rule: Host(`evil.example`)
+      entryPoints:
+        - web
+      service: recallum
+
+  middlewares:
+    strip-test-prefix:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: "http"
+
+  services:
+    recallum:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:UPSTREAM_PORT"

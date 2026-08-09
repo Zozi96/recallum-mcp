@@ -28,6 +28,21 @@ class UserView:
     active_key_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class UserPage:
+    items: list[UserView]
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
+class AggregatePage:
+    total_users: int
+    active_keys: int
+    revoked_keys: int
+    memories: list[tuple[uuid.UUID, int]]
+    memories_total: int
+
+
 class AdminService:
     def __init__(
         self,
@@ -47,14 +62,14 @@ class AdminService:
         self._database = database
         self._embeddings = embeddings
 
-    async def list_users(self) -> list[UserView]:
-        return [
-            UserView(
-                user,
-                sum(key.revoked_at is None for key in await self._api_keys.list_keys(user.id)),
-            )
-            for user in await self._users.list_users()
-        ]
+    async def list_users(self, *, limit: int, offset: int) -> UserPage:
+        rows, total = await self._users.list_users_with_active_key_counts(
+            limit=limit, offset=offset
+        )
+        return UserPage(
+            items=[UserView(user, active_key_count) for user, active_key_count in rows],
+            total=total,
+        )
 
     async def create_user(self, email: str, is_admin: bool) -> UserView:
         user = await self._api_keys.create_user(email)
@@ -92,11 +107,18 @@ class AdminService:
         if not await self._keys.revoke_for_user(user_id, key_id):
             raise AdminNotFoundError
 
-    async def aggregates(self) -> tuple[int, int, int, dict[uuid.UUID, int]]:
-        users = await self._users.list_users()
+    async def aggregates(self, *, limit: int, offset: int) -> AggregatePage:
         active, revoked = await self._keys.count_by_status()
-        counts = {user.id: await self._memories.count_active(user.id) for user in users}
-        return len(users), active, revoked, counts
+        memories, memories_total = await self._memories.page_active_counts(
+            limit=limit, offset=offset
+        )
+        return AggregatePage(
+            total_users=memories_total,
+            active_keys=active,
+            revoked_keys=revoked,
+            memories=memories,
+            memories_total=memories_total,
+        )
 
     async def status(self) -> tuple[bool, bool, str, bool]:
         database_ok = await self._database.is_ready()
@@ -104,12 +126,7 @@ class AdminService:
         model = self._embeddings.model
         mismatch = False
         if database_ok:
-            mismatch = any(
-                [
-                    await self._memories.has_model_mismatch(user.id, model)
-                    for user in await self._users.list_users()
-                ]
-            )
+            mismatch = await self._memories.has_any_model_mismatch(model)
         return database_ok, embeddings_ok, model, mismatch
 
     async def _require_user(self, user_id: uuid.UUID) -> User:
@@ -123,5 +140,8 @@ __all__ = [
     "AdminNotFoundError",
     "AdminPasswordError",
     "AdminService",
+    "AggregatePage",
     "LastAdminError",
+    "UserPage",
+    "UserView",
 ]

@@ -1,13 +1,13 @@
 [project]
 name = "recallum"
-version = "0.14.0"
+version = "0.15.0"
 description = "Private, self-hosted persistent memory for AI coding agents, exposed over MCP."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "argon2-cffi>=23.1",
     "fastapi>=0.115",
-    "fastmcp>=3.0",
+    "fastmcp>=3.4,<4",
     "dependency-injector>=4.46",
     "email-validator>=2.3",
     "sqlalchemy[asyncio]>=2.0.36",
@@ -22,6 +22,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.10.0",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
@@ -40,8 +41,13 @@ packages = ["recallum"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "error::starlette.exceptions.StarletteDeprecationWarning",
+]
 markers = [
     "integration: requires a real PostgreSQL+pgvector database (RECALLUM_TEST_DATABASE_URL or Docker)",
+    "vertical: external Granian process contract on ephemeral ports",
+    "traefik: pinned Traefik reverse-proxy contract (Docker)",
 ]
 
 [tool.ruff]

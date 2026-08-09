@@ -170,7 +170,51 @@ async def test_web_admin_commands_reject_unknown_user(monkeypatch, capsys):
         "recallum.cli.getpass.getpass",
         lambda _prompt: pytest.fail("unknown user must fail before prompting"),
     )
-    for command in ("set-password", "grant-admin", "revoke-admin"):
+    for command in ("grant-admin", "revoke-admin"):
         assert await _run(parse([command, "--email", "ghost@example.com"]), container) == 1
+    prompts = iter(["strong", "strong"])
+    monkeypatch.setattr("recallum.cli.getpass.getpass", lambda _prompt: next(prompts))
+    assert await _run(parse(["set-password", "--email", "ghost@example.com"]), container) == 1
     assert not fakes["users"].users
     assert capsys.readouterr().err.count("does not exist") == 3
+
+
+async def test_cli_oversized_password_stops_before_lookup_argon_and_persistence(
+    monkeypatch, capsys
+):
+    container, fakes = build_test_container()
+    container.config.boundary.request.password_max_chars.from_value(8)
+    lookup_calls: list[str] = []
+    argon_calls: list[str] = []
+    persistence_calls: list[tuple[object, str]] = []
+    users = fakes["users"]
+    original_lookup = users.get_by_email
+
+    async def counted_lookup(email):
+        lookup_calls.append(email)
+        return await original_lookup(email)
+
+    def fail_hash(_hasher, password):
+        argon_calls.append(password)
+        raise AssertionError("Argon2 must not run for an oversized CLI password")
+
+    async def counted_persistence(user_id, encoded):
+        persistence_calls.append((user_id, encoded))
+        raise AssertionError("persistence must not run for an oversized CLI password")
+
+    monkeypatch.setattr(users, "get_by_email", counted_lookup)
+    passwords = container.password_service()
+    assert passwords._max_password_chars == 8
+    monkeypatch.setattr(type(passwords._hasher), "hash", fail_hash)
+    monkeypatch.setattr(users, "set_password", counted_persistence)
+    oversized = "x" * 9
+    prompts = iter([oversized, oversized])
+    monkeypatch.setattr("recallum.cli.getpass.getpass", lambda _prompt: next(prompts))
+
+    code = await _run(parse(["set-password", "--email", "cli-cap@example.com"]), container)
+
+    assert code == 1
+    assert capsys.readouterr().err == "error: password exceeds configured maximum length (8)\n"
+    assert lookup_calls == []
+    assert argon_calls == []
+    assert persistence_calls == []

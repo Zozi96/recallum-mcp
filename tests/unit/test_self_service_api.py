@@ -27,6 +27,67 @@ def _user(container, email: str, password: str = "secret"):
     return user
 
 
+def test_query_integer_contract_accepts_canonical_values_and_rejects_json_forms(monkeypatch):
+    container, _fakes = build_test_container()
+    user = _user(container, "strict-query@example.com")
+    service = container.memory_service()
+    calls = 0
+    original = service.list_memories
+
+    async def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "list_memories", counted)
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        assert client.get("/api/v1/me/memories", params={"limit": "7"}).status_code == 200
+        assert calls == 1
+
+
+def test_json_importance_rejects_ambiguous_and_out_of_range_values_before_service(
+    monkeypatch,
+):
+    container, _fakes = build_test_container()
+    user = _user(container, "strict-json@example.com")
+    service = container.memory_service()
+    calls = 0
+    original = service.remember
+
+    async def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "remember", counted)
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        for value in (True, 1.0, "7", -1, 11):
+            response = client.post(
+                "/api/v1/me/memories",
+                json={"content": "strict", "category": "fact", "importance": value},
+            )
+            assert response.status_code == 422
+        assert calls == 0
+        assert (
+            client.post(
+                "/api/v1/me/memories",
+                json={"content": "strict-valid", "category": "fact", "importance": 7},
+            ).status_code
+            == 201
+        )
+        assert calls == 1
+        for value in ('"7"', "true", "1.0"):
+            assert (
+                client.get("/api/v1/me/memories", params={"limit": value}).status_code
+                == 422
+            )
+        assert calls == 1
+
+
 def test_memories_are_session_scoped_and_responses_are_filtered():
     container, fakes = build_test_container()
     alice = _user(container, "alice@example.com")
@@ -208,6 +269,19 @@ def test_embedding_degradation_and_key_ownership():
         recall = client.get("/api/v1/me/memories/search", params={"query": "Searchable phrase"})
         assert recall.status_code == 200
         assert recall.json()["mode"] == "degraded_textual"
+        assert recall.headers["Deprecation"] == "true"
+        assert recall.headers["Sunset"]
+        assert recall.headers["Cache-Control"] == "no-store"
+        assert recall.headers["Pragma"] == "no-cache"
+        post_recall = client.post(
+            "/api/v1/me/memories/search", json={"query": "Searchable phrase"}
+        )
+        assert post_recall.status_code == 200
+        assert post_recall.json()["mode"] == recall.json()["mode"]
+        assert [item["id"] for item in post_recall.json()["results"]] == [
+            item["id"] for item in recall.json()["results"]
+        ]
+        assert post_recall.headers["Cache-Control"] == "no-store"
         assert client.get(f"/api/v1/me/memories/{created['id']}").status_code == 200
         assert (
             client.patch(
@@ -406,6 +480,68 @@ def test_versioned_openapi_matches_web_app_only():
     assert "content_hash" not in serialized
     assert "key_hash" not in serialized
     assert Path(OUTPUT).name == "web-v1.json"
+
+    schemes = schema["components"]["securitySchemes"]
+    cookie = next(iter(schemes.values()))
+    assert cookie["type"] == "apiKey"
+    assert cookie["in"] == "cookie"
+    login = schema["paths"]["/auth/login"]["post"]
+    assert login.get("security") in ([], None) or login["security"] == []
+    protected = schema["paths"]["/auth/me"]["get"]
+    assert protected.get("security")
+    search = schema["paths"]["/me/memories/search"]
+    assert "post" in search
+    assert search["get"]["deprecated"] is True
+    documented = set()
+    for path_item in schema["paths"].values():
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            documented.update(operation.get("responses", {}))
+    for code in ("401", "403", "413", "422", "429", "503"):
+        assert code in documented
+
+
+def test_search_post_rejects_invalid_bodies_and_get_keeps_query_out_of_logs(caplog):
+    container, _ = build_test_container()
+    alice = _user(container, "search-contract@example.com")
+    app = create_app(Settings(), container)
+    sentinel = "SENTINEL_SEARCH_QUERY_SHOULD_NOT_LOG"
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, alice.email)
+        assert client.post("/api/v1/me/memories/search", json={}).status_code == 422
+        assert client.post("/api/v1/me/memories/search", json={"query": ""}).status_code == 422
+        assert client.post("/api/v1/me/memories/search", json={"query": 1}).status_code == 422
+        with caplog.at_level("DEBUG"):
+            response = client.get(
+                "/api/v1/me/memories/search", params={"query": sentinel}
+            )
+        assert response.status_code == 200
+        assert response.headers["Deprecation"] == "true"
+        assert response.headers["Sunset"] == Settings().web.get_search_sunset
+        assert sentinel not in caplog.text
+        assert all(sentinel not in record.getMessage() for record in caplog.records)
+
+
+def test_auth_and_private_responses_set_no_store_cache_headers():
+    container, _ = build_test_container()
+    alice = _user(container, "cache@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": alice.email, "password": "secret"},
+        )
+        assert login.status_code == 200
+        assert login.headers["Cache-Control"] == "no-store"
+        assert login.headers["Pragma"] == "no-cache"
+        me = client.get("/api/v1/auth/me")
+        assert me.status_code == 200
+        assert me.headers["Cache-Control"] == "no-store"
+        assert me.headers["Pragma"] == "no-cache"
+        denied = TestClient(app, base_url="https://recallum.test").get("/api/v1/auth/me")
+        assert denied.status_code == 401
+        assert denied.headers["Cache-Control"] == "no-store"
 
 
 def test_reassign_project_moves_memories_and_reports_conflicts():

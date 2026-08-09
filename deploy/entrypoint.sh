@@ -20,8 +20,17 @@
 set -eu
 
 serve() {
+    # Same env Settings validates (`RECALLUM__RUNTIME__WORKERS`). Fail closed
+    # before Granian forks: MCP is still stateful, so workers must stay 1 even
+    # if RECALLUM__RUNTIME__MCP_STATELESS_HTTP is set (not wired yet).
+    workers="${RECALLUM__RUNTIME__WORKERS:-1}"
+    if [ "$workers" != "1" ]; then
+        echo "entrypoint: stateful MCP requires RECALLUM__RUNTIME__WORKERS=1 (got ${workers}); refusing to start" >&2
+        exit 1
+    fi
     exec uv run --no-sync granian \
         --interface asgi --factory --host 0.0.0.0 --port 8000 \
+        --workers "$workers" \
         recallum.app:create_app
 }
 

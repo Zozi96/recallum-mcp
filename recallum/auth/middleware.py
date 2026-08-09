@@ -1,15 +1,17 @@
-"""FastMCP middleware enforcing ``Authorization: Bearer`` on tools and resources."""
+"""FastMCP authentication and request-scoped identity binding."""
 
 from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastmcp.exceptions import ToolError
-from fastmcp.server.dependencies import get_http_headers
+from fastmcp.server.auth import AccessToken, TokenVerifier
+from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from recallum.auth.api_keys import hash_token
@@ -141,48 +143,89 @@ def _extract_bearer(headers: dict[str, str]) -> str | None:
 
 
 class BearerAuthMiddleware(Middleware):
-    """Validates the bearer token before tools and resources run, binds identity.
-
-    Rejected calls raise ``ToolError`` so no memory logic runs. The header is
-    read with ``include={"authorization"}`` because FastMCP strips it from the
-    default header view to avoid accidental forwarding.
-
-    Resource list/read share the same authenticator as tools so a profile
-    resource cannot be reached without a valid API key.
-    """
-
-    def __init__(self, authenticator: TokenAuthenticator) -> None:
-        self._authenticator = authenticator
+    """Bind the identity already verified by FastMCP's HTTP auth middleware."""
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: Any) -> Any:
-        identity = await self._resolve_identity()
-        with identity_scope(identity):
-            return await call_next(context)
+        return await self._with_identity(context, call_next)
 
     async def on_read_resource(self, context: MiddlewareContext, call_next: Any) -> Any:
-        identity = await self._resolve_identity()
-        with identity_scope(identity):
-            return await call_next(context)
+        return await self._with_identity(context, call_next)
+
+    async def on_list_tools(self, context: MiddlewareContext, call_next: Any) -> Any:
+        return await self._with_identity(context, call_next)
 
     async def on_list_resources(self, context: MiddlewareContext, call_next: Any) -> Any:
-        identity = await self._resolve_identity()
-        with identity_scope(identity):
-            return await call_next(context)
+        return await self._with_identity(context, call_next)
 
     async def on_list_resource_templates(
         self, context: MiddlewareContext, call_next: Any
     ) -> Any:
-        identity = await self._resolve_identity()
+        return await self._with_identity(context, call_next)
+
+    async def on_list_prompts(self, context: MiddlewareContext, call_next: Any) -> Any:
+        return await self._with_identity(context, call_next)
+
+    async def on_get_prompt(self, context: MiddlewareContext, call_next: Any) -> Any:
+        return await self._with_identity(context, call_next)
+
+    async def _with_identity(self, context: MiddlewareContext, call_next: Any) -> Any:
+        identity = self._identity_from_access_token()
         with identity_scope(identity):
             return await call_next(context)
 
-    async def _resolve_identity(self) -> Identity:
-        headers = get_http_headers(include={"authorization"})
-        token = _extract_bearer(headers)
-        if token is None:
-            raise ToolError("authentication required: send 'Authorization: Bearer <api-key>'")
+    @staticmethod
+    def _identity_from_access_token() -> Identity:
+        access_token = get_access_token()
+        if access_token is None:
+            raise ToolError("authentication required")
+        try:
+            subject = access_token.subject
+            client_id = access_token.client_id
+            claims = access_token.claims or {}
+            email = claims.get("email")
+            if (
+                not isinstance(subject, str)
+                or not isinstance(client_id, str)
+                or not isinstance(email, str)
+                or not email
+                or not isinstance(claims, dict)
+            ):
+                raise ValueError("malformed access token claims")
+            return Identity(
+                user_id=uuid.UUID(subject),
+                email=email,
+                api_key_id=uuid.UUID(client_id),
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("rejected request with malformed auth claims")
+            raise ToolError("invalid authenticated identity") from exc
+
+
+class RecallumTokenVerifier(TokenVerifier):
+    """Expose the repository-backed API-key verifier to FastMCP's HTTP layer."""
+
+    def __init__(self, authenticator: TokenAuthenticator) -> None:
+        super().__init__()
+        self._authenticator = authenticator
+
+    async def verify_token(self, token: str) -> AccessToken | None:
         identity = await self._authenticator.authenticate(token)
         if identity is None:
-            logger.info("rejected request with invalid or revoked api key")
-            raise ToolError("invalid or revoked API key")
-        return identity
+            return None
+        return AccessToken(
+            token=token,
+            client_id=str(identity.api_key_id),
+            scopes=[],
+            subject=str(identity.user_id),
+            claims={"email": identity.email},
+        )
+
+
+__all__ = [
+    "BearerAuthMiddleware",
+    "IDENTITY_CACHE_TTL",
+    "MAX_CACHED_IDENTITIES",
+    "RecallumTokenVerifier",
+    "TokenAuthenticator",
+    "_extract_bearer",
+]

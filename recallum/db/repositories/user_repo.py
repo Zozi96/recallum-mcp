@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
-from recallum.db.models import User
+from recallum.db.models import ApiKey, User
 from recallum.db.session import SessionProvider
 
 
@@ -53,6 +53,31 @@ class UserRepository:
         async with self._sessions.admin() as session:
             result = await session.execute(select(User).order_by(User.created_at, User.id))
             return result.scalars().all()
+
+    async def list_users_with_active_key_counts(
+        self, *, limit: int, offset: int
+    ) -> tuple[Sequence[tuple[User, int]], int]:
+        """Page users with active API-key counts in a constant number of statements."""
+        async with self._sessions.admin() as session:
+            total = (
+                await session.execute(select(func.count()).select_from(User))
+            ).scalar_one()
+            active_keys = (
+                select(ApiKey.user_id, func.count().label("active_key_count"))
+                .where(ApiKey.revoked_at.is_(None))
+                .group_by(ApiKey.user_id)
+                .subquery()
+            )
+            rows = (
+                await session.execute(
+                    select(User, func.coalesce(active_keys.c.active_key_count, 0))
+                    .outerjoin(active_keys, User.id == active_keys.c.user_id)
+                    .order_by(User.created_at, User.id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).all()
+            return [(user, int(count)) for user, count in rows], int(total)
 
     async def count_admins(self) -> int:
         async with self._sessions.admin() as session:

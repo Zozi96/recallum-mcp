@@ -1,0 +1,16 @@
+# Pinned Traefik static config for CI smoke (task 9.5).
+# Image pin lives in tests/traefik/test_pinned_traefik.py (TRAEFIK_IMAGE).
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: false
+
+api:
+  dashboard: false
+
+log:
+  level: ERROR

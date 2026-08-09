@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from recallum.boundary_types import StrictImportance
+
 RecallMode = Literal["hybrid", "degraded_textual"]
 
 
@@ -81,7 +83,7 @@ class RememberBatchItem(BaseModel):
     content: str
     category: Literal["preference", "decision", "constraint", "fact"]
     project: str | None = None
-    importance: int = 5
+    importance: StrictImportance = 5
     metadata: dict[str, Any] | None = None
 
 

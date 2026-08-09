@@ -362,19 +362,6 @@
         "title": "CreateMemoryRequest",
         "type": "object"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object"
-      },
       "HistoryItem": {
         "properties": {
           "category": {
@@ -1346,6 +1333,74 @@
         "title": "RememberResult",
         "type": "object"
       },
+      "SearchMemoriesRequest": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "enum": [
+                  "preference",
+                  "decision",
+                  "constraint",
+                  "fact"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "query": {
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "global",
+                  "project"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "SearchMemoriesRequest",
+        "type": "object"
+      },
       "SimilarMemory": {
         "description": "An existing memory close enough to a new one to be about the same thing.\n\n``similarity`` is cosine similarity between embeddings, so it measures\noverlap of subject, not agreement. Two memories can be near-identical and\nsay opposite things. Deciding whether this is a restatement, a refinement\nor a contradiction requires reading both, which is the agent's job.",
         "properties": {
@@ -1632,46 +1687,13 @@
         ],
         "title": "UserResponse",
         "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "APIKeyCookie": {
+        "in": "cookie",
+        "name": "recallum_session",
+        "type": "apiKey"
       }
     }
   },
@@ -1684,6 +1706,30 @@
     "/admin/aggregates": {
       "get": {
         "operationId": "aggregates_admin_aggregates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "ge": 1,
+              "le": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1694,8 +1740,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Aggregates",
         "tags": [
           "admin"
@@ -1715,8 +1781,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Detailed Status",
         "tags": [
           "admin"
@@ -1726,6 +1812,30 @@
     "/admin/users": {
       "get": {
         "operationId": "list_users_admin_users_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "ge": 1,
+              "le": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1740,8 +1850,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "List Users",
         "tags": [
           "admin"
@@ -1770,17 +1900,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Create User",
         "tags": [
           "admin"
@@ -1823,17 +1963,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Set Admin",
         "tags": [
           "admin"
@@ -1870,17 +2020,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "List Keys",
         "tags": [
           "admin"
@@ -1921,17 +2081,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Issue Key",
         "tags": [
           "admin"
@@ -1967,17 +2137,27 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Revoke Key",
         "tags": [
           "admin"
@@ -2008,17 +2188,20 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "429": {
+            "description": "Too many requests"
           }
         },
+        "security": [],
         "summary": "Login",
         "tags": [
           "auth"
@@ -2031,8 +2214,28 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Logout",
         "tags": [
           "auth"
@@ -2052,8 +2255,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Me",
         "tags": [
           "auth"
@@ -2110,17 +2333,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Own Activity",
         "tags": [
           "self-service"
@@ -2144,8 +2377,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "List Api Keys",
         "tags": [
           "self-service"
@@ -2174,17 +2427,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Issue Api Key",
         "tags": [
           "self-service"
@@ -2210,17 +2473,27 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Revoke Api Key",
         "tags": [
           "self-service"
@@ -2343,17 +2616,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "List Memories",
         "tags": [
           "self-service"
@@ -2382,17 +2665,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Create Memory",
         "tags": [
           "self-service"
@@ -2423,17 +2716,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Reassign Project",
         "tags": [
           "self-service"
@@ -2442,7 +2745,9 @@
     },
     "/me/memories/search": {
       "get": {
-        "operationId": "search_memories_me_memories_search_get",
+        "deprecated": true,
+        "description": "Legacy search endpoint retained for one release. Prefer POST with the query in the JSON body. Emits Deprecation and Sunset headers. Published sunset: Tue, 01 Dec 2026 00:00:00 GMT (override with RECALLUM__WEB__GET_SEARCH_SUNSET).",
+        "operationId": "search_memories_get_me_memories_search_get",
         "parameters": [
           {
             "in": "query",
@@ -2538,19 +2843,92 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Search results",
+            "headers": {
+              "Deprecation": {
+                "description": "Present when the operation is deprecated",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Sunset": {
+                "description": "HTTP-date when this operation will be removed. Default published value: Tue, 01 Dec 2026 00:00:00 GMT.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
           },
           "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Deprecated: use POST /me/memories/search",
+        "tags": [
+          "self-service"
+        ]
+      },
+      "post": {
+        "operationId": "search_memories_me_memories_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchMemoriesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/RecallResult"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Search Memories",
         "tags": [
           "self-service"
@@ -2576,17 +2954,27 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Forget Memory",
         "tags": [
           "self-service"
@@ -2617,17 +3005,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Get Memory",
         "tags": [
           "self-service"
@@ -2668,17 +3066,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Correct Memory",
         "tags": [
           "self-service"
@@ -2711,17 +3119,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Memory History",
         "tags": [
           "self-service"
@@ -2764,17 +3182,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Supersede Memory",
         "tags": [
           "self-service"
@@ -2871,17 +3299,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Memory Graph",
         "tags": [
           "self-service"
@@ -2920,17 +3358,27 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Memory Profile",
         "tags": [
           "self-service"
@@ -2950,8 +3398,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "summary": "Statistics",
         "tags": [
           "self-service"

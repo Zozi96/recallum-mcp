@@ -23,12 +23,12 @@ async def test_aggregates_count_each_user_without_returning_content(container):
         first.id, content="must never appear in admin output", category="fact"
     )
 
-    total, active, revoked, counts = await container.admin_service().aggregates()
-    assert total == 2
-    assert active == 1
-    assert revoked == 1
-    assert counts == {first.id: 1, second.id: 0}
-    assert "must never appear" not in repr((total, active, revoked, counts))
+    page = await container.admin_service().aggregates(limit=100, offset=0)
+    assert page.total_users == 2
+    assert page.active_keys == 1
+    assert page.revoked_keys == 1
+    assert dict(page.memories) == {first.id: 1, second.id: 0}
+    assert "must never appear" not in repr(page)
     assert await container.authenticator().authenticate(active_key.plaintext) is not None
 
 
@@ -80,3 +80,74 @@ async def test_detailed_status_detects_model_mismatch_without_exposing_content(c
         True,
     )
     assert "private model provenance" not in repr((database, embeddings, model, mismatch))
+
+
+async def _count_statements(container, awaitable):
+    engine = container.engine()
+    statements: list[str] = []
+
+    def before_cursor_execute(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ):
+        statements.append(statement)
+
+    from sqlalchemy import event
+
+    event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        result = await awaitable
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
+    return result, statements
+
+
+async def test_admin_query_budget_is_constant_across_cardinality(container):
+    for index in range(10):
+        user = await container.api_key_service().create_user(
+            f"budget-small-{index}@example.com"
+        )
+        if index % 2 == 0:
+            await container.memory_service().remember(
+                user.id, content=f"small-{index}", category="fact"
+            )
+
+    small_users, small_user_sql = await _count_statements(
+        container,
+        container.admin_service().list_users(limit=100, offset=0),
+    )
+    small_agg, small_agg_sql = await _count_statements(
+        container,
+        container.admin_service().aggregates(limit=100, offset=0),
+    )
+    _small_status, small_status_sql = await _count_statements(
+        container,
+        container.admin_service().status(),
+    )
+
+    for index in range(40):
+        user = await container.api_key_service().create_user(
+            f"budget-large-{index}@example.com"
+        )
+        await container.memory_service().remember(
+            user.id, content=f"large-{index}", category="fact"
+        )
+
+    large_users, large_user_sql = await _count_statements(
+        container,
+        container.admin_service().list_users(limit=100, offset=0),
+    )
+    large_agg, large_agg_sql = await _count_statements(
+        container,
+        container.admin_service().aggregates(limit=100, offset=0),
+    )
+    _large_status, large_status_sql = await _count_statements(
+        container,
+        container.admin_service().status(),
+    )
+
+    assert len(small_user_sql) == len(large_user_sql) == 2
+    assert len(small_agg_sql) == len(large_agg_sql) == 3
+    assert len(small_status_sql) == len(large_status_sql)
+    assert small_users.total < large_users.total
+    assert small_agg.memories_total < large_agg.memories_total
+    assert all("content" not in sql.lower() for sql in large_agg_sql + large_status_sql)

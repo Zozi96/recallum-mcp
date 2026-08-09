@@ -245,6 +245,43 @@ class MemoryRepository:
                 )
             ).scalar_one()
 
+    async def page_active_counts(
+        self, *, limit: int, offset: int
+    ) -> tuple[list[tuple[uuid.UUID, int]], int]:
+        """Page zero-inclusive active memory counts without selecting content."""
+        async with self._sessions.admin() as session:
+            total = (
+                await session.execute(select(func.count()).select_from(User))
+            ).scalar_one()
+            rows = (
+                await session.execute(
+                    select(User.id, User.active_memory_count)
+                    .order_by(User.created_at, User.id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).all()
+            return [(row.id, int(row.active_memory_count)) for row in rows], int(total)
+
+    async def has_any_model_mismatch(self, model: str) -> bool:
+        """Global existential mismatch probe; never selects memory content."""
+        async with self._sessions.admin() as session:
+            return (
+                await session.execute(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM memory_embedding_models
+                            WHERE embedding_model IS DISTINCT FROM :model
+                              AND active_count > 0
+                        )
+                        """
+                    ),
+                    {"model": model},
+                )
+            ).scalar_one()
+
     async def stale_embeddings_batch(
         self,
         user_id: uuid.UUID,

@@ -49,6 +49,9 @@ class User(Base):
     memory_generation: Mapped[int] = mapped_column(
         BigInteger, server_default=text("0"), nullable=False
     )
+    active_memory_count: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("0"), default=0, nullable=False
+    )
 
     api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

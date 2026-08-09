@@ -26,6 +26,7 @@ from typing import Any, Literal, get_args
 
 from sqlalchemy.exc import IntegrityError
 
+from recallum.boundary_types import StrictImportance, StrictNonNegativeOffset, StrictPositiveLimit
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
@@ -34,6 +35,7 @@ from recallum.db.repositories.memory_repo import (
     ProfileGenerationConflict,
     ScoredMemory,
 )
+from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE, record_sanitized_failure
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.context import SessionContextBudget
@@ -99,7 +101,7 @@ class MemoryService:
         content: str,
         category: str,
         project: str | None = None,
-        importance: int = 5,
+        importance: StrictImportance = 5,
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
     ) -> RememberResult:
@@ -272,8 +274,14 @@ class MemoryService:
                     metadata=item.metadata,
                     source_client=source_client,
                 )
-            except (MemoryValidationError, EmbeddingError) as exc:
+            except MemoryValidationError as exc:
                 outcomes.append(RememberBatchItemOutcome(error=str(exc)))
+                continue
+            except EmbeddingError as exc:
+                record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                outcomes.append(
+                    RememberBatchItemOutcome(error=EMBEDDING_UNAVAILABLE_MESSAGE)
+                )
                 continue
             outcomes.append(
                 RememberBatchItemOutcome(
@@ -302,7 +310,7 @@ class MemoryService:
         *,
         content: str | None = None,
         category: str | None = None,
-        importance: int | None = None,
+        importance: StrictImportance | None = None,
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
     ) -> UpdateResult:
@@ -378,7 +386,7 @@ class MemoryService:
         source_ids: Sequence[uuid.UUID],
         content: str,
         category: str,
-        importance: int | None = None,
+        importance: StrictImportance | None = None,
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
     ) -> MergeResult:
@@ -556,7 +564,7 @@ class MemoryService:
         project: str | None = None,
         scope: str | None = None,
         category: str | None = None,
-        limit: int | None = None,
+        limit: StrictPositiveLimit | None = None,
     ) -> RecallResult:
         """Hybrid retrieval with RRF fusion; degrades to textual on embed failure."""
         normalized_query = self._normalize_content(query)
@@ -689,8 +697,8 @@ class MemoryService:
         *,
         project: str | None = None,
         focus: str | None = None,
-        max_items: int | None = None,
-        max_chars: int | None = None,
+        max_items: StrictPositiveLimit | None = None,
+        max_chars: StrictPositiveLimit | None = None,
     ) -> ContextResult:
         """Compact context: always-on profile first, then category snapshot.
 
@@ -895,8 +903,8 @@ class MemoryService:
         project: str | None = None,
         category: str | None = None,
         stale: bool | None = None,
-        limit: int | None = None,
-        offset: int = 0,
+        limit: StrictPositiveLimit | None = None,
+        offset: StrictNonNegativeOffset = 0,
     ) -> ListResult:
         """Enumerate the caller's active memories with bounded pagination.
 
@@ -913,7 +921,9 @@ class MemoryService:
         effective_limit = self._clamp_limit(
             limit, self._limits.list_default_limit, self._limits.list_max_limit
         )
-        offset = max(0, min(int(offset), self._limits.list_max_offset))
+        if not isinstance(offset, int) or isinstance(offset, bool):
+            raise MemoryValidationError("offset must be an integer")
+        offset = max(0, min(offset, self._limits.list_max_offset))
         cutoff = self._stale_cutoff() if stale is not None else None
         rows, total = await self._repo.list_active(
             user_id,
@@ -969,7 +979,7 @@ class MemoryService:
         scope: str | None = None,
         project: str | None = None,
         category: str | None = None,
-        limit: int | None = None,
+        limit: StrictPositiveLimit | None = None,
     ) -> MemoryGraphResponse:
         """Build a bounded graph while preserving nodes without strong edges."""
         normalized_project = self._normalize_project(project)
@@ -1147,7 +1157,9 @@ class MemoryService:
     def _clamp_limit(self, requested: int | None, default: int, maximum: int) -> int:
         if requested is None:
             return default
-        return max(1, min(int(requested), maximum))
+        if not isinstance(requested, int) or isinstance(requested, bool):
+            raise MemoryValidationError("limit must be an integer")
+        return max(1, min(requested, maximum))
 
     def _normalize_content(self, content: str) -> str:
         if content is None:

@@ -1,0 +1,32 @@
+name: FastMCP candidate advisory
+
+# Surfaced on every PR without blocking merge. Dependency-path and scheduled
+# runs are gated by fastmcp-candidate.yml (required when FastMCP/lock changes).
+
+on:
+  pull_request:
+
+concurrency:
+  group: fastmcp-advisory-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisory:
+    name: fastmcp-candidate-advisory
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: Advisory newest FastMCP <4
+        id: matrix
+        run: bash scripts/check_fastmcp_matrix.sh
+      - name: Keep advisories separate from required locked checks
+        if: failure()
+        run: |
+          echo "Candidate FastMCP failed; locked CI jobs remain the merge gate."
+          echo "A FastMCP/lock upgrade stays blocked until the required candidate job passes."

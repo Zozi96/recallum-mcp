@@ -21,8 +21,12 @@ class PasswordService:
         parallelism: int = 1,
         hash_len: int = 32,
         salt_len: int = 16,
+        max_password_chars: int = 256,
     ) -> None:
+        if not 0 < max_password_chars <= 256:
+            raise ValueError("max_password_chars must be between 1 and 256")
         self._users = users
+        self._max_password_chars = max_password_chars
         self._hasher = PasswordHasher(
             memory_cost=memory_cost,
             time_cost=time_cost,
@@ -33,17 +37,22 @@ class PasswordService:
         )
 
     async def hash(self, password: str) -> str:
+        self._validate_password(password)
         if not password:
             raise ValueError("password must not be empty")
         return await asyncio.to_thread(self._hasher.hash, password)
 
     async def verify(self, encoded: str, password: str) -> bool:
+        if not self._password_allowed(password):
+            return False
         try:
             return await asyncio.to_thread(self._hasher.verify, encoded, password)
         except (InvalidHashError, VerifyMismatchError):
             return False
 
     async def authenticate(self, email: str, password: str) -> User | None:
+        if not self._password_allowed(password):
+            return None
         user = await self._users.get_by_email(email.lower())
         if user is None or user.password_hash is None:
             # One Argon2 operation for every failed attempt, including unknown users.
@@ -53,3 +62,10 @@ class PasswordService:
 
     async def set_password(self, user: User, password: str) -> None:
         await self._users.set_password(user.id, await self.hash(password))
+
+    def _password_allowed(self, password: str) -> bool:
+        return isinstance(password, str) and len(password) <= self._max_password_chars
+
+    def _validate_password(self, password: str) -> None:
+        if not self._password_allowed(password):
+            raise ValueError("password exceeds configured maximum length")

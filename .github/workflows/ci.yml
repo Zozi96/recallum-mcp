@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  lint-lock:
+    name: lint-lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Python toolchain
+        run: uv python install
+      - name: Sync locked deps
+        run: uv sync --locked --group dev
+      - name: uv lock --check
+        run: uv lock --check
+      - name: Ruff
+        run: uv run ruff check .
+
+  unit-plugin:
+    name: unit-plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: Unit tests (excl. vertical/traefik/integration)
+        run: >
+          uv run pytest tests/unit
+          -m "not integration and not vertical and not traefik"
+          --tb=short
+      - name: Plugin / manifest tests
+        run: uv run pytest plugins/recallum-memory/tests -q --tb=short
+
+  openapi-snapshot:
+    name: openapi-snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: OpenAPI snapshot check
+        run: uv run python scripts/export_web_openapi.py --check
+      - name: Snapshot unit contract
+        run: uv run pytest tests/unit/test_self_service_api.py::test_versioned_openapi_matches_web_app_only -q --tb=short
+
+  compose-supported:
+    name: compose-supported
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate supported compose only
+        run: bash scripts/check_compose_supported.sh
+      - name: Refuse dokploy as required input
+        run: |
+          test -f deploy/dokploy-compose.yml
+          if docker compose -f deploy/dokploy-compose.yml config >/tmp/dokploy.yml 2>/tmp/dokploy.err; then
+            echo "dokploy compose parses but is not part of the supported gate"
+          fi
+          ! grep -q 'deploy/dokploy-compose.yml' scripts/check_compose_supported.sh | grep include || true
+          bash -c '! scripts/check_compose_supported.sh --include-dokploy'
+
+  postgres-integration:
+    name: postgres-integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: PostgreSQL + pgvector + embedding HTTP stub
+        run: bash scripts/pytest_require_executed.sh tests/integration -m integration --tb=short
+
+  vertical-granian:
+    name: vertical-granian
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: External Granian vertical contract
+        run: bash scripts/pytest_require_executed.sh tests/vertical -m vertical --tb=short
+
+  traefik-pinned:
+    name: traefik-pinned
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: Pinned Traefik contract
+        run: bash scripts/pytest_require_executed.sh tests/traefik -m traefik --tb=short

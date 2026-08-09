@@ -5,12 +5,20 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from recallum.auth.api_keys import ApiKeyService
 from recallum.auth.passwords import PasswordService
+from recallum.boundary_types import (
+    Password,
+    StrictImportanceInput,
+    StrictPositiveLimit,
+    StrictQueryNonNegativeOffset,
+    StrictQueryPositiveLimit,
+    password_model,
+)
 from recallum.db.models import ApiKey, Memory
 from recallum.db.repositories.api_key_repo import ApiKeyRepository
 from recallum.db.repositories.memory_repo import MemoryRepository
@@ -28,11 +36,13 @@ from recallum.memory.schemas import (
 from recallum.memory.service import MemoryService
 from recallum.telemetry.repository import TelemetryRepository
 from recallum.web.auth import WebAuthenticator, WebIdentity
+from recallum.web.openapi_responses import PROTECTED_RESPONSES
 
 Category = Literal["preference", "decision", "constraint", "fact"]
 Scope = Literal["global", "project"]
 Metadata = dict[str, str | int | float | bool | None]
 logger = logging.getLogger(__name__)
+DEFAULT_GET_SEARCH_SUNSET = "Tue, 01 Dec 2026 00:00:00 GMT"
 
 
 class DomainRoute(APIRoute):
@@ -66,7 +76,7 @@ class CreateMemoryRequest(BaseModel):
     category: Category
     scope: Scope | None = None
     project: str | None = None
-    importance: int = 5
+    importance: StrictImportanceInput = 5
     metadata: Metadata | None = None
     source_client: str | None = None
 
@@ -98,16 +108,25 @@ class MemoryLocationImmutableRequest(BaseModel):
 
 class CorrectMemoryRequest(MemoryLocationImmutableRequest):
     category: Category | None = None
-    importance: int | None = None
+    importance: StrictImportanceInput | None = None
     metadata: Metadata | None = None
 
 
 class SupersedeMemoryRequest(MemoryLocationImmutableRequest):
     content: str
     category: Category | None = None
-    importance: int | None = None
+    importance: StrictImportanceInput | None = None
     metadata: Metadata | None = None
     source_client: str | None = None
+
+
+class SearchMemoriesRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    query: str = Field(min_length=1)
+    project: str | None = None
+    scope: Scope | None = None
+    category: Category | None = None
+    limit: StrictPositiveLimit | None = None
 
 
 class SupersedeResponse(BaseModel):
@@ -137,7 +156,7 @@ class ApiKeyResponse(BaseModel):
 
 
 class IssueApiKeyRequest(BaseModel):
-    password: str = Field(min_length=1)
+    password: Password
     name: str | None = None
 
 
@@ -208,6 +227,9 @@ def create_self_service_router(
     activity: TelemetryRepository,
     authenticate: WebAuthenticator,
     activity_retention_days: int,
+    *,
+    password_max_chars: int = 256,
+    get_search_sunset: str = DEFAULT_GET_SEARCH_SUNSET,
 ) -> APIRouter:
     identity = Annotated[WebIdentity, Depends(authenticate)]
     router = APIRouter(
@@ -215,7 +237,27 @@ def create_self_service_router(
         tags=["self-service"],
         dependencies=[Depends(authenticate)],
         route_class=DomainRoute,
+        responses=PROTECTED_RESPONSES,
     )
+    configured_issue_api_key = password_model(IssueApiKeyRequest, password_max_chars)
+
+    async def _search(
+        current: WebIdentity,
+        *,
+        query: str,
+        project: str | None,
+        scope: Scope | None,
+        category: Category | None,
+        limit: int | None,
+    ) -> RecallResult:
+        return await memories.recall(
+            current.user.id,
+            query=query,
+            project=project,
+            scope=scope,
+            category=category,
+            limit=limit,
+        )
 
     @router.get("/memories", response_model=ListResult)
     async def list_memories(
@@ -224,8 +266,8 @@ def create_self_service_router(
         project: Annotated[str | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
         stale: Annotated[bool | None, Query()] = None,
-        limit: Annotated[int | None, Query()] = None,
-        offset: Annotated[int, Query()] = 0,
+        limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
+        offset: Annotated[StrictQueryNonNegativeOffset, Query()] = 0,
     ) -> ListResult:
         return await memories.list_memories(
             current.user.id,
@@ -243,7 +285,7 @@ def create_self_service_router(
         scope: Annotated[Scope | None, Query()] = None,
         project: Annotated[str | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
-        limit: Annotated[int | None, Query()] = None,
+        limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
     ) -> MemoryGraphResponse:
         return await memories.memory_graph(
             current.user.id,
@@ -260,17 +302,64 @@ def create_self_service_router(
     ) -> ProfileBlock:
         return await memories.get_profile(current.user.id, project=project)
 
-    @router.get("/memories/search", response_model=RecallResult)
+    @router.post("/memories/search", response_model=RecallResult)
     async def search_memories(
+        body: SearchMemoriesRequest, current: identity
+    ) -> RecallResult:
+        return await _search(
+            current,
+            query=body.query,
+            project=body.project,
+            scope=body.scope,
+            category=body.category,
+            limit=body.limit,
+        )
+
+    @router.get(
+        "/memories/search",
+        response_model=RecallResult,
+        deprecated=True,
+        summary="Deprecated: use POST /me/memories/search",
+        description=(
+            "Legacy search endpoint retained for one release. Prefer POST with "
+            "the query in the JSON body. Emits Deprecation and Sunset headers. "
+            f"Published sunset: {get_search_sunset} "
+            "(override with RECALLUM__WEB__GET_SEARCH_SUNSET)."
+        ),
+        responses={
+            **PROTECTED_RESPONSES,
+            200: {
+                "description": "Search results",
+                "headers": {
+                    "Deprecation": {
+                        "description": "Present when the operation is deprecated",
+                        "schema": {"type": "string"},
+                    },
+                    "Sunset": {
+                        "description": (
+                            "HTTP-date when this operation will be removed. "
+                            f"Default published value: {DEFAULT_GET_SEARCH_SUNSET}."
+                        ),
+                        "schema": {"type": "string"},
+                    },
+                },
+            },
+        },
+    )
+    async def search_memories_get(
+        response: Response,
         current: identity,
         query: Annotated[str, Query(min_length=1)],
         project: Annotated[str | None, Query()] = None,
         scope: Annotated[Scope | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
-        limit: Annotated[int | None, Query()] = None,
+        limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
     ) -> RecallResult:
-        return await memories.recall(
-            current.user.id,
+        # Query text must never be logged (URL query is itself a migration risk).
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = get_search_sunset
+        return await _search(
+            current,
             query=query,
             project=project,
             scope=scope,
@@ -359,7 +448,9 @@ def create_self_service_router(
         return [_key(row) for row in await api_keys.list_keys(current.user.id)]
 
     @router.post("/api-keys", response_model=IssuedApiKeyResponse, status_code=201)
-    async def issue_api_key(body: IssueApiKeyRequest, current: identity) -> IssuedApiKeyResponse:
+    async def issue_api_key(
+        body: configured_issue_api_key, current: identity
+    ) -> IssuedApiKeyResponse:
         password_hash = current.user.password_hash
         if password_hash is None or not await passwords.verify(password_hash, body.password):
             raise HTTPException(status_code=403, detail="Invalid password")

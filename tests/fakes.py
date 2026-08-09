@@ -785,6 +785,27 @@ class FakeMemoryRepository:
             for memory in self._active(user_id)
         )
 
+    async def page_active_counts(
+        self, *, limit: int, offset: int
+    ) -> tuple[list[tuple[uuid.UUID, int]], int]:
+        users = getattr(self, "users", None)
+        if users is None:
+            ordered = sorted(
+                {memory.user_id for memory in self.rows.values()},
+                key=str,
+            )
+        else:
+            ordered = [user.id for user in await users.list_users()]
+        page = ordered[offset : offset + limit]
+        return [(user_id, await self.count_active(user_id)) for user_id in page], len(ordered)
+
+    async def has_any_model_mismatch(self, model: str) -> bool:
+        return any(
+            memory.embedding_model is not None and memory.embedding_model != model
+            for memory in self.rows.values()
+            if not memory.is_deleted
+        )
+
 
 class FakeUserRepository:
     def __init__(self) -> None:
@@ -817,6 +838,24 @@ class FakeUserRepository:
 
     async def list_users(self) -> Sequence[User]:
         return sorted(self.users.values(), key=lambda user: (user.created_at, str(user.id)))
+
+    async def list_users_with_active_key_counts(
+        self, *, limit: int, offset: int
+    ) -> tuple[Sequence[tuple[User, int]], int]:
+        keys = getattr(self, "keys", None)
+        ordered = await self.list_users()
+        page = ordered[offset : offset + limit]
+        rows: list[tuple[User, int]] = []
+        for user in page:
+            if keys is None:
+                active = 0
+            else:
+                active = sum(
+                    key.revoked_at is None
+                    for key in await keys.list_for_user(user.id)
+                )
+            rows.append((user, active))
+        return rows, len(ordered)
 
     async def count_admins(self) -> int:
         return sum(user.is_admin for user in self.users.values())
@@ -1024,13 +1063,16 @@ class FakeTelemetryRepository:
 def build_test_container(
     embedder: FakeEmbeddingClient | ScriptedEmbeddingClient | None = None,
     engine: FakeEngine | None = None,
+    settings: Settings | None = None,
 ) -> tuple[Container, dict[str, Any]]:
     """A container fully isolated from PostgreSQL and Ollama."""
-    container = create_container(Settings())
+    container = create_container(settings if settings is not None else Settings())
     users = FakeUserRepository()
     keys = FakeApiKeyRepository(users)
+    users.keys = keys
     web_sessions = FakeWebSessionRepository(users)
     memories = FakeMemoryRepository()
+    memories.users = users
     telemetry = FakeTelemetryRepository()
     embedder = embedder if embedder is not None else FakeEmbeddingClient()
     container.user_repository.override(providers.Object(users))

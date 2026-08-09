@@ -14,7 +14,12 @@ from urllib.parse import unquote
 from fastmcp import FastMCP
 
 from recallum.auth.identity import require_identity
-from recallum.auth.middleware import BearerAuthMiddleware
+from recallum.auth.middleware import BearerAuthMiddleware, RecallumTokenVerifier
+from recallum.boundary_types import (
+    StrictImportanceInput,
+    StrictNonNegativeOffset,
+    StrictPositiveLimit,
+)
 from recallum.mcp.errors import translates_domain_errors
 from recallum.memory.schemas import (
     ContextResult,
@@ -91,13 +96,18 @@ All identity comes from the API key; tools never accept a user id.
 
 def build_mcp_server(container: Container) -> FastMCP:
     """Create the FastMCP server wired to the given DI container."""
-    mcp = FastMCP(name="recallum", instructions=INSTRUCTIONS)
+    mcp = FastMCP(
+        name="recallum",
+        instructions=INSTRUCTIONS,
+        auth=RecallumTokenVerifier(container.authenticator()),
+        mask_error_details=True,
+    )
     # FastMCP 3.4 preserves registration order for inbound middleware. Auth
     # therefore rejects first and binds the identity around telemetry.
-    mcp.add_middleware(BearerAuthMiddleware(container.authenticator()))
+    mcp.add_middleware(BearerAuthMiddleware())
     mcp.add_middleware(UsageTelemetryMiddleware(container.telemetry_buffer()))
 
-    def service():
+    def memory_service():
         return container.memory_service()
 
     @mcp.tool
@@ -106,7 +116,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         content: str,
         category: Literal["preference", "decision", "constraint", "fact"],
         project: str | None = None,
-        importance: int = 5,
+        importance: StrictImportanceInput = 5,
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
     ) -> RememberResult:
@@ -122,7 +132,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         project for global memories. Storing the same content and scope again
         returns the existing memory instead of duplicating it.
         """
-        return await service().remember(
+        return await memory_service().remember(
             require_identity().user_id,
             content=content,
             category=category,
@@ -146,7 +156,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         `similar` field and reconcile as you would for remember. Prefer a few
         high-signal items over a recap; the batch is capped small on purpose.
         """
-        return await service().remember_batch(
+        return await memory_service().remember_batch(
             require_identity().user_id,
             items=items,
             source_client=source_client,
@@ -159,7 +169,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         project: str | None = None,
         scope: Literal["global", "project"] | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
-        limit: int | None = None,
+        limit: StrictPositiveLimit | None = None,
     ) -> RecallResult:
         """Search memories by meaning, exact terms and close spellings.
 
@@ -173,7 +183,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         exactly 'global' or 'project'. When embeddings are unavailable the
         result mode is 'degraded_textual' (lexical legs only).
         """
-        return await service().recall(
+        return await memory_service().recall(
             require_identity().user_id,
             query=query,
             project=project,
@@ -187,8 +197,8 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def context(
         project: str | None = None,
         focus: str | None = None,
-        max_items: int | None = None,
-        max_chars: int | None = None,
+        max_items: StrictPositiveLimit | None = None,
+        max_chars: StrictPositiveLimit | None = None,
     ) -> ContextResult:
         """Get compact session context: always-on profile plus project snapshot.
 
@@ -201,7 +211,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         text with get_memory. Profile-only reads can use the
         recallum://profile resource instead.
         """
-        return await service().context(
+        return await memory_service().context(
             require_identity().user_id,
             project=project,
             focus=focus,
@@ -217,7 +227,7 @@ def build_mcp_server(container: Container) -> FastMCP:
     )
     @translates_domain_errors
     async def memory_profile_global() -> str:
-        block = await service().get_profile(require_identity().user_id, project=None)
+        block = await memory_service().get_profile(require_identity().user_id, project=None)
         return block.model_dump_json()
 
     @mcp.resource(
@@ -228,7 +238,7 @@ def build_mcp_server(container: Container) -> FastMCP:
     )
     @translates_domain_errors
     async def memory_profile_project(project: str) -> str:
-        block = await service().get_profile(
+        block = await memory_service().get_profile(
             require_identity().user_id, project=unquote(project)
         )
         return block.model_dump_json()
@@ -247,7 +257,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         first. Unknown ids, other users' ids and retired ids all return
         found=false.
         """
-        return await service().get(
+        return await memory_service().get(
             require_identity().user_id,
             memory_id,
             include_history=include_history,
@@ -260,8 +270,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         project: str | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
         stale: bool | None = None,
-        limit: int | None = None,
-        offset: int = 0,
+        limit: StrictPositiveLimit | None = None,
+        offset: StrictNonNegativeOffset = 0,
     ) -> ListResult:
         """List active memories with optional filters and bounded pagination.
 
@@ -271,7 +281,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         re-store it unchanged to reconfirm, update it, or forget it.
         stale=false keeps only fresh memories.
         """
-        return await service().list_memories(
+        return await memory_service().list_memories(
             require_identity().user_id,
             scope=scope,
             project=project,
@@ -287,7 +297,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         memory_id: uuid.UUID,
         content: str | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
-        importance: int | None = None,
+        importance: StrictImportanceInput | None = None,
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
     ) -> UpdateResult:
@@ -301,7 +311,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         place and keeps its id. Scope and project cannot be changed. Unknown
         ids return updated=false.
         """
-        return await service().update(
+        return await memory_service().update(
             require_identity().user_id,
             memory_id,
             content=content,
@@ -317,7 +327,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         source_ids: list[uuid.UUID],
         content: str,
         category: Literal["preference", "decision", "constraint", "fact"],
-        importance: int | None = None,
+        importance: StrictImportanceInput | None = None,
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
     ) -> MergeResult:
@@ -334,7 +344,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         contradiction is an update of the wrong memory, not a merge. If any
         source id is unknown, merged=false and nothing changed.
         """
-        return await service().merge(
+        return await memory_service().merge(
             require_identity().user_id,
             source_ids=source_ids,
             content=content,
@@ -352,7 +362,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         Unknown ids and ids belonging to other users both return
         forgotten=false, without revealing ownership.
         """
-        return await service().forget(require_identity().user_id, memory_id)
+        return await memory_service().forget(require_identity().user_id, memory_id)
 
     return mcp
 
@@ -362,7 +372,7 @@ FORBIDDEN_TOOL_INPUTS = {"user_id", "user", "owner", "tenant", "api_key"}
 
 async def validate_no_user_inputs(mcp: FastMCP) -> None:
     """Fail fast (startup/tests) if any tool schema ever grows a user selector."""
-    for tool in await mcp.list_tools():
+    for tool in await mcp.list_tools(run_middleware=False):
         schema = tool.parameters or {}
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         overlap = FORBIDDEN_TOOL_INPUTS.intersection(properties)
@@ -372,22 +382,28 @@ async def validate_no_user_inputs(mcp: FastMCP) -> None:
 
 async def tool_names(mcp: FastMCP) -> list[str]:
     """Names of the registered tools (used by tests)."""
-    return [tool.name for tool in await mcp.list_tools()]
+    return [tool.name for tool in await mcp.list_tools(run_middleware=False)]
 
 
 async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
     """Fail fast if the server exposes unexpected resources or any prompts.
 
     Profile resources are allowed; BearerAuthMiddleware authenticates list/read.
-    Uses the local registry (``_list_*``) so startup validation does not need
-    a bearer token. Prompts remain forbidden until designed.
+    Uses the local compatibility seam so startup validation does not need a
+    bearer token. Prompts remain forbidden until designed.
     """
-    resources = await mcp._list_resources()
+    from recallum.mcp.compatibility import (
+        list_local_prompts,
+        list_local_resource_templates,
+        list_local_resources,
+    )
+
+    resources = await list_local_resources(mcp)
     resource_uris = {str(resource.uri) for resource in resources}
     unexpected = resource_uris - ALLOWED_PROFILE_RESOURCE_URIS
     if unexpected:
         raise RuntimeError(f"unexpected resources exposed: {sorted(unexpected)}")
-    templates = await mcp._list_resource_templates()
+    templates = await list_local_resource_templates(mcp)
     template_uris = {
         str(getattr(template, "uri_template", "") or getattr(template, "uriTemplate", ""))
         for template in templates
@@ -399,11 +415,7 @@ async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
         raise RuntimeError(
             f"unexpected resource templates exposed: {sorted(unexpected_templates)}"
         )
-    prompts = (
-        await mcp._list_prompts()
-        if hasattr(mcp, "_list_prompts")
-        else await mcp.list_prompts()
-    )
+    prompts = await list_local_prompts(mcp)
     if prompts:
         names = [prompt.name for prompt in prompts]
         raise RuntimeError(f"prompts exposed: {names}")

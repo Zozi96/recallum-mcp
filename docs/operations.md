@@ -47,7 +47,45 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__TELEMETRY__FLUSH_INTERVAL_SECONDS` | `5` | Maximum delay before pending activity is flushed |
 | `RECALLUM__TELEMETRY__BUFFER_LIMIT` | `1000` | Maximum in-memory events; overflow drops the oldest |
 | `RECALLUM__TELEMETRY__RETENTION_DAYS` | `90` | Age after which persisted activity is purged |
+| `RECALLUM__RUNTIME__WORKERS` | `1` | Granian workers; must stay `1` while MCP is stateful |
+| `RECALLUM__RUNTIME__MCP_STATELESS_HTTP` | `false` | Reserved flag only; does not unlock `workers > 1` until FastMCP is wired for stateless HTTP |
 | `RECALLUM__LIMITS__*` | see `src/recallum/config.py` | Content/metadata/retrieval limits |
+
+The public MCP boundary is configured under `RECALLUM__BOUNDARY__*`. Set
+`RECALLUM__ENVIRONMENT=production` only with explicit, non-wildcard JSON arrays
+for hosts, origins, and trusted proxy networks; production startup rejects
+missing or invalid values. The defaults below are the validated S004 seam and
+are not enforcement by themselves:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `RECALLUM__BOUNDARY__MCP__ALLOWED_HOSTS` | `localhost`, `127.0.0.1`, `[::1]`, `testserver` | Exact MCP Host allowlist |
+| `RECALLUM__BOUNDARY__MCP__ALLOWED_ORIGINS` | local HTTP origins | Exact MCP Origin allowlist |
+| `RECALLUM__BOUNDARY__PROXY__TRUSTED_CIDRS` | `[]` | Peers allowed to supply `X-Forwarded-For` |
+| `RECALLUM__BOUNDARY__REQUEST__GENERAL_BODY_BYTES` | `1048576` | General body ceiling |
+| `RECALLUM__BOUNDARY__REQUEST__LOGIN_BODY_BYTES` | `16384` | Login body ceiling |
+| `RECALLUM__BOUNDARY__REQUEST__PASSWORD_MAX_CHARS` | `256` | Password ceiling |
+| `RECALLUM__BOUNDARY__RATE__*` | `30/300`, `5/300`, `60/60`, `10000` | Login IP, login IP-account, invalid MCP, and bucket budgets |
+
+For example, list settings use JSON in the environment:
+
+```bash
+RECALLUM__ENVIRONMENT=production
+# Replace memory.example.com and 10.42.0.0/16 with the reviewed deployment values.
+RECALLUM__BOUNDARY__MCP__ALLOWED_HOSTS='["memory.example.com"]'
+RECALLUM__BOUNDARY__MCP__ALLOWED_ORIGINS='["https://memory.example.com"]'
+RECALLUM__BOUNDARY__PROXY__TRUSTED_CIDRS='["10.42.0.0/16"]'
+RECALLUM__BOUNDARY__REQUEST__GENERAL_BODY_BYTES=1048576
+RECALLUM__BOUNDARY__REQUEST__LOGIN_BODY_BYTES=16384
+RECALLUM__BOUNDARY__REQUEST__PASSWORD_MAX_CHARS=256
+RECALLUM__BOUNDARY__RATE__LOGIN_IP_ATTEMPTS=30
+RECALLUM__BOUNDARY__RATE__LOGIN_IP_WINDOW_SECONDS=300
+RECALLUM__BOUNDARY__RATE__LOGIN_ACCOUNT_ATTEMPTS=5
+RECALLUM__BOUNDARY__RATE__LOGIN_ACCOUNT_WINDOW_SECONDS=300
+RECALLUM__BOUNDARY__RATE__INVALID_MCP_AUTH_ATTEMPTS=60
+RECALLUM__BOUNDARY__RATE__INVALID_MCP_AUTH_WINDOW_SECONDS=60
+RECALLUM__BOUNDARY__RATE__MAX_BUCKETS=10000
+```
 
 The telemetry buffer must be at least as large as its batch. Tool calls enqueue
 only content-free metadata in memory; one lifecycle-owned worker performs batch
@@ -104,6 +142,27 @@ docker run --rm -e RECALLUM_SKIP_MIGRATIONS=1 <image>
 migrating is not serialized by an advisory lock; the loser fails, retries, and
 finds the schema already at head, so it self-heals — but a rolling deploy across
 replicas is noisier than it needs to be. Scale to 1 while a migration lands.
+
+## Supported runtime topology (one worker, one replica)
+
+Stateful MCP keeps sessions in process memory. The supported deployment is
+exactly **one Granian worker** and **one replica**. `deploy/entrypoint.sh` and
+typed `RuntimeSettings` both read `RECALLUM__RUNTIME__WORKERS` (default `1`):
+the entrypoint refuses to start Granian when the value is not `1`, and Settings
+rejects the same misconfiguration before traffic. Setting
+`RECALLUM__RUNTIME__MCP_STATELESS_HTTP=true` does **not** unlock `workers > 1`
+until FastMCP is actually wired for validated stateless HTTP.
+
+Do not enable multi-worker or multi-replica serving until there is reviewed
+evidence for one of:
+
+1. FastMCP `stateless_http` (or equivalent) validated against Codex, Claude Code,
+   and Cursor for initialize, tool calls, revocation mid-session, and reconnects;
+2. Sticky sessions that pin every `/mcp` stream for a session to one process; or
+3. Shared session state that every worker can read and write safely.
+
+Capture that evidence in a change design and keep the one-worker entrypoint until
+the suite lands. Dokploy compose is out of scope for this contract.
 
 ## Dokploy deployment (separate services)
 

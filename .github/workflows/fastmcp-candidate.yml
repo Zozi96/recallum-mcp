@@ -1,0 +1,59 @@
+name: FastMCP candidate
+
+# Scheduled + dependency-PR lane for the newest FastMCP satisfying >=3.4,<4.
+# Path filters limit this workflow to FastMCP/lock/matrix changes, schedule, and
+# workflow_dispatch. Unrelated PRs use fastmcp-candidate-advisory.yml instead.
+# Branch protection / merge blocking is owned by task 9.8 (S009) — this workflow
+# only defines the check name; it does not configure required-status settings.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/check_fastmcp_matrix.sh"
+      - "recallum/mcp/compatibility.py"
+      - "tests/unit/test_fastmcp_compatibility.py"
+      - ".github/workflows/fastmcp-candidate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/check_fastmcp_matrix.sh"
+      - "recallum/mcp/compatibility.py"
+      - "tests/unit/test_fastmcp_compatibility.py"
+      - ".github/workflows/fastmcp-candidate.yml"
+
+concurrency:
+  group: fastmcp-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    name: fastmcp-candidate-latest-lt4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --locked --group dev
+      - name: Locked + newest compatible FastMCP matrix
+        run: bash scripts/check_fastmcp_matrix.sh
+      - name: Note for branch protection (task 9.8 / S009)
+        run: |
+          cat <<'EOF'
+          Task 9.8 (S009) owns GitHub branch protection and merge blocking.
+          Configure required checks there (not in this workflow):
+          - lint-lock, unit-plugin, openapi-snapshot, compose-supported
+          - postgres-integration, vertical-granian, traefik-pinned
+          - fastmcp-candidate-latest-lt4 only when this workflow runs
+            (FastMCP/lock/matrix path changes, schedule, or workflow_dispatch)
+          Unrelated PRs use the advisory workflow; advisory failures must not
+          replace locked required checks.
+          EOF

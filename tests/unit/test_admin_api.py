@@ -71,8 +71,15 @@ def test_user_creation_listing_duplicate_and_last_admin_guard():
 
         listed = client.get("/api/v1/admin/users")
         assert listed.status_code == 200
+        assert listed.headers["X-Total-Count"] == "3"
+        assert len(listed.json()) == 3
         assert "password" not in listed.text
         assert "hash" not in listed.text
+        paged = client.get("/api/v1/admin/users", params={"limit": 1, "offset": 0})
+        assert paged.status_code == 200
+        assert paged.headers["X-Total-Count"] == "3"
+        assert len(paged.json()) == 1
+        assert client.get("/api/v1/admin/users", params={"limit": 201}).status_code == 422
         assert client.put(
             f"/api/v1/admin/users/{admin.id}/admin", json={"is_admin": False}
         ).status_code == 409
@@ -131,12 +138,16 @@ def test_aggregates_status_openapi_and_no_destructive_or_content_routes():
         _login(client, "admin@example.com", "admin password")
         aggregates = client.get("/api/v1/admin/aggregates")
         assert aggregates.status_code == 200
+        assert aggregates.headers["X-Total-Count"] == "2"
         assert aggregates.json()["total_users"] == 2
         assert {row["user_id"]: row["count"] for row in aggregates.json()["memories"]}[
             str(ordinary.id)
         ] == 1
         assert "content" not in aggregates.text.lower()
         assert "private content" not in aggregates.text
+        assert client.get(
+            "/api/v1/admin/aggregates", params={"limit": 201}
+        ).status_code == 422
 
         detailed = client.get("/api/v1/admin/status")
         assert detailed.status_code == 200
@@ -156,6 +167,16 @@ def test_aggregates_status_openapi_and_no_destructive_or_content_routes():
         assert "/admin/users" in paths
         assert "/admin/aggregates" in paths
         assert "/admin/status" in paths
+        for path in ("/admin/users", "/admin/aggregates"):
+            limit = next(
+                param
+                for param in paths[path]["get"]["parameters"]
+                if param["name"] == "limit"
+            )
+            schema = limit["schema"]
+            assert schema["default"] == 100
+            assert schema.get("maximum", schema.get("le")) == 200
+            assert schema.get("minimum", schema.get("ge")) == 1
         assert "delete" not in paths["/admin/users/{user_id}/admin"]
         assert not any("memories" in path for path in paths if path.startswith("/admin"))
 

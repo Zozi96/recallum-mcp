@@ -4,23 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import socket
+import traceback
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
+import httpx
 import pytest
 from dependency_injector import providers
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
+from fastmcp.server import telemetry as fastmcp_server_telemetry
 from granian.server.embed import Server as GranianServer
-from mcp.shared.exceptions import McpError
 
 from recallum.app import create_app
+from recallum.auth.middleware import TokenAuthenticator
 from recallum.config import Settings
 from recallum.embeddings.ollama import EmbeddingError
+from recallum.mcp.errors import (
+    EMBEDDING_UNAVAILABLE_MESSAGE,
+    GENERIC_TOOL_ERROR_MESSAGE,
+)
 from recallum.mcp.server import INSTRUCTIONS, build_mcp_server, validate_only_tools_are_exposed
 from recallum.memory import MemoryValidationError
 from tests.fakes import FakeEmbeddingClient, build_test_container
@@ -68,6 +78,11 @@ class ServerInfo:
     alice_revoked_token: str
     telemetry: Any
     buffer: Any
+    api_key_service: Any
+    alice_key_id: Any
+    verifier_calls: list[str]
+    dispatch_calls: list[str]
+    memory_service: Any = None
 
 
 def _free_port() -> int:
@@ -116,6 +131,160 @@ def mcp_client(base_url: str, token: str | None = None) -> Client:
     return Client(StreamableHttpTransport(url=f"{base_url}/mcp/", headers=headers))
 
 
+class _McpRecordHandler(logging.Handler):
+    """Capture structured MCP diagnostics after the app installs JSON logging."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+async def _raw_failing_tool_call(base_url: str, token: str) -> httpx.Response:
+    """Exercise the wire serializer directly, retaining the raw MCP response."""
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient() as client:
+        initialized = await client.post(
+            f"{base_url}/mcp/", json=_initialize_request(), headers=headers
+        )
+        assert initialized.status_code == 200
+        session_id = initialized.headers["mcp-session-id"]
+        return await client.post(
+            f"{base_url}/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "list_memories", "arguments": {}},
+            },
+            headers={**headers, "Mcp-Session-Id": session_id},
+        )
+
+
+async def _raw_remember_batch_call(
+    base_url: str, token: str, items: list[dict[str, Any]]
+) -> httpx.Response:
+    """Call remember_batch over the authenticated wire and retain serialization."""
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient() as client:
+        initialized = await client.post(
+            f"{base_url}/mcp/", json=_initialize_request(), headers=headers
+        )
+        assert initialized.status_code == 200
+        session_id = initialized.headers["Mcp-Session-Id"]
+        return await client.post(
+            f"{base_url}/mcp/",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "remember_batch", "arguments": {"items": items}},
+            },
+            headers={**headers, "Mcp-Session-Id": session_id},
+        )
+
+
+def _initialize_request() -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"},
+        },
+    }
+
+
+def _instrument_mcp_server(
+    app: Any, authenticator: TokenAuthenticator
+) -> tuple[list[str], list[str]]:
+    verifier_calls: list[str] = []
+    original_authenticate = authenticator.authenticate
+
+    async def recorded_authenticate(token: str):
+        verifier_calls.append(token)
+        return await original_authenticate(token)
+
+    authenticator.authenticate = recorded_authenticate
+
+    dispatch_calls: list[str] = []
+    mcp_runtime = app.state.mcp_server._mcp_server
+    handle_request = mcp_runtime._handle_request
+
+    async def recorded_dispatch(message, request, *args, **kwargs):
+        dispatch_calls.append(type(request).__name__)
+        return await handle_request(message, request, *args, **kwargs)
+
+    mcp_runtime._handle_request = recorded_dispatch
+    return verifier_calls, dispatch_calls
+
+
+MCP_OPERATION_REQUESTS = (
+    ("initialize", _initialize_request),
+    ("ping", lambda: {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}),
+    (
+        "tools/list",
+        lambda: {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    ),
+    (
+        "tools/call",
+        lambda: {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "remember", "arguments": {}},
+        },
+    ),
+    (
+        "resources/list",
+        lambda: {"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}},
+    ),
+    (
+        "resources/templates/list",
+        lambda: {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/templates/list",
+            "params": {},
+        },
+    ),
+    (
+        "resources/read",
+        lambda: {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": {"uri": "recallum://profile"},
+        },
+    ),
+    (
+        "prompts/list",
+        lambda: {"jsonrpc": "2.0", "id": 1, "method": "prompts/list", "params": {}},
+    ),
+    (
+        "prompts/get",
+        lambda: {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "prompts/get",
+            "params": {"name": "not-exposed", "arguments": {}},
+        },
+    ),
+)
+
+
 async def _read_profile_resource(client: Client, uri: str) -> dict[str, Any]:
     contents = await client.read_resource(uri)
     assert len(contents) == 1
@@ -134,6 +303,8 @@ async def server() -> ServerInfo:
     await key_service.revoke_key(revoked.key.id)
 
     app = create_app(Settings(), container)
+    authenticator = container.authenticator()
+    verifier_calls, dispatch_calls = _instrument_mcp_server(app, authenticator)
     async with _serve(app) as url:
         yield ServerInfo(
             url=url,
@@ -142,6 +313,11 @@ async def server() -> ServerInfo:
             alice_revoked_token=revoked.plaintext,
             telemetry=fakes["telemetry"],
             buffer=container.telemetry_buffer(),
+            api_key_service=key_service,
+            alice_key_id=(await key_service.list_keys_for_email("alice@example.com")).keys[0].id,
+            verifier_calls=verifier_calls,
+            dispatch_calls=dispatch_calls,
+            memory_service=container.memory_service(),
         )
 
 
@@ -166,9 +342,58 @@ class _ExplodingMemoryService:
     async def forget(self, *_args, **_kwargs):
         raise self._exc
 
+    async def get_profile(self, *_args, **_kwargs):
+        raise self._exc
+
+
+class _SelectiveFailingEmbeddingClient(FakeEmbeddingClient):
+    def __init__(self, failing_content: str, exc: EmbeddingError) -> None:
+        super().__init__(dimensions=16)
+        self._failing_content = failing_content
+        self._exc = exc
+
+    async def embed(self, text: str) -> list[float]:
+        if text == self._failing_content:
+            raise self._exc
+        return await super().embed(text)
+
+
+class _RecordingSpan:
+    def __init__(self) -> None:
+        self.attributes: dict[str, Any] = {}
+        self.exceptions: list[BaseException] = []
+
+    def is_recording(self) -> bool:
+        return True
+
+    def set_attributes(self, attributes: dict[str, Any]) -> None:
+        self.attributes.update(attributes)
+
+    def set_attribute(self, name: str, value: Any) -> None:
+        self.attributes[name] = value
+
+    def record_exception(self, exc: BaseException) -> None:
+        self.exceptions.append(exc)
+
+    def set_status(self, _status: Any) -> None:
+        pass
+
+
+class _RecordingTracer:
+    def __init__(self) -> None:
+        self.spans: list[_RecordingSpan] = []
+
+    @contextmanager
+    def start_as_current_span(self, *_args, **_kwargs):
+        span = _RecordingSpan()
+        self.spans.append(span)
+        yield span
+
 
 @asynccontextmanager
-async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
+async def _exploding_server(
+    exc: Exception, log_handler: logging.Handler | None = None
+) -> AsyncIterator[ServerInfo]:
     """Serve a container whose memory module always raises ``exc``."""
     container, fakes = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
     key_service = container.api_key_service()
@@ -177,15 +402,65 @@ async def _exploding_server(exc: Exception) -> AsyncIterator[ServerInfo]:
     container.memory_service.override(providers.Object(_ExplodingMemoryService(exc)))
 
     app = create_app(Settings(), container)
+    captured_loggers = (
+        logging.getLogger("recallum.mcp"),
+        logging.getLogger("fastmcp.server.server"),
+    )
+    if log_handler is not None:
+        for logger in captured_loggers:
+            logger.addHandler(log_handler)
     async with _serve(app) as url:
-        yield ServerInfo(
-            url=url,
-            alice_token=token,
-            bob_token=token,
-            alice_revoked_token=token,
-            telemetry=fakes["telemetry"],
-            buffer=container.telemetry_buffer(),
-        )
+        try:
+            yield ServerInfo(
+                url=url,
+                alice_token=token,
+                bob_token=token,
+                alice_revoked_token=token,
+                telemetry=fakes["telemetry"],
+                buffer=container.telemetry_buffer(),
+                api_key_service=key_service,
+                alice_key_id=(await key_service.list_keys_for_email("alice@example.com")).keys[
+                    0
+                ].id,
+                verifier_calls=[],
+                dispatch_calls=[],
+            )
+        finally:
+            if log_handler is not None:
+                for logger in captured_loggers:
+                    logger.removeHandler(log_handler)
+
+
+@asynccontextmanager
+async def _batch_failure_server(
+    failing_content: str, exc: EmbeddingError, log_handler: logging.Handler
+) -> AsyncIterator[ServerInfo]:
+    embedder = _SelectiveFailingEmbeddingClient(failing_content, exc)
+    container, fakes = build_test_container(embedder=embedder)
+    key_service = container.api_key_service()
+    alice = await key_service.create_user("alice@example.com")
+    token = (await key_service.issue_key(alice.id)).plaintext
+    app = create_app(Settings(), container)
+    memory_logger = logging.getLogger("recallum.memory")
+    memory_logger.addHandler(log_handler)
+    async with _serve(app) as url:
+        try:
+            yield ServerInfo(
+                url=url,
+                alice_token=token,
+                bob_token="",
+                alice_revoked_token="",
+                telemetry=fakes["telemetry"],
+                buffer=container.telemetry_buffer(),
+                api_key_service=key_service,
+                alice_key_id=(await key_service.list_keys_for_email("alice@example.com")).keys[
+                    0
+                ].id,
+                verifier_calls=[],
+                dispatch_calls=[],
+            )
+        finally:
+            memory_logger.removeHandler(log_handler)
 
 
 async def test_forget_now_translates_validation_errors():
@@ -198,12 +473,163 @@ async def test_forget_now_translates_validation_errors():
                 )
 
 
-async def test_embedding_errors_translate_outside_remember():
-    """EmbeddingError was only translated in remember before the middleware."""
-    async with _exploding_server(EmbeddingError("ollama is down")) as info:
+def test_server_masks_unexpected_error_details():
+    """The transport contract must remain enabled in every server build."""
+    container, _ = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    mcp = build_mcp_server(container)
+    assert getattr(mcp, "_mask_error_details", False) is True
+
+
+ERROR_SENTINELS = (
+    "https://ollama.internal:11434",
+    "connection refused",
+    "Traceback (most recent call)",
+    "Bearer rcl_live_secret_token",
+    "arbitrary-user-content-sentinel",
+    "sensitive-user@example.invalid",
+    "00000000-0000-0000-0000-000000000099",
+)
+
+
+@pytest.mark.parametrize(
+    ("error_type", "public_message"),
+    (
+        (RuntimeError, GENERIC_TOOL_ERROR_MESSAGE),
+        (EmbeddingError, EMBEDDING_UNAVAILABLE_MESSAGE),
+    ),
+)
+@pytest.mark.parametrize("sentinel", ERROR_SENTINELS)
+async def test_live_error_sentinels_are_absent_from_wire_logs_and_telemetry(
+    error_type: type[Exception], public_message: str, sentinel: str, capfd
+):
+    """Each independent secret marker is checked through the real Granian wire."""
+    handler = _McpRecordHandler()
+    async with _exploding_server(error_type(sentinel), handler) as info:
+        raw_response = await _raw_failing_tool_call(info.url, info.alice_token)
+        raw_serialization = raw_response.content.decode("utf-8", "replace")
+        assert raw_response.status_code == 200
+        assert public_message in raw_serialization
+        assert sentinel not in raw_serialization
+
         async with mcp_client(info.url, info.alice_token) as client:
-            with pytest.raises(ToolError, match="could not embed memory content"):
+            with pytest.raises(ToolError, match=f"^{public_message}$") as failure:
                 await client.call_tool("list_memories", {})
+        assert str(failure.value) == public_message
+
+        await info.buffer.flush()
+        telemetry = repr(info.telemetry.events)
+        diagnostics = capfd.readouterr().err
+        log_values = [
+            repr(value)
+            for record in handler.records
+            for value in (*vars(record).values(), record.args)
+        ]
+        assert handler.records
+        assert all(sentinel not in value for value in log_values)
+        assert sentinel not in diagnostics
+        assert sentinel not in telemetry
+
+        expected_class = f"{error_type.__module__}.{error_type.__qualname__}"
+        diagnostic = next(record for record in handler.records if record.name == "recallum.mcp")
+        assert diagnostic.failure_class == expected_class
+        assert re.fullmatch(r"mcp-[0-9a-f]{20}", diagnostic.correlation_id)
+        assert "frames=" in diagnostic.getMessage()
+        assert "list_memories" in diagnostic.frames
+        assert 2 not in diagnostic.args
+        assert "2" not in diagnostic.args
+        assert any(
+            event.tool_name == "list_memories" and event.failed
+            for event in info.telemetry.events
+        )
+
+
+async def test_authenticated_batch_embedding_failure_is_partial_and_sanitized():
+    content_sentinel = "S002-private-memory-content"
+    forbidden = (
+        "https://embedding.internal:11434",
+        "rcl_S002_PROVIDER_TOKEN_123456789",
+        content_sentinel,
+    )
+    provider_detail = " ".join(forbidden)
+    handler = _McpRecordHandler()
+    async with _batch_failure_server(
+        content_sentinel, EmbeddingError(provider_detail), handler
+    ) as info:
+        response = await _raw_remember_batch_call(
+            info.url,
+            info.alice_token,
+            [
+                {"content": "safe successful batch item", "category": "fact"},
+                {"content": content_sentinel, "category": "fact"},
+            ],
+        )
+        wire = response.content.decode("utf-8", "replace")
+        assert response.status_code == 200
+        assert '"stored":1' in wire
+        assert '"failed":1' in wire
+        assert '"error":"embedding service unavailable"' in wire
+
+        await info.buffer.flush()
+        telemetry = repr(info.telemetry.events)
+        log_values = [
+            repr(value)
+            for record in handler.records
+            for value in (*vars(record).values(), record.args)
+        ]
+        for sentinel in forbidden:
+            assert sentinel not in wire
+            assert all(sentinel not in value for value in log_values)
+            assert sentinel not in telemetry
+
+        diagnostic = next(record for record in handler.records if record.name == "recallum.memory")
+        assert diagnostic.failure_class.endswith("EmbeddingError")
+        assert re.fullmatch(r"mcp-[0-9a-f]{20}", diagnostic.correlation_id)
+        assert "remember_batch" in diagnostic.frames
+        assert any(
+            event.tool_name == "remember_batch" and not event.failed
+            for event in info.telemetry.events
+        )
+
+
+async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(monkeypatch):
+    sentinel = (
+        "S002-SECRET-SENTINEL https://profile.internal "
+        "rcl_S002_PROFILE_TOKEN_123456789 private-profile-content"
+    )
+    tracer = _RecordingTracer()
+    monkeypatch.setattr(fastmcp_server_telemetry, "get_tracer", lambda: tracer)
+    handler = _McpRecordHandler()
+
+    async with _exploding_server(RuntimeError(sentinel), handler) as info:
+        async with mcp_client(info.url, info.alice_token) as client:
+            with pytest.raises(Exception) as failure:
+                await client.read_resource("recallum://profile")
+
+    assert sentinel not in str(failure.value)
+    log_values = [
+        repr(value)
+        for record in handler.records
+        for value in (*vars(record).values(), record.args)
+    ]
+    assert all(sentinel not in value for value in log_values)
+    assert any(record.name == "fastmcp.server.server" for record in handler.records)
+
+    traced = [exc for span in tracer.spans for exc in span.exceptions]
+    assert traced
+    trace_events = "".join(
+        "".join(traceback.TracebackException.from_exception(exc).format(chain=True))
+        for exc in traced
+    )
+    assert sentinel not in trace_events
+    public = next(exc for exc in traced if isinstance(exc, ToolError))
+    assert str(public) == GENERIC_TOOL_ERROR_MESSAGE
+    assert public.__cause__ is None
+    assert public.__context__ is None
+
+    diagnostic = next(record for record in handler.records if record.name == "recallum.mcp")
+    assert diagnostic.failure_class == "builtins.RuntimeError"
+    assert re.fullmatch(r"mcp-[0-9a-f]{20}", diagnostic.correlation_id)
+    assert "get_profile" in diagnostic.frames
 
 
 async def test_validate_only_tools_are_exposed_passes_for_the_real_server():
@@ -248,33 +674,186 @@ async def test_discovery_announces_exactly_nine_tools_without_user_inputs(server
 
 
 async def test_missing_token_is_rejected(server: ServerInfo):
-    async with mcp_client(server.url) as client:
-        with pytest.raises(ToolError):
-            await client.call_tool("remember", {"content": "x", "category": "fact"})
-        with pytest.raises(McpError, match="authentication required"):
-            await client.list_resources()
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{server.url}/mcp/", json=_initialize_request()
+        )
+    assert response.status_code == 401
+    assert response.content == b""
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert "mcp-session-id" not in response.headers
     assert server.telemetry.events == []
     assert server.buffer.pending_count == 0
 
 
+@pytest.mark.parametrize(("operation_name", "request_factory"), MCP_OPERATION_REQUESTS)
+async def test_every_mcp_operation_rejects_missing_invalid_and_revoked_auth(
+    server: ServerInfo, operation_name: str, request_factory: Any, caplog
+):
+    """Transport auth runs before dispatch for every supported MCP operation."""
+    common_headers = {"Content-Type": "application/json"}
+    credentials = (
+        (None, "missing"),
+        ("Bearer", "malformed"),
+        ("Basic not-a-bearer", "wrong-scheme"),
+        ("Bearer rcl_not-a-real-key", "invalid"),
+        (f"Bearer {server.alice_revoked_token}", "revoked"),
+    )
+    async with httpx.AsyncClient() as client:
+        for authorization, kind in credentials:
+            server.verifier_calls.clear()
+            server.dispatch_calls.clear()
+            headers = dict(common_headers)
+            if authorization is not None:
+                headers["Authorization"] = authorization
+            response = await client.post(
+                f"{server.url}/mcp/", json=request_factory(), headers=headers
+            )
+            assert response.status_code == 401, operation_name
+            assert "mcp-session-id" not in response.headers
+            assert server.dispatch_calls == []
+            assert server.telemetry.events == []
+            assert server.buffer.pending_count == 0
+            if kind == "missing":
+                assert response.content == b""
+                assert response.headers["www-authenticate"] == "Bearer"
+                assert server.verifier_calls == []
+            else:
+                assert response.json()["error"] == "invalid_token"
+                if kind in {"malformed", "wrong-scheme"}:
+                    assert server.verifier_calls == []
+                else:
+                    assert server.verifier_calls == [
+                        authorization.removeprefix("Bearer ").strip()
+                    ]
+    assert "rcl_not-a-real-key" not in caplog.text
+    assert server.alice_revoked_token not in caplog.text
+    assert "rcl_not-a-real-key" not in repr(server.telemetry.events)
+    assert server.alice_revoked_token not in repr(server.telemetry.events)
+
+
 async def test_invalid_token_is_rejected(server: ServerInfo):
-    async with mcp_client(server.url, "rcl_not-a-real-key") as client:
-        with pytest.raises(ToolError):
-            await client.call_tool("list_memories", {})
-        with pytest.raises(McpError, match="invalid or revoked API key"):
-            await client.read_resource("recallum://profile")
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{server.url}/mcp/",
+            json=_initialize_request(),
+            headers={"Authorization": "Bearer rcl_not-a-real-key"},
+        )
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_token"
+    assert "mcp-session-id" not in response.headers
     assert server.telemetry.events == []
     assert server.buffer.pending_count == 0
 
 
 async def test_revoked_token_is_rejected(server: ServerInfo):
-    async with mcp_client(server.url, server.alice_revoked_token) as client:
-        with pytest.raises(ToolError):
-            await client.call_tool("list_memories", {})
-        with pytest.raises(McpError, match="invalid or revoked API key"):
-            await client.list_resource_templates()
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{server.url}/mcp/",
+            json=_initialize_request(),
+            headers={"Authorization": f"Bearer {server.alice_revoked_token}"},
+        )
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_token"
+    assert "mcp-session-id" not in response.headers
     assert server.telemetry.events == []
     assert server.buffer.pending_count == 0
+
+
+async def test_revocation_rejects_next_request_in_existing_session(server: ServerInfo):
+    headers = {
+        "Authorization": f"Bearer {server.alice_token}",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient() as client:
+        initialized = await client.post(
+            f"{server.url}/mcp/", json=_initialize_request(), headers=headers
+        )
+        assert initialized.status_code == 200
+        session_id = initialized.headers["mcp-session-id"]
+
+        await server.api_key_service.revoke_key(server.alice_key_id)
+        rejected = await client.post(
+            f"{server.url}/mcp/",
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            headers={**headers, "Mcp-Session-Id": session_id},
+        )
+    assert rejected.status_code == 401
+    assert rejected.json()["error"] == "invalid_token"
+    assert server.telemetry.events == []
+    assert server.buffer.pending_count == 0
+
+
+async def test_live_positive_ttl_session_rejects_concurrently_at_exact_expiry():
+    container, fakes = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    key_service = container.api_key_service()
+    alice = await key_service.create_user("ttl@example.com")
+    issued = await key_service.issue_key(alice.id)
+    clock = [1000.0]
+    authenticator = TokenAuthenticator(
+        api_key_repository=container.api_key_repository(),
+        cache_ttl=timedelta(seconds=30),
+        clock=lambda: clock[0],
+    )
+    container.authenticator.override(providers.Object(authenticator))
+    app = create_app(Settings(), container)
+    verifier_calls, dispatch_calls = _instrument_mcp_server(app, authenticator)
+    headers = {
+        "Authorization": f"Bearer {issued.plaintext}",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    async with _serve(app) as url:
+        async with httpx.AsyncClient() as client:
+            initialized = await client.post(
+                f"{url}/mcp/", json=_initialize_request(), headers=headers
+            )
+            assert initialized.status_code == 200
+            session_id = initialized.headers["mcp-session-id"]
+            assert verifier_calls == [issued.plaintext]
+
+            clock[0] = 1029.999
+            await key_service.revoke_key(issued.key.id)
+            verifier_calls.clear()
+            accepted = await client.post(
+                f"{url}/mcp/",
+                json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
+                headers={**headers, "Mcp-Session-Id": session_id},
+            )
+            assert accepted.status_code == 200
+            assert verifier_calls == [issued.plaintext], "one verifier call per request"
+            dispatched_before_expiry = len(dispatch_calls)
+
+            clock[0] = 1030.0
+            verifier_calls.clear()
+            rejected = await asyncio.gather(
+                *(
+                    client.post(
+                        f"{url}/mcp/",
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": index + 3,
+                            "method": "tools/list",
+                            "params": {},
+                        },
+                        headers={**headers, "Mcp-Session-Id": session_id},
+                    )
+                    for index in range(3)
+                )
+            )
+
+    assert [response.status_code for response in rejected] == [401, 401, 401]
+    assert [response.json()["error"] for response in rejected] == [
+        "invalid_token",
+        "invalid_token",
+        "invalid_token",
+    ]
+    assert len(verifier_calls) == 3
+    assert all(token == issued.plaintext for token in verifier_calls)
+    assert len(dispatch_calls) == dispatched_before_expiry
+    assert fakes["telemetry"].events == []
+    assert container.telemetry_buffer().pending_count == 0
 
 
 async def test_profile_resource_is_registered_and_context_includes_profile(server: ServerInfo):
@@ -317,6 +896,30 @@ async def test_profile_resource_is_registered_and_context_includes_profile(serve
             "prefer English commit messages" in (item.get("content") or "")
             for item in static
         )
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("remember", {"content": "x", "category": "fact", "importance": True}),
+        ("remember", {"content": "x", "category": "fact", "importance": 11}),
+        ("recall", {"query": "x", "limit": 1.0}),
+        ("recall", {"query": "x", "limit": "7"}),
+        ("list_memories", {"offset": -1}),
+    ],
+)
+async def test_mcp_strict_boundary_values_fail_before_domain(
+    server: ServerInfo, tool: str, arguments: dict[str, Any], monkeypatch
+):
+    async def reached(*_args, **_kwargs):
+        pytest.fail("domain service reached for invalid MCP boundary value")
+
+    monkeypatch.setattr(server.memory_service, "remember", reached)
+    monkeypatch.setattr(server.memory_service, "recall", reached)
+    monkeypatch.setattr(server.memory_service, "list_memories", reached)
+    async with mcp_client(server.url, server.alice_token) as client:
+        with pytest.raises(ToolError):
+            await client.call_tool(tool, arguments)
 
 
 async def test_valid_token_full_flow(server: ServerInfo):
@@ -403,3 +1006,67 @@ async def test_no_cross_user_access(server: ServerInfo):
         assert memory_id in alice_profile["source_memory_ids"]
         listing = await alice.call_tool("list_memories", {})
         assert listing.structured_content["total"] == 1
+
+
+async def test_concurrent_users_keep_contextvar_identity_isolated(server: ServerInfo, caplog):
+    alice_sentinel = "alice-concurrent-content-sentinel"
+    bob_sentinel = "bob-concurrent-content-sentinel"
+    email_sentinel = "sensitive-email-sentinel@example.invalid"
+    user_id_sentinel = "00000000-0000-0000-0000-000000000099"
+    with caplog.at_level(logging.DEBUG, logger="recallum"):
+        async with (
+            mcp_client(server.url, server.alice_token) as alice,
+            mcp_client(server.url, server.bob_token) as bob,
+        ):
+            await asyncio.gather(
+                alice.call_tool(
+                    "remember",
+                    {
+                        "content": f"{alice_sentinel} {email_sentinel} {user_id_sentinel}",
+                        "category": "fact",
+                    },
+                ),
+                bob.call_tool(
+                    "remember",
+                    {
+                        "content": f"{bob_sentinel} {email_sentinel} {user_id_sentinel}",
+                        "category": "fact",
+                    },
+                ),
+            )
+            alice_listing, bob_listing = await asyncio.gather(
+                alice.call_tool("list_memories", {}),
+                bob.call_tool("list_memories", {}),
+            )
+
+        for _ in range(8):
+            await server.buffer.flush()
+            if server.buffer.pending_count == 0:
+                break
+
+    alice_contents = {
+        item["content"] for item in alice_listing.structured_content["items"]
+    }
+    bob_contents = {item["content"] for item in bob_listing.structured_content["items"]}
+    assert alice_contents == {f"{alice_sentinel} {email_sentinel} {user_id_sentinel}"}
+    assert bob_contents == {f"{bob_sentinel} {email_sentinel} {user_id_sentinel}"}
+
+    telemetry_text = repr(server.telemetry.events)
+    recallum_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith("recallum")
+    )
+    assert {"remember", "list_memories"} <= {
+        event.tool_name for event in server.telemetry.events
+    }
+    for sentinel in (
+        alice_sentinel,
+        bob_sentinel,
+        email_sentinel,
+        user_id_sentinel,
+        server.alice_token,
+        server.bob_token,
+    ):
+        assert sentinel not in recallum_logs
+        assert sentinel not in telemetry_text

@@ -16,7 +16,12 @@ from pathlib import Path
 
 from recallum.auth.api_keys import UserNotFoundError
 from recallum.config import get_settings
-from recallum.container import Container, create_container, shutdown_container
+from recallum.container import (
+    Container,
+    create_container,
+    init_container_resources,
+    shutdown_container,
+)
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.evaluation import read_dataset, render_report, run_eval
 from recallum.memory.service import MemoryService
@@ -62,9 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(needs Ollama; seeds the corpus into the given user)"
         ),
     )
-    eval_cmd.add_argument(
-        "--email", required=True, help="User whose store hosts the eval corpus"
-    )
+    eval_cmd.add_argument("--email", required=True, help="User whose store hosts the eval corpus")
     eval_cmd.add_argument(
         "--dataset",
         required=True,
@@ -146,16 +149,24 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
         return 0
 
     if args.command in {"set-password", "grant-admin", "revoke-admin"}:
-        user = await container.user_repository().get_by_email(args.email.lower())
-        if user is None:
-            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
-            return 1
         if args.command == "set-password":
             password = getpass.getpass("Password: ")
             confirmation = getpass.getpass("Confirm password: ")
             if password != confirmation:
                 print("error: passwords do not match", file=sys.stderr)
                 return 1
+            max_password_chars = container.config.boundary.request.password_max_chars.as_int()()
+            if len(password) > max_password_chars:
+                print(
+                    f"error: password exceeds configured maximum length ({max_password_chars})",
+                    file=sys.stderr,
+                )
+                return 1
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        if args.command == "set-password":
             await container.password_service().set_password(user, password)
             print(f"password set: {user.email}")
         else:
@@ -229,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     container = create_container(get_settings())
 
     async def _lifecycle() -> int:
+        await init_container_resources(container)
         try:
             return await _run(args, container)
         finally:

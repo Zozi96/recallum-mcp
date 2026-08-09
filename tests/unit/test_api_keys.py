@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastmcp.exceptions import ToolError
+from fastmcp.server.auth import AccessToken
 
 from recallum.auth.api_keys import ApiKeyService, UserNotFoundError, hash_token
-from recallum.auth.middleware import TokenAuthenticator
+from recallum.auth.middleware import (
+    BearerAuthMiddleware,
+    RecallumTokenVerifier,
+    TokenAuthenticator,
+)
 from recallum.cli import _run
 from tests.fakes import FakeApiKeyRepository, FakeUserRepository, build_test_container
 
@@ -70,6 +77,51 @@ async def test_authenticate_valid_invalid_revoked():
     assert await service.revoke_key(issued.key.id) is True
     assert await authenticator.authenticate(issued.plaintext) is None
     assert await service.revoke_key(issued.key.id) is False
+
+
+async def test_fastmcp_verifier_returns_only_identity_claims():
+    service, authenticator, _ = make_service()
+    user = await service.create_user("verifier@example.com")
+    issued = await service.issue_key(user.id)
+
+    access_token = await RecallumTokenVerifier(authenticator).verify_token(issued.plaintext)
+
+    assert access_token is not None
+    assert access_token.token == issued.plaintext
+    assert access_token.subject == str(user.id)
+    assert access_token.client_id == str(issued.key.id)
+    assert access_token.claims == {"email": user.email}
+
+
+@pytest.mark.parametrize(
+    "access_token",
+    (
+        AccessToken(
+            token="rcl_claim-sentinel",
+            client_id="not-a-uuid",
+            scopes=[],
+            subject="not-a-uuid",
+            claims={"email": "owner@example.com"},
+        ),
+        AccessToken(
+            token="rcl_claim-sentinel",
+            client_id="00000000-0000-0000-0000-000000000001",
+            scopes=[],
+            subject="00000000-0000-0000-0000-000000000002",
+            claims={},
+        ),
+    ),
+)
+def test_malformed_fastmcp_claims_fail_closed_without_logging_token(
+    access_token: AccessToken, monkeypatch, caplog
+):
+    monkeypatch.setattr("recallum.auth.middleware.get_access_token", lambda: access_token)
+
+    with caplog.at_level("WARNING", logger="recallum.auth"):
+        with pytest.raises(ToolError, match="invalid authenticated identity"):
+            BearerAuthMiddleware._identity_from_access_token()
+
+    assert access_token.token not in caplog.text
 
 
 async def test_multiple_keys_per_user_independent():
@@ -279,6 +331,50 @@ async def test_identity_cache_lets_a_revoked_key_live_until_its_entry_expires():
     assert await auth.authenticate(token) is not None, "documented revocation window"
     now[0] += 31
     assert await auth.authenticate(token) is None, "and it must close"
+
+
+async def test_identity_cache_revocation_boundaries_are_just_before_and_exact_expiry():
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    now = [1000.0]
+    auth = TokenAuthenticator(
+        api_key_repository=keys,
+        cache_ttl=timedelta(seconds=30),
+        clock=lambda: now[0],
+    )
+
+    assert await auth.authenticate(token) is not None
+    await keys.revoke(next(iter(keys.keys.values())).id)
+    lookups = keys.lookups
+
+    now[0] = 1029.999
+    assert await auth.authenticate(token) is not None
+    assert keys.lookups == lookups
+
+    now[0] = 1030.0
+    assert await auth.authenticate(token) is None
+    assert keys.lookups == lookups + 1
+
+
+async def test_concurrent_requests_after_expiry_all_reject_revoked_key():
+    users = FakeUserRepository()
+    keys = CountingApiKeyRepository(users)
+    token = await _issue(keys, users)
+    now = [1000.0]
+    auth = TokenAuthenticator(
+        api_key_repository=keys,
+        cache_ttl=timedelta(seconds=30),
+        clock=lambda: now[0],
+    )
+
+    assert await auth.authenticate(token) is not None
+    await keys.revoke(next(iter(keys.keys.values())).id)
+    now[0] = 1030.0
+
+    results = await asyncio.gather(*(auth.authenticate(token) for _ in range(8)))
+
+    assert results == [None] * 8
 
 
 async def test_identity_cache_never_caches_failures():

@@ -4,9 +4,16 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, EmailStr
 
+from recallum.boundary_types import (
+    ADMIN_PAGE_DEFAULT,
+    Password,
+    StrictQueryAdminLimit,
+    StrictQueryNonNegativeOffset,
+    password_model,
+)
 from recallum.db.repositories.user_repo import LastAdminError
 from recallum.web.admin_service import (
     AdminNotFoundError,
@@ -15,6 +22,7 @@ from recallum.web.admin_service import (
     UserView,
 )
 from recallum.web.auth import WebAuthenticator, WebIdentity
+from recallum.web.openapi_responses import ADMIN_RESPONSES
 
 
 class UserCreate(BaseModel):
@@ -36,7 +44,7 @@ class UserResponse(BaseModel):
 
 
 class KeyIssue(BaseModel):
-    password: str = Field(min_length=1)
+    password: Password
     name: str | None = None
 
 
@@ -94,7 +102,10 @@ def _key_response(key, **extra):
 
 
 def create_admin_router(
-    service: AdminService, authenticate: WebAuthenticator
+    service: AdminService,
+    authenticate: WebAuthenticator,
+    *,
+    password_max_chars: int = 256,
 ) -> APIRouter:
     async def require_admin(
         identity: Annotated[WebIdentity, Depends(authenticate)],
@@ -107,12 +118,20 @@ def create_admin_router(
         prefix="/admin",
         tags=["admin"],
         dependencies=[Depends(require_admin)],
+        responses=ADMIN_RESPONSES,
     )
     AdminIdentity = Annotated[WebIdentity, Depends(require_admin)]
+    configured_key_issue = password_model(KeyIssue, password_max_chars)
 
     @router.get("/users", response_model=list[UserResponse])
-    async def list_users() -> list[UserResponse]:
-        return [_user_response(view) for view in await service.list_users()]
+    async def list_users(
+        response: Response,
+        limit: Annotated[StrictQueryAdminLimit, Query()] = ADMIN_PAGE_DEFAULT,
+        offset: Annotated[StrictQueryNonNegativeOffset, Query()] = 0,
+    ) -> list[UserResponse]:
+        page = await service.list_users(limit=limit, offset=offset)
+        response.headers["X-Total-Count"] = str(page.total)
+        return [_user_response(view) for view in page.items]
 
     @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
     async def create_user(body: UserCreate) -> UserResponse:
@@ -148,7 +167,7 @@ def create_admin_router(
         status_code=status.HTTP_201_CREATED,
     )
     async def issue_key(
-        user_id: uuid.UUID, body: KeyIssue, admin: AdminIdentity
+        user_id: uuid.UUID, body: configured_key_issue, admin: AdminIdentity
     ) -> dict:
         try:
             issued = await service.issue_key(
@@ -171,15 +190,20 @@ def create_admin_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found") from exc
 
     @router.get("/aggregates", response_model=AggregatesResponse)
-    async def aggregates() -> AggregatesResponse:
-        total, active, revoked, counts = await service.aggregates()
+    async def aggregates(
+        response: Response,
+        limit: Annotated[StrictQueryAdminLimit, Query()] = ADMIN_PAGE_DEFAULT,
+        offset: Annotated[StrictQueryNonNegativeOffset, Query()] = 0,
+    ) -> AggregatesResponse:
+        page = await service.aggregates(limit=limit, offset=offset)
+        response.headers["X-Total-Count"] = str(page.memories_total)
         return AggregatesResponse(
-            total_users=total,
-            active_keys=active,
-            revoked_keys=revoked,
+            total_users=page.total_users,
+            active_keys=page.active_keys,
+            revoked_keys=page.revoked_keys,
             memories=[
                 MemoryVolume(user_id=user_id, count=count)
-                for user_id, count in counts.items()
+                for user_id, count in page.memories
             ],
         )
 

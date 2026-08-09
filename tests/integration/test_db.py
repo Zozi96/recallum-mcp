@@ -10,6 +10,7 @@ Skipped when Docker is unavailable or the image cannot be pulled.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 
 import pytest
@@ -128,6 +129,8 @@ async def test_recall_still_works_when_embeddings_are_unavailable(container):
     ``recall`` fell back to a leg that matched nothing and returned an empty
     list -- the graceful degradation existed in name only.
     """
+    from recallum.embeddings.ollama import EmbeddingError
+
     user_id = await _make_user_with_key(container, "degraded@example.com")
     service = container.memory_service()
     stored = await service.remember(
@@ -136,11 +139,17 @@ async def test_recall_still_works_when_embeddings_are_unavailable(container):
         category="fact",
     )
 
-    container.embedding_client().available = False
+    embedder = container.embedding_client()
+    original_embed = embedder.embed
+
+    async def unavailable(_text: str) -> list[float]:
+        raise EmbeddingError("embedding unavailable")
+
+    embedder.embed = unavailable  # type: ignore[method-assign]
     try:
         result = await service.recall(user_id, query="how are deploys handled in production")
     finally:
-        container.embedding_client().available = True
+        embedder.embed = original_embed  # type: ignore[method-assign]
 
     assert result.mode == "degraded_textual"
     assert stored.memory.id in {r.id for r in result.results}
@@ -274,7 +283,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0012_memory_profile_generation"
+        assert version == "0013_admin_memory_aggregates"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -316,7 +325,13 @@ async def test_migrations_applied(container):
             )
         ).scalars().all()
         assert columns == [
-            "id", "email", "created_at", "password_hash", "is_admin", "memory_generation"
+            "id",
+            "email",
+            "created_at",
+            "password_hash",
+            "is_admin",
+            "memory_generation",
+            "active_memory_count",
         ]
         dims = (
             await connection.execute(
@@ -356,6 +371,55 @@ async def test_database_readiness_rejects_superuser_and_missing_force_rls(
         assert await container.database_readiness().is_ready() is True
     finally:
         await admin_engine.dispose()
+
+
+async def test_database_pool_checkout_timeout_releases_and_reuses_pool(pg_database):
+    """A saturated pool fails fast and remains usable after the lease returns."""
+    engine = create_async_engine(
+        pg_database["app"],
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.1,
+        connect_args={
+            "timeout": 1.0,
+            "command_timeout": 1.0,
+            "server_settings": {"statement_timeout": "1000"},
+        },
+    )
+    first = await engine.connect()
+    try:
+        started = time.monotonic()
+        try:
+            await engine.connect()
+        except Exception:
+            pass
+        else:
+            pytest.fail("pool checkout unexpectedly succeeded while pool was full")
+        assert time.monotonic() - started < 1.0
+    finally:
+        await first.close()
+    try:
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT 1"))).scalar_one() == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_database_command_timeout_allows_subsequent_pool_reuse(container):
+    """A canceled command does not strand the connection pool."""
+    engine = container.engine()
+    started = time.monotonic()
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT pg_sleep(5)"))
+    except Exception:
+        pass
+    else:
+        pytest.fail("long-running command unexpectedly succeeded")
+    assert time.monotonic() - started < 3.0
+
+    async with engine.connect() as connection:
+        assert (await connection.execute(text("SELECT 1"))).scalar_one() == 1
 
 
 async def test_user_email_is_normalized_and_case_insensitive_unique(container):

@@ -2,7 +2,8 @@
 
 Starts a container via the Docker CLI, runs Alembic migrations, and hands
 back a fully wired ``Container``. Skipped when Docker is unavailable or the
-image cannot be pulled.
+image cannot be pulled. Embeddings come from a deterministic local HTTP stub
+shaped like Ollama's ``/api/embed`` (task 9.3).
 """
 
 from __future__ import annotations
@@ -14,23 +15,29 @@ import time
 
 import pytest
 import pytest_asyncio
-from dependency_injector import providers
 
 from recallum.config import get_settings
-from recallum.container import create_container, shutdown_container
-from tests.fakes import FakeEmbeddingClient
+from recallum.container import create_container, init_container_resources, shutdown_container
+from tests.embedding_stub import EmbeddingStubServer
 
 IMAGE = "pgvector/pgvector:pg17"
 
 
 def _free_port() -> int:
-    with socket.socket() as sock:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+        return int(sock.getsockname()[1])
 
 
 def _docker_available() -> bool:
     return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
+
+
+def _require_or_skip(reason: str) -> None:
+    if os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
 def _run_migrations(database_url: str) -> None:
@@ -46,14 +53,24 @@ def _run_migrations(database_url: str) -> None:
 
 
 @pytest.fixture(scope="session")
+def embedding_stub() -> EmbeddingStubServer:
+    stub = EmbeddingStubServer(dimensions=768, model="stub-embed")
+    stub.start()
+    try:
+        yield stub
+    finally:
+        stub.stop()
+
+
+@pytest.fixture(scope="session")
 def pg_database() -> dict[str, str]:
     """Start PostgreSQL+pgvector with the production owner/RLS role shape."""
     if not _docker_available():
-        pytest.skip("docker is not available")
+        _require_or_skip("docker is not available")
     try:
         subprocess.run(["docker", "pull", IMAGE], check=True, capture_output=True, timeout=600)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        pytest.skip(f"could not pull {IMAGE}")
+        _require_or_skip(f"could not pull {IMAGE}")
 
     port = _free_port()
     name = f"recallum-test-{os.getpid()}"
@@ -83,7 +100,7 @@ def pg_database() -> dict[str, str]:
                 break
             time.sleep(1)
         else:
-            pytest.skip("test postgres did not become ready")
+            _require_or_skip("test postgres did not become ready")
 
         admin_url = f"postgresql+asyncpg://postgres:test@127.0.0.1:{port}/recallum"
         subprocess.run(
@@ -105,10 +122,12 @@ def pg_database() -> dict[str, str]:
 
 
 @pytest_asyncio.fixture
-async def container(pg_database: dict[str, str], monkeypatch):
+async def container(pg_database: dict[str, str], embedding_stub: EmbeddingStubServer, monkeypatch):
     monkeypatch.setenv("RECALLUM__DATABASE__URL", pg_database["app"])
+    monkeypatch.setenv("RECALLUM__OLLAMA__URL", embedding_stub.base_url)
+    monkeypatch.setenv("RECALLUM__OLLAMA__MODEL", embedding_stub.model)
     get_settings.cache_clear()
     resolved = create_container(get_settings())
-    resolved.embedding_client.override(providers.Object(FakeEmbeddingClient(dimensions=768)))
+    await init_container_resources(resolved)
     yield resolved
     await shutdown_container(resolved)
