@@ -1,0 +1,48 @@
+{
+  "name": "recallum-memory",
+  "displayName": "Recallum Memory",
+  "version": "0.11.0",
+  "description": "Persistent, project-aware memory for Cursor through a self-hosted Recallum MCP server.",
+  "author": {
+    "name": "Zozi"
+  },
+  "homepage": "https://github.com/Zozi96/recallum-mcp",
+  "repository": "https://github.com/Zozi96/recallum-mcp",
+  "license": "MIT",
+  "keywords": [
+    "cursor",
+    "memory",
+    "mcp",
+    "context",
+    "hooks"
+  ],
+  "category": "productivity",
+  "tags": [
+    "memory",
+    "mcp",
+    "context"
+  ],
+  "variables": {
+    "type": "object",
+    "properties": {
+      "RECALLUM_MCP_URL": {
+        "type": "string",
+        "title": "Recallum MCP endpoint",
+        "description": "Streamable HTTP endpoint of your own Recallum server. Use HTTPS and the exact /mcp/ path; plain HTTP is allowed only on localhost or 127.0.0.1.",
+        "format": "uri",
+        "pattern": "^(?:https://[^/?#@]+|http://(?:localhost|127\\.0\\.0\\.1)(?::[0-9]+)?)/mcp/$"
+      },
+      "RECALLUM_API_KEY": {
+        "type": "string",
+        "title": "Recallum API key",
+        "description": "API key for your Recallum server. Enter it in Cursor's plugin settings; never commit it.",
+        "minLength": 1
+      }
+    },
+    "required": ["RECALLUM_MCP_URL", "RECALLUM_API_KEY"]
+  },
+  "skills": "./skills/",
+  "rules": "./rules/",
+  "hooks": "./hooks/cursor-hooks.json",
+  "mcpServers": "./mcp.cursor.json"
+}

@@ -4,21 +4,22 @@
 
 # Recallum Memory plugin
 
-Durable, project-aware memory for **Grok Build**, **Codex**, and **Claude Code**, backed by a
-self-hosted Recallum MCP server.
+Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, and **Claude Code**, backed
+by a self-hosted Recallum MCP server.
 
 The plugin ships:
 
 - two skills — `recallum-memory` (load context and capture verified reusable knowledge) and
   `recallum-setup` (install and diagnose);
-- two hooks — `SessionStart` injects the canonical project key and a completion capture reminder;
-  `UserPromptSubmit` nudges recall when a prompt mentions memory. Both fail open;
+- shared hooks — Codex, Claude Code, and Grok wire `SessionStart` plus `UserPromptSubmit`; Cursor
+  wires `sessionStart` and adds an always-applied rule as a delivery fallback. All fail open;
 - the MCP wiring for each client.
 
-One plugin package, three native entry points — not a Claude-only addon:
+One plugin package, four native entry points — not a Claude-only addon:
 
 | Client | Marketplace index | Plugin metadata |
 | --- | --- | --- |
+| Cursor | `.cursor-plugin/marketplace.json` | `.cursor-plugin/plugin.json` |
 | Grok Build | `.grok-plugin/marketplace.json` | `plugin.json` |
 | Codex | `.agents/plugins/marketplace.json` | `.codex-plugin/plugin.json` |
 | Claude Code | `.claude-plugin/marketplace.json` | `.claude-plugin/plugin.json` |
@@ -61,15 +62,35 @@ plugin placeholder with the same server name.
 After install, start a **new** Grok session. Tools appear as `recallum__*` via `search_tool` /
 `use_tool`.
 
+## Cursor
+
+Cursor uses the native `.cursor-plugin` marketplace and plugin manifest. The current Cursor CLI
+can register the marketplace; install the plugin with `/add-plugin` or from Settings:
+
+```bash
+agent plugin marketplace add https://github.com/Zozi96/recallum-mcp.git
+```
+
+Enable `recallum-memory` in Cursor Settings and provide the required `RECALLUM_MCP_URL` (with the
+exact `/mcp/` path) and `RECALLUM_API_KEY` variables there. Do not put a literal key in a checked-in
+file or rely on a shell-only export; restart Cursor and verify that the server remains enabled
+without displaying the key. For one-off local CLI testing, use
+`agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory`.
+
+The bundled server is named `recallum`. Cursor's `sessionStart` hook emits top-level
+`additional_context`, but delivery is best-effort and it cannot run before every prompt. The
+always-applied rule carries the exact canonical-project-key fallback. Recallum tools appear in
+Cursor's Available Tools list without a stable textual prefix.
+
 ## Prerequisites
 
-- A reachable Recallum server, yours. The endpoint must be HTTPS and its path must end in `/mcp`
-  or `/mcp/`. Plain HTTP is accepted only for `localhost` / `127.0.0.1`. `scripts/install.sh`
-  defaults to `https://recallum.zozbit.com/mcp/`; enabling the plugin from the marketplace has no
-  default and prompts for the endpoint, so nobody ends up pointed at another operator's server by
-  inheriting a value they never chose.
+- A reachable Recallum server, yours. The endpoint must be HTTPS; plain HTTP is accepted only for
+  `localhost` / `127.0.0.1`. Cursor requires the exact `/mcp/` path to avoid an authenticated
+  redirect. `scripts/install.sh` accepts `/mcp` or `/mcp/` for the other clients and normalizes it
+  to `/mcp/`. It defaults to `https://recallum.zozbit.com/mcp/`; the Cursor marketplace has no
+  endpoint default, so nobody inherits another operator's server without choosing it.
 - `python3` on `PATH` — the hooks run under it. Any 3.9+ interpreter works.
-- The `codex`, `claude`, and/or `grok` CLI.
+- The `agent`, `codex`, `claude`, and/or `grok` CLI as applicable.
 
 ## Install
 
@@ -235,6 +256,10 @@ grok mcp doctor recallum    # handshake OK, tools discovered
 A config.toml entry for `recallum` shadows any plugin-bundled MCP that still shows the unresolved
 `${user_config.mcp_url}` placeholder from Claude compatibility.
 
+**Cursor** — restart or reload the window after enabling the plugin and setting both variables.
+Confirm `recallum` is enabled under Settings > Tools & MCP and that its tools appear under
+Available Tools.
+
 ## Verify
 
 ```bash
@@ -243,6 +268,8 @@ claude mcp list | grep recallum   # Claude Code -> plugin:recallum-memory:recall
 claude plugin details recallum-memory
 grok mcp doctor recallum          # Grok Build
 grok plugin details recallum-memory
+agent mcp list                    # Cursor -> recallum enabled
+agent mcp list-tools recallum     # Cursor -> Recallum tools discovered
 ```
 
 `claude plugin details` / `grok plugin details` should report the skills and hooks; Grok's healthy
@@ -320,9 +347,10 @@ tool ids:
 | Codex | `mcp__recallum__` |
 | Claude Code | `mcp__plugin_recallum-memory_recallum__` |
 | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
+| Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
 
-Both skills document this, and the `SessionStart` hook emits whichever spelling matches the running
-client. This is why the plugin behaves identically across clients despite the different tool ids.
+Both skills document this, and the session hook emits the client-appropriate name or discovery
+hint. This is why the plugin behaves consistently despite the different tool ids.
 
 ## Reconfiguring
 
@@ -335,6 +363,8 @@ plugins/recallum-memory/scripts/install.sh --url https://new.example.com/mcp --f
 On Claude Code this uninstalls and reinstalls the plugin. Export `RECALLUM_API_KEY` before launching
 Claude, or re-run `/plugin configure` to restore a masked fallback.
 
+For Cursor, update both variables from the plugin's Settings page and reload the window.
+
 ## Uninstall
 
 ```bash
@@ -343,11 +373,15 @@ claude plugin uninstall recallum-memory@recallum-local
 grok mcp remove recallum && grok plugin uninstall recallum-memory
 ```
 
+Remove the Cursor plugin from Settings; remove the marketplace separately only if no other plugin
+from this repository is needed.
+
 ## Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
-| Tools missing after install | Start a **new** session; both clients discover MCP tools only at session start |
+| Tools missing after install | Start a **new** session; clients discover MCP tools when a session starts |
+| Cursor tools work but no Recallum context was injected | `sessionStart` context delivery is best-effort. The always-applied rule derives the same project key and calls `context`; confirm the rule is enabled |
 | Tools missing in `claude -p` | A restricted `agent` in `settings.json` can pin a tool allowlist that excludes MCP tools. Check the `agent` key and its `tools:` frontmatter |
 | `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code leaves plugin-bundled MCP tools behind `ToolSearch` instead of listing them, so a blind call to the fully qualified name fails while the server is connected. Search for the tool, then call it. `permissions.allow` does **not** make them load eagerly |
 | Stale Codex plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target codex`, then start a new session |

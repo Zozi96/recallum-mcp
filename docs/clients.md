@@ -1,12 +1,12 @@
-# Configuring MCP Clients (Grok Build, Codex, and Claude Code)
+# Configuring MCP Clients (Cursor, Grok Build, Codex, and Claude Code)
 
 Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
 user; never share one between people.
 
-Prefer `plugins/recallum-memory/scripts/install.sh` over hand-editing configs.
-It never stores the API key; it only registers an environment-variable
-reference (or Claude's masked plugin option).
+Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, and Grok Build. Cursor
+uses its native marketplace and Settings flow below. Keep credentials in client-owned settings;
+do not rely on a shell-only export as the sole GUI strategy, and verify the setup after restart.
 
 ## Grok Build (no Claude Code required)
 
@@ -60,6 +60,27 @@ From the VPS itself, the same endpoint works over the public HTTPS route
 (Traefik); no special local configuration is needed — local and remote clients
 use the same URL and behavior.
 
+## Cursor
+
+Cursor's native marketplace is rooted at `.cursor-plugin/marketplace.json`; the plugin manifest
+uses `.cursor-plugin/plugin.json`, shared skills, a Cursor session hook, and the `recallum` MCP
+server. Add the marketplace with the current Cursor CLI:
+
+```bash
+agent plugin marketplace add https://github.com/Zozi96/recallum-mcp.git
+```
+
+Then run `/add-plugin` in Cursor or enable `recallum-memory` from Settings. Provide the required
+`RECALLUM_MCP_URL` (with the exact `/mcp/` path) and `RECALLUM_API_KEY` variables there rather than
+putting a literal key in a checked-in config or relying on a shell-only export. Restart Cursor and
+verify that the `recallum` server remains enabled without displaying the key. For a one-off local
+CLI test, use `agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory`.
+
+Cursor's `sessionStart` hook returns context through top-level `additional_context`, but delivery
+is best-effort and it cannot run before every prompt. The always-applied rule carries the exact
+canonical-project-key fallback. MCP tools are exposed under Available Tools rather than a stable
+textual prefix.
+
 ## Claude Code
 
 Claude Code carries the MCP server inside the plugin (`.mcp.json`) and fills
@@ -97,7 +118,7 @@ Never store full conversations; store the distilled fact.
 
 Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
 `mcp__plugin_recallum-memory_recallum__*`, Grok Build `recallum__*` via
-`search_tool` / `use_tool`.
+`search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in Available Tools.
 
 ## Troubleshooting
 

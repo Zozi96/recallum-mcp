@@ -1,0 +1,16 @@
+{
+  "name": "recallum-local",
+  "owner": {
+    "name": "Zozi"
+  },
+  "metadata": {
+    "description": "Cursor plugins for Recallum durable project memory."
+  },
+  "plugins": [
+    {
+      "name": "recallum-memory",
+      "source": "plugins/recallum-memory",
+      "description": "Recall durable project context across Cursor sessions via the Recallum MCP server."
+    }
+  ]
+}

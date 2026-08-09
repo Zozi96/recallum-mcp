@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import http.server
 import json
 import os
@@ -19,9 +20,11 @@ INSTALLER = PLUGIN_ROOT / "scripts" / "install.sh"
 CODEX_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 GROK_MANIFEST = PLUGIN_ROOT / "plugin.json"
+CURSOR_MANIFEST = PLUGIN_ROOT / ".cursor-plugin" / "plugin.json"
 CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 CLAUDE_MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 GROK_MARKETPLACE = REPO_ROOT / ".grok-plugin" / "marketplace.json"
+CURSOR_MARKETPLACE = REPO_ROOT / ".cursor-plugin" / "marketplace.json"
 GROK_PLUGIN_INDEX = REPO_ROOT / ".grok-plugin" / "plugin-index.json"
 
 URL = "https://recallum.example/mcp/"
@@ -180,6 +183,7 @@ def run_hook(
         "PLUGIN_ROOT",
         "CLAUDE_PLUGIN_ROOT",
         "GROK_PLUGIN_ROOT",
+        "CURSOR_PLUGIN_ROOT",
         "RECALLUM_MCP_URL",
         "RECALLUM_API_KEY",
     ):
@@ -296,6 +300,41 @@ class HookTests(unittest.TestCase):
         context = self._session_context({"GROK_PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn("search_tool", context)
         self.assertIn("use_tool", context)
+
+    def test_cursor_root_wins_and_uses_cursor_hook_wire_format(self) -> None:
+        result = run_hook(
+            "session",
+            json.dumps({"cwd": "/work/alpha"}),
+            {
+                "CURSOR_PLUGIN_ROOT": "/plugins/recallum-memory",
+                "PLUGIN_ROOT": "/plugins/recallum-memory",
+                "GROK_PLUGIN_ROOT": "/plugins/recallum-memory",
+                "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertIn("additional_context", output)
+        self.assertNotIn("hookSpecificOutput", output)
+        context = output["additional_context"]
+        self.assertIn("Recallum MCP tools", context)
+        self.assertIn("Available Tools", context)
+        self.assertNotIn(CODEX_PREFIX, context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
+        self.assertNotIn(GROK_PREFIX, context)
+
+    def test_workspace_roots_supply_cursor_project_when_cwd_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            result = run_hook(
+                "session",
+                json.dumps({"workspace_roots": [str(root), "/ignored"]}),
+                {"CURSOR_PLUGIN_ROOT": "/plugins/recallum-memory"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            context = json.loads(result.stdout)["additional_context"]
+            expected = hashlib.sha256(str(root).encode()).hexdigest()[:12]
+            self.assertIn(f"project='local:{expected}'", context)
 
     def test_codex_is_not_told_about_a_lookup_step_it_does_not_have(self) -> None:
         context = self._session_context(
@@ -479,6 +518,21 @@ class _StubMCPHandler(http.server.BaseHTTPRequestHandler):
         del format, args  # silence the test log
 
 
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    target_url = ""
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server API)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        self.rfile.read(length)
+        self.send_response(307)
+        self.send_header("Location", type(self).target_url)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        del format, args
+
+
 class DigestTests(unittest.TestCase):
     """The opt-in session digest: inlined when reachable, invisible when not."""
 
@@ -574,9 +628,48 @@ class DigestTests(unittest.TestCase):
             [request["body"].get("method") for request in _StubMCPHandler.requests],
             ["initialize", "notifications/initialized", "tools/call"],
         )
+        self.assertEqual({request["path"] for request in _StubMCPHandler.requests}, {"/mcp/"})
         self.assertEqual(
             _StubMCPHandler.requests[-1]["headers"].get("Mcp-Session-Id"), "stub-session"
         )
+
+    def test_digest_url_rejects_unsafe_destinations(self) -> None:
+        normalize = runpy.run_path(str(HOOK))["_normalized_digest_url"]
+        self.assertEqual(
+            normalize("https://recallum.example/mcp"), "https://recallum.example/mcp/"
+        )
+        self.assertEqual(
+            normalize("http://localhost:8000/mcp/"), "http://localhost:8000/mcp/"
+        )
+        for unsafe in (
+            "http://recallum.example/mcp/",
+            "https://user@recallum.example/mcp/",
+            "https://@recallum.example/mcp/",
+            "https://recallum.example/other/",
+            "https://recallum.example/mcp/?debug=1",
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertIsNone(normalize(unsafe))
+
+    def test_digest_does_not_forward_bearer_across_redirect(self) -> None:
+        redirect = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+        _RedirectHandler.target_url = self.url
+        thread.start()
+        try:
+            env = self._digest_env()
+            env["RECALLUM_MCP_URL"] = (
+                f"http://127.0.0.1:{redirect.server_address[1]}/mcp/"
+            )
+            result = run_hook("session", json.dumps({"cwd": "/work/alpha"}), env)
+        finally:
+            redirect.shutdown()
+            redirect.server_close()
+            thread.join(timeout=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("before planning, call", context)
+        self.assertEqual(_StubMCPHandler.requests, [])
 
     def test_digest_render_exercises_character_cap(self) -> None:
         hook = runpy.run_path(str(HOOK))
@@ -662,13 +755,81 @@ class ManifestTests(unittest.TestCase):
         codex = self._load(CODEX_MANIFEST)
         claude = self._load(CLAUDE_MANIFEST)
         grok = self._load(GROK_MANIFEST)
+        cursor = self._load(CURSOR_MANIFEST)
         self.assertEqual(codex["name"], "recallum-memory")
         self.assertEqual(claude["name"], "recallum-memory")
         self.assertEqual(grok["name"], "recallum-memory")
+        self.assertEqual(cursor["name"], "recallum-memory")
         self.assertEqual(codex["version"], claude["version"])
         self.assertEqual(codex["version"], grok["version"])
+        self.assertEqual(codex["version"], cursor["version"])
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
+        self.assertIn("Cursor", grok["description"])
+        self.assertIn("cursor", grok["keywords"])
+
+    def test_cursor_manifest_uses_required_variable_only_credentials(self) -> None:
+        manifest = self._load(CURSOR_MANIFEST)
+        self.assertEqual(manifest["mcpServers"], "./mcp.cursor.json")
+        self.assertEqual(manifest["hooks"], "./hooks/cursor-hooks.json")
+        self.assertEqual(manifest["rules"], "./rules/")
+        self.assertEqual(manifest["skills"], "./skills/")
+        variables = manifest["variables"]
+        self.assertEqual(
+            variables["required"], ["RECALLUM_MCP_URL", "RECALLUM_API_KEY"]
+        )
+        url_schema = variables["properties"]["RECALLUM_MCP_URL"]
+        self.assertEqual(url_schema["format"], "uri")
+        for valid in (
+            "https://recallum.example/mcp/",
+            "https://recallum.example:8443/mcp/",
+            "http://localhost:8000/mcp/",
+            "http://127.0.0.1/mcp/",
+        ):
+            with self.subTest(valid=valid):
+                self.assertIsNotNone(re.fullmatch(url_schema["pattern"], valid))
+        for invalid in (
+            "http://recallum.example/mcp/",
+            "https://recallum.example/mcp",
+            "https://recallum.example/other/",
+            "https://user@recallum.example/mcp/",
+            "https://recallum.example/mcp/?debug=1",
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(re.fullmatch(url_schema["pattern"], invalid))
+        key_schema = variables["properties"]["RECALLUM_API_KEY"]
+        self.assertEqual(key_schema["minLength"], 1)
+        self.assertNotIn("sensitive", key_schema)
+        server = self._load(PLUGIN_ROOT / "mcp.cursor.json")["mcpServers"]["recallum"]
+        self.assertEqual(server["url"], "${RECALLUM_MCP_URL}")
+        self.assertEqual(server["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}")
+        serialized = json.dumps(server)
+        self.assertNotIn("user_config", serialized)
+        self.assertNotIn("default", serialized.lower())
+        self.assertNotIn("rcl_", serialized)
+
+    def test_cursor_marketplace_points_at_plugin_source(self) -> None:
+        marketplace = self._load(CURSOR_MARKETPLACE)
+        entry = next(item for item in marketplace["plugins"] if item["name"] == "recallum-memory")
+        self.assertEqual(entry["source"], "plugins/recallum-memory")
+
+    def test_cursor_hooks_and_rule_are_fallback_components(self) -> None:
+        hooks = self._load(PLUGIN_ROOT / "hooks" / "cursor-hooks.json")
+        self.assertEqual(hooks["version"], 1)
+        self.assertEqual(set(hooks["hooks"]), {"sessionStart"})
+        command = hooks["hooks"]["sessionStart"][0]["command"]
+        self.assertIn("CURSOR_PLUGIN_ROOT", command)
+        self.assertIn("recallum_hook.py", command)
+        rule = (PLUGIN_ROOT / "rules" / "recallum-memory.mdc").read_text(encoding="utf-8")
+        self.assertIn("alwaysApply: true", rule)
+        self.assertIn("Recallum MCP tools", rule)
+        self.assertIn("first 16 lowercase hex characters", rule)
+        self.assertIn("first 12 lowercase hex characters", rule)
+        skill = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Cursor session that drops `sessionStart` context", skill)
+        self.assertIn("first 16 lowercase hex characters", skill)
 
     def test_grok_plugin_index_catalogs_skills_hooks_and_version(self) -> None:
         manifest = self._load(GROK_MANIFEST)
@@ -817,9 +978,11 @@ class ManifestTests(unittest.TestCase):
         codex = self._load(CODEX_MARKETPLACE)
         claude = self._load(CLAUDE_MARKETPLACE)
         grok = self._load(GROK_MARKETPLACE)
+        cursor = self._load(CURSOR_MARKETPLACE)
         self.assertEqual(codex["name"], "recallum-local")
         self.assertEqual(claude["name"], "recallum-local")
         self.assertEqual(grok["name"], "recallum-local")
+        self.assertEqual(cursor["name"], "recallum-local")
         codex_entry = next(p for p in codex["plugins"] if p["name"] == "recallum-memory")
         claude_entry = next(p for p in claude["plugins"] if p["name"] == "recallum-memory")
         grok_entry = next(p for p in grok["plugins"] if p["name"] == "recallum-memory")

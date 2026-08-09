@@ -1,7 +1,7 @@
 {
   "name": "recallum-memory",
-  "version": "0.10.1",
-  "description": "Persistent, project-aware memory for Grok Build, Codex, and Claude Code through a self-hosted Recallum MCP server. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
+  "version": "0.11.0",
+  "description": "Persistent, project-aware memory for Cursor, Grok Build, Codex, and Claude Code through a self-hosted Recallum MCP server. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
   "author": {
     "name": "Zozi"
   },
@@ -13,6 +13,7 @@
     "mcp",
     "context",
     "hooks",
+    "cursor",
     "codex",
     "claude-code"
   ]

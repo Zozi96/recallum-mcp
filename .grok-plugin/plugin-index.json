@@ -2,7 +2,7 @@
   "version": 1,
   "plugins": {
     "recallum-memory": {
-      "version": "0.10.1",
+      "version": "0.11.0",
       "components": {
         "skills": [
           {
@@ -11,7 +11,7 @@
           },
           {
             "name": "recallum-setup",
-            "description": "Install, configure, and diagnose Recallum for Grok Build, Codex, or Claude Code."
+            "description": "Install, configure, and diagnose Recallum for Cursor, Grok Build, Codex, or Claude Code."
           }
         ],
         "hooks": [

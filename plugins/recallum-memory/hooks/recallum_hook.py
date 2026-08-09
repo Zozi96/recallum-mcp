@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-open context hints for the Recallum plugin (Codex, Claude Code, Grok).
+"""Fail-open context hints for the Recallum plugin (Cursor, Codex, Claude Code, Grok).
 
 Runs under whichever ``python3`` is on the host PATH, so this module must stay
 compatible with older interpreters. Do not use syntax newer than Python 3.9.
@@ -23,7 +23,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 # Codex registers the MCP server under its bare name, so its tools are
 # `mcp__recallum__*`. Claude Code registers a plugin-bundled server as
@@ -31,6 +31,8 @@ from urllib.parse import urlsplit
 # [A-Za-z0-9_-] to `_` when building tool ids, so the same tools are
 # `mcp__plugin_recallum-memory_recallum__*` there. Grok Build namespaces
 # MCP tools as `server__tool` for search_tool/use_tool, so `recallum__*`.
+# Cursor exposes them through its Available Tools list rather than a stable
+# textual prefix, so its hint uses semantic tool names instead.
 CODEX_TOOL_PREFIX = "mcp__recallum__"
 CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 GROK_TOOL_PREFIX = "recallum__"
@@ -128,7 +130,13 @@ def _remote_url(root: Path) -> str | None:
 def _project(payload: dict[str, object]) -> str:
     cwd = payload.get("cwd")
     if not isinstance(cwd, str) or not cwd.strip():
-        cwd = str(Path.cwd())
+        workspace_roots = payload.get("workspace_roots")
+        if isinstance(workspace_roots, list) and workspace_roots:
+            first_root = workspace_roots[0]
+            if isinstance(first_root, str) and first_root.strip():
+                cwd = first_root
+        if not isinstance(cwd, str) or not cwd.strip():
+            cwd = str(Path.cwd())
     resolved = Path(cwd).resolve()
     root_value = _git(resolved, "rev-parse", "--show-toplevel")
     root = Path(root_value).resolve() if root_value else resolved
@@ -145,6 +153,8 @@ def _tool(name: str) -> str:
 
     Discriminators, in order:
 
+    * ``CURSOR_PLUGIN_ROOT`` — Cursor. It may set compatibility aliases, so
+      Cursor must be checked first.
     * ``GROK_PLUGIN_ROOT`` — Grok Build. It also sets ``CLAUDE_PLUGIN_ROOT``
       as a compatibility alias, so Grok must be checked first.
     * ``PLUGIN_ROOT`` — Codex. Codex sets ``PLUGIN_ROOT`` *and*
@@ -157,6 +167,8 @@ def _tool(name: str) -> str:
     disambiguate on every single turn. Naming every spelling is the fallback
     for when no client root is set, not the normal path.
     """
+    if os.environ.get("CURSOR_PLUGIN_ROOT"):
+        return f"the Recallum MCP tool `{name}`"
     if os.environ.get("GROK_PLUGIN_ROOT"):
         prefixes = [GROK_TOOL_PREFIX]
     elif os.environ.get("PLUGIN_ROOT"):
@@ -177,9 +189,15 @@ def _lookup_hint() -> str:
     and gets `No such tool available` even though the server is connected and
     authenticated. Grok Build similarly routes MCP tools through
     ``search_tool`` / ``use_tool`` rather than listing them as first-class
-    builtins. Codex lists its MCP tools directly and has no lookup step, so
-    the hint is omitted on the Codex path, mirroring the branch in ``_tool``.
+    builtins. Cursor exposes its tools through Available Tools without a stable
+    textual prefix. Codex lists its MCP tools directly and has no lookup step,
+    so the hint is omitted on the Codex path, mirroring the branch in ``_tool``.
     """
+    if os.environ.get("CURSOR_PLUGIN_ROOT"):
+        return (
+            " In Cursor, use the Recallum MCP tools listed under Available Tools; "
+            "do not assume a textual tool prefix."
+        )
     if os.environ.get("PLUGIN_ROOT") and not os.environ.get("GROK_PLUGIN_ROOT"):
         return ""
     if os.environ.get("GROK_PLUGIN_ROOT"):
@@ -237,6 +255,41 @@ LANGUAGE_HINT = (
 # ---------------------------------------------------------------------------
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward the Recallum bearer to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
+def _normalized_digest_url(value: str) -> str | None:
+    """Validate the bearer-token destination and avoid a slash redirect."""
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        local = hostname in {"localhost", "127.0.0.1"}
+        allowed_schemes = {"https", "http"} if local else {"https"}
+        if (
+            parsed.scheme not in allowed_schemes
+            or not hostname
+            or not parsed.netloc
+            or "@" in parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"/mcp", "/mcp/"}
+        ):
+            return None
+    except ValueError:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, "/mcp/", "", ""))
+
+
 def _post(
     url: str,
     payload: dict[str, object],
@@ -245,7 +298,7 @@ def _post(
 ) -> tuple[object, str]:
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:  # noqa: S310
         return response.headers, response.read().decode("utf-8", errors="replace")
 
 
@@ -347,9 +400,9 @@ def _render_digest(payload: dict[str, object] | None) -> str | None:
 
 def _fetch_context_digest(project: str) -> str | None:
     """Fetch and render the project context digest; None on any failure."""
-    url = os.environ.get(DIGEST_URL_ENV, "").strip()
+    url = _normalized_digest_url(os.environ.get(DIGEST_URL_ENV, "").strip())
     key = os.environ.get(DIGEST_KEY_ENV, "").strip()
-    if not url or not key or not url.lower().startswith(("http://", "https://")):
+    if not url or not key:
         return None
     deadline = time.monotonic() + DIGEST_BUDGET_SECONDS
     headers = {
@@ -431,6 +484,9 @@ def _fetch_context_digest(project: str) -> str | None:
 
 
 def _emit(event: str, context: str) -> None:
+    if os.environ.get("CURSOR_PLUGIN_ROOT"):
+        print(json.dumps({"additional_context": context}, separators=(",", ":")))
+        return
     print(
         json.dumps(
             {

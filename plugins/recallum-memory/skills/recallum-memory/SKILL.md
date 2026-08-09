@@ -19,9 +19,11 @@ Claude Code namespaces a plugin-bundled MCP server:
 | Codex | `mcp__recallum__` | `mcp__recallum__context` |
 | Claude Code | `mcp__plugin_recallum-memory_recallum__` | `mcp__plugin_recallum-memory_recallum__context` |
 | Grok Build | `recallum__` | `recallum__context` (via `search_tool` / `use_tool`) |
+| Cursor | Recallum MCP tools in Available Tools | the `context` tool in Available Tools |
 
-Use whichever prefix is actually present in your tool list; the session hook names the right one.
-Below, tools are written unprefixed.
+Use whichever client tool names are actually present in your tool list; the session hook names the
+right one. Cursor does not provide a stable textual tool prefix, so use the names shown in
+Available Tools. Below, tools are written unprefixed.
 
 ## Memory Language
 
@@ -42,8 +44,16 @@ Translating an existing, still-true memory is not a reason to call `update`.
 
 ## Workflow
 
-1. Use the opaque canonical project key supplied by the Recallum session hook. Without that
-   context, hash the credential-free Git `origin`; if no origin exists, hash the repository root.
+1. Use the opaque canonical project key supplied by the Recallum session hook. If the hook context
+   is absent (including a Cursor session that drops `sessionStart` context), derive the same key
+   exactly:
+   - Resolve the workspace to its Git top-level. Use `origin`, or the first remote reported by
+     `git remote` when `origin` is absent.
+   - For a parseable URL or SCP-style remote, normalize to `<lowercase-host>/<path>` after removing
+     leading/trailing path slashes and one trailing `.git`. SHA-256 hash that UTF-8 string, take the
+     first 16 lowercase hex characters, and prefix `remote:`.
+   - With no parseable remote, SHA-256 hash the absolute Git root (or absolute workspace when it is
+     not a repository), take the first 12 lowercase hex characters, and prefix `local:`.
    The only scopes are `global` and `project`: use `global` only for durable information that truly
    applies across projects, such as a general user preference.
 2. At session start or resume, call `context` with `project` — unless the session hook already
@@ -130,8 +140,9 @@ truncated text with `get_memory` when needed, and let current code and instructi
 outdated memory. A memory that agrees with both can be applied without rediscovering its content.
 
 This checkpoint policy is identical for Codex (`mcp__recallum__`), Claude Code
-(`mcp__plugin_recallum-memory_recallum__`), and Grok Build (`recallum__` via `search_tool` /
-`use_tool`): only the tool prefix and discovery step differ.
+(`mcp__plugin_recallum-memory_recallum__`), Grok Build (`recallum__` via `search_tool` /
+`use_tool`), and Cursor (the Recallum MCP tools listed in Available Tools): only the tool
+discovery step differs.
 
 ## Delegation
 
