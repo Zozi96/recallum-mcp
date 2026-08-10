@@ -4,7 +4,7 @@
       "type": "http",
       "url": "${user_config.mcp_url}",
       "headers": {
-        "Authorization": "Bearer ${RECALLUM_API_KEY:-${user_config.api_token}}"
+        "Authorization": "Bearer ${user_config.api_token}"
       }
     }
   }

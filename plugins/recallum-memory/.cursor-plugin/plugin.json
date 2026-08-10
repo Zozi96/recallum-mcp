@@ -43,6 +43,5 @@
   },
   "skills": "./skills/",
   "rules": "./rules/",
-  "hooks": "./hooks/cursor-hooks.json",
-  "mcpServers": "./mcp.cursor.json"
+  "hooks": "./hooks/cursor-hooks.json"
 }

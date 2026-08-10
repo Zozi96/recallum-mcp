@@ -770,7 +770,11 @@ class ManifestTests(unittest.TestCase):
 
     def test_cursor_manifest_uses_required_variable_only_credentials(self) -> None:
         manifest = self._load(CURSOR_MANIFEST)
-        self.assertEqual(manifest["mcpServers"], "./mcp.cursor.json")
+        # Discovery relies on the agent-plugins.org convention filename
+        # (mcp.json at the plugin root); the manifest must not point at it
+        # explicitly, since a path string is not a guaranteed discovery
+        # mechanism for Cursor/Agent Plugins.
+        self.assertNotIn("mcpServers", manifest)
         self.assertEqual(manifest["hooks"], "./hooks/cursor-hooks.json")
         self.assertEqual(manifest["rules"], "./rules/")
         self.assertEqual(manifest["skills"], "./skills/")
@@ -800,7 +804,7 @@ class ManifestTests(unittest.TestCase):
         key_schema = variables["properties"]["RECALLUM_API_KEY"]
         self.assertEqual(key_schema["minLength"], 1)
         self.assertNotIn("sensitive", key_schema)
-        server = self._load(PLUGIN_ROOT / "mcp.cursor.json")["mcpServers"]["recallum"]
+        server = self._load(PLUGIN_ROOT / "mcp.json")["mcpServers"]["recallum"]
         self.assertEqual(server["url"], "${RECALLUM_MCP_URL}")
         self.assertEqual(server["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}")
         serialized = json.dumps(server)
@@ -871,14 +875,30 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(user_config["api_token"]["sensitive"])
         self.assertNotIn("sensitive", user_config["mcp_url"])
 
-    def test_bundled_mcp_server_prefers_env_token_with_user_config_fallback(self) -> None:
+    def test_bundled_mcp_server_reads_only_user_config_token(self) -> None:
+        # Claude Code's .mcp.json expansion officially supports only ${VAR}
+        # and ${VAR:-default}, single-pass. A nested
+        # ${RECALLUM_API_KEY:-${user_config.api_token}} is undocumented and
+        # breaks on GUI launches that do not inherit the shell profile, so
+        # the header must read userConfig only; install.sh is responsible for
+        # bridging any env-provided key into userConfig storage.
         server = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["recallum"]
         self.assertEqual(server["type"], "http")
         self.assertEqual(server["url"], "${user_config.mcp_url}")
         self.assertEqual(
             server["headers"]["Authorization"],
-            "Bearer ${RECALLUM_API_KEY:-${user_config.api_token}}",
+            "Bearer ${user_config.api_token}",
         )
+
+    def test_claude_mcp_json_header_has_no_nested_placeholder(self) -> None:
+        # Regression guard: nested ${...${...}} constructs are undocumented
+        # by Claude Code's single-pass ${VAR} / ${VAR:-default} expansion and
+        # must never reappear in the Authorization header.
+        server = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["recallum"]
+        header = server["headers"]["Authorization"]
+        self.assertIsNone(re.search(r"\$\{[^}]*\$\{", header))
+        self.assertEqual(header.count("${"), 1)
+        self.assertNotIn("RECALLUM_API_KEY", header)
 
     def test_claude_tool_prefix_is_derivable_from_the_manifest_and_server_name(self) -> None:
         """Pin the prefix to its inputs so a rename cannot silently break it.
@@ -1567,17 +1587,21 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertIn("no Recallum credential can resolve", result.stderr)
             self.assertIn("api_token", result.stderr)
 
-    def test_exported_key_satisfies_the_credential_check(self) -> None:
-        # RECALLUM_API_KEY, not --token-env-var: the name is baked into
-        # .mcp.json, so Claude Code cannot follow a custom one the way Codex
-        # and Grok do.
+    def test_exported_key_alone_fails_the_credential_check(self) -> None:
+        # RECALLUM_API_KEY no longer satisfies the check by itself: .mcp.json
+        # only reads ${user_config.api_token}, so an env var that never made
+        # it into userConfig storage (e.g. --no-store-api-key) would silently
+        # fail every tool call. That must now be a loud, actionable failure
+        # instead of a pass.
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
             env["RECALLUM_API_KEY"] = "env-token-placeholder"
             # Skip persistence so this only covers the env-based check path.
             result = self._run_claude(env, "--no-store-api-key")
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertNotIn("no Recallum credential", result.stderr)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("RECALLUM_API_KEY is set", result.stderr)
+            self.assertIn("re-run install.sh", result.stderr)
+            self.assertIn("/plugin configure", result.stderr)
 
     def test_masked_api_token_satisfies_the_credential_check(self) -> None:
         # Legacy location: some installs put api_token in settings.json options.

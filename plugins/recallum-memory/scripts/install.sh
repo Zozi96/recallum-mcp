@@ -45,8 +45,12 @@ API key handling (default: store when a key is available or can be prompted):
 
   Codex        registers the MCP server against --token-env-var, and resolves that
                environment variable at connection time.
-  Claude Code  carries the MCP server inside the plugin. It prefers RECALLUM_API_KEY,
-               with a masked fallback in pluginSecrets (installer or /plugin configure).
+  Claude Code  carries the MCP server inside the plugin. Its .mcp.json only reads
+               ${user_config.api_token}, so the key is always read from userConfig
+               storage (pluginConfigs options.api_token or pluginSecrets api_token);
+               RECALLUM_API_KEY / --token-env-var are installer-time SOURCES this
+               script uses to populate that storage, never something the client
+               reads directly.
   Grok Build   registers the MCP server in ~/.grok/config.toml against
                --token-env-var (same env-var pattern as Codex). Claude-style
                ${user_config.*} placeholders in the plugin .mcp.json are not
@@ -299,7 +303,10 @@ resolve_api_key() {
     return 0
   fi
 
-  # Prefer the name Claude's .mcp.json hard-codes, then the Codex/Grok env var.
+  # Prefer the installer's default token env var name, then the custom
+  # --token-env-var used by Codex/Grok. Either way this is only an
+  # installer-time source: it gets persisted into userConfig storage below,
+  # since Claude Code's .mcp.json reads ${user_config.api_token}, not env.
   if [[ -n "${RECALLUM_API_KEY-}" ]]; then
     resolved_api_key=$RECALLUM_API_KEY
     echo "Using existing RECALLUM_API_KEY from the environment (value not printed)."
@@ -695,20 +702,21 @@ if actual != expected:
 PY
 }
 
-# Both credential routes can be empty while every command above reports
-# success. `.mcp.json` resolves `Bearer ${RECALLUM_API_KEY:-${user_config.api_token}}`,
-# and with both unset that is the literal string "Bearer " -- a registered
-# server whose every call fails authentication, with no error at startup. The
-# hooks keep running and keep naming tools that are not there, which reads as
-# "the plugin is installed but Claude ignores it".
+# `.mcp.json` resolves `Bearer ${user_config.api_token}` only -- it does not
+# read RECALLUM_API_KEY (unlike Codex and Grok, Claude Code cannot follow an
+# env var at connection time; .mcp.json expansion is single-pass ${VAR} /
+# ${VAR:-default} only, so a nested env-with-userConfig-fallback is not
+# possible). The key must already be in userConfig storage: pluginConfigs
+# options.api_token or pluginSecrets api_token. persist_api_key/
+# store_claude_plugin_secret above should have put it there whenever a key
+# was resolved and --no-store-api-key was not passed.
 #
-# Deliberately checks RECALLUM_API_KEY and not $token_env_var: the name is
-# baked into .mcp.json, so unlike Codex and Grok, Claude Code cannot follow
-# --token-env-var.
-#
-# This warns instead of failing. The variable is read from the environment that
-# launches Claude Code, not this shell, so its absence here is not proof of a
-# broken install -- only of an unverifiable one.
+# If RECALLUM_API_KEY is set in this shell but nothing landed in storage
+# (typically --no-store-api-key), that env var will NOT authenticate
+# anything -- .mcp.json never reads it -- so this fails loudly instead of
+# giving false confidence. If nothing is set anywhere, this only warns: the
+# install itself is valid, and the key is read at Claude Code launch, not
+# now, so an empty environment here is not proof of a broken install.
 verify_claude_credential() {
   if ((dry_run)); then return 0; fi
   local env_set=0
@@ -735,19 +743,31 @@ try:
     ).strip()
 except (OSError, ValueError):
     secret = ""
-if env_set or str(options.get("api_token") or "").strip() or secret:
+if str(options.get("api_token") or "").strip() or secret:
     raise SystemExit(0)
+if env_set:
+    sys.stderr.write(
+        f"""error: RECALLUM_API_KEY is set in this shell, but no api_token is stored
+       for Claude Code, and .mcp.json only reads ${{user_config.api_token}} --
+       it does not read the environment. Claude Code will register the server,
+       start the hooks, and then fail every tool call authentication in silence.
+       Settings file:     {path}
+       Credentials file:  {creds_path}  (pluginSecrets['{plugin_id}'].api_token)
+       Fix with one of:
+         * re-run install.sh without --no-store-api-key (it persists the key)
+         * /plugin configure recallum-memory@recallum-local
+"""
+    )
+    raise SystemExit(1)
 sys.stderr.write(
     f"""warning: no Recallum credential can resolve for Claude Code.
-         Neither RECALLUM_API_KEY (environment) nor a stored api_token is set,
-         so .mcp.json sends the literal "Bearer ": Claude Code registers the
-         server, starts the hooks, and then fails every tool call authentication
-         in silence.
+         No api_token is stored, so .mcp.json sends the literal "Bearer ":
+         Claude Code registers the server, starts the hooks, and then fails
+         every tool call authentication in silence.
          Settings file:     {path}
          Credentials file:  {creds_path}  (pluginSecrets['{plugin_id}'].api_token)
          Fix with one of:
            * re-run install.sh (it prompts and stores the key for GUI + terminal)
-           * RECALLUM_API_KEY in the environment that LAUNCHES Claude Code
            * /plugin configure recallum-memory@recallum-local
          Never pass the token as a command-line argument: argv is readable by
          any process on the machine.
@@ -831,9 +851,11 @@ PY
 
   # Claude Code carries the MCP server inside the plugin (.mcp.json) and fills
   # it from userConfig, so there is no separate `claude mcp add` step. Only the
-  # non-sensitive endpoint is passed on the command line. The API key comes
-  # from RECALLUM_API_KEY, or from a masked `/plugin configure` fallback,
-  # keeping the credential out of argv and the process list.
+  # non-sensitive endpoint is passed on the command line. The API key is always
+  # read from userConfig storage (persist_api_key/store_claude_plugin_secret
+  # above, or a masked `/plugin configure` fallback), keeping the credential
+  # out of argv and the process list. RECALLUM_API_KEY is only an
+  # installer-time source used to populate that storage.
   claude plugin list --json >"$tmp_dir/claude-plugins.json"
   local plugin_state
   plugin_state=$(python3 - "$tmp_dir/claude-plugins.json" <<'PY'
