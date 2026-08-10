@@ -64,23 +64,36 @@ After install, start a **new** Grok session. Tools appear as `recallum__*` via `
 
 ## Cursor
 
-Cursor uses the native `.cursor-plugin` marketplace and plugin manifest. The current Cursor CLI
-can register the marketplace; install the plugin with `/add-plugin` or from Settings:
+Preferred path — let the installer register the marketplace and write a desktop-safe MCP entry:
 
 ```bash
-agent plugin marketplace add https://github.com/Zozi96/recallum-mcp.git
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target cursor --url https://recallum.example.com/mcp/
+# Or with auto (includes Cursor when cursor-agent/agent is on PATH):
+plugins/recallum-memory/scripts/install.sh --url https://recallum.example.com/mcp/
 ```
 
-Enable `recallum-memory` in Cursor Settings and provide the required `RECALLUM_MCP_URL` (with the
-exact `/mcp/` path) and `RECALLUM_API_KEY` variables there. Do not put a literal key in a checked-in
-file or rely on a shell-only export; restart Cursor and verify that the server remains enabled
-without displaying the key. For one-off local CLI testing, use
-`agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory`.
+That:
+
+1. Adds marketplace `recallum-local` via `cursor-agent` / `agent` (git URL; use `--force-mcp` to reindex).
+2. Writes `~/.cursor/mcp.json` server `recallum` with the real URL and a **mode-600 literal Bearer**
+   (Cursor desktop does not expand shell `${ENV}`, and plugin Configure is often unavailable for
+   user marketplaces).
+3. If a plugin cache already exists, patches its `mcp.json` the same way and moves Claude’s
+   `.mcp.json` aside so Cursor does not load unresolved `${user_config.*}` URLs.
+
+Then install the plugin **in the Cursor UI** (the CLI cannot install plugins): Settings → Plugins →
+`recallum-local` → `recallum-memory`, or `/plugins` in `cursor-agent`. Fully quit and reopen Cursor.
+
+For one-off local CLI testing without marketplace install:
+
+```bash
+agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory
+```
 
 Cursor loads the plugin MCP server from `mcp.json` only when the Cursor manifest references it as
-`"mcp": "./mcp.json"` (skills, rules and hooks load by convention; an unreferenced root `mcp.json`
-registers nothing). The Cursor server key is `recallum_memory`, not `recallum`: Claude Code ships a
-root `.mcp.json` under the name `recallum` with `${user_config.*}` placeholders, and Cursor merges
+`"mcp": "./mcp.json"`. The Cursor server key is `recallum_memory`, not `recallum`: Claude Code ships
+a root `.mcp.json` under the name `recallum` with `${user_config.*}` placeholders, and Cursor merges
 plugin MCP configs by server name. If both use `recallum`, the Claude entry overwrites the env-var
 Cursor entry and zero Recallum tools load. Claude's server name and tool prefix are unchanged.
 Cursor's `sessionStart` hook emits top-level `additional_context`, but delivery is best-effort and
@@ -117,7 +130,7 @@ plugins/recallum-memory/scripts/install.sh --dry-run
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
-| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, or `both`. `auto` uses every detected CLI; `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
+| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
 | `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex and Grok read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into userConfig storage, because `.mcp.json` reads `${user_config.api_token}` and never the environment |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |

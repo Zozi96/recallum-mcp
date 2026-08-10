@@ -6,21 +6,21 @@ usage() {
 Usage: install.sh [OPTIONS]
 
 Install the repo-local Recallum plugin and configure its remote MCP server for
-Codex, Claude Code, Grok Build, or any combination the host has installed.
+Codex, Claude Code, Grok Build, Cursor, or any combination the host has installed.
 
 Options:
   --url URL                 Recallum MCP endpoint
                             (default: https://recallum.zozbit.com/mcp/)
                             Normalized to a trailing slash to avoid a redirect
                             that would expose or drop the bearer token
-  --target TARGET           auto | codex | claude | grok | both (default: auto)
+  --target TARGET           auto | codex | claude | grok | cursor | both (default: auto)
                             auto installs into every detected CLI
-                            both requires Codex and Claude Code (not Grok)
-  --token-env-var NAME      Codex and Grok: bearer-token environment variable
+                            both requires Codex and Claude Code (not Grok/Cursor)
+  --token-env-var NAME      Codex, Grok, and Cursor: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
   --remote                  Register the private GitHub repository instead of the local checkout
-  --force-mcp               Replace an existing recallum setup: a differing Codex/Grok MCP
+  --force-mcp               Replace an existing recallum setup: a differing Codex/Grok/Cursor MCP
                             definition, or an already-installed Claude Code plugin
   --api-key-file PATH       Read the API key from PATH (mode 600 recommended). Safer than
                             putting the key on the command line.
@@ -39,9 +39,13 @@ API key handling (default: store when a key is available or can be prompted):
   Persistence:
     Claude Code  ~/.claude/.credentials.json → pluginSecrets
                  (same store as /plugin configure; works for GUI launches)
-    Codex/Grok   ~/.config/recallum/env  (export of the token env var)
+    Codex/Grok/Cursor
+                 ~/.config/recallum/env  (export of the token env var)
                  and, on Linux, ~/.config/environment.d/99-recallum.conf
                  so desktop sessions also see the variable
+    Cursor also writes a mode-600 literal Bearer into ~/.cursor/mcp.json because
+                 the Cursor desktop app does not expand shell env vars and the
+                 plugin Configure UI is not always available for user marketplaces.
 
   Codex        registers the MCP server against --token-env-var, and resolves that
                environment variable at connection time.
@@ -56,6 +60,11 @@ API key handling (default: store when a key is available or can be prompted):
                ${user_config.*} placeholders in the plugin .mcp.json are not
                resolved by Grok, so the native config entry is required and
                takes precedence over the plugin-bundled server.
+  Cursor       registers the marketplace via cursor-agent/agent (plugin install is
+               still done in the Cursor UI), writes ~/.cursor/mcp.json with a real
+               URL + Bearer (literal when a key is stored), and if a plugin cache
+               already exists, patches its mcp.json the same way and moves Claude's
+               .mcp.json aside so Cursor does not load unresolved user_config URLs.
 EOF
 }
 
@@ -127,9 +136,9 @@ while (($#)); do
 done
 
 case "$target" in
-  auto | codex | claude | grok | both) ;;
+  auto | codex | claude | grok | cursor | both) ;;
   *)
-    echo "error: --target must be auto, codex, claude, grok, or both" >&2
+    echo "error: --target must be auto, codex, claude, grok, cursor, or both" >&2
     exit 2
     ;;
 esac
@@ -174,20 +183,32 @@ PY
 has_codex=0
 has_claude=0
 has_grok=0
+has_cursor=0
+cursor_cli=""
 if command -v codex >/dev/null 2>&1; then has_codex=1; fi
 if command -v claude >/dev/null 2>&1; then has_claude=1; fi
 if command -v grok >/dev/null 2>&1; then has_grok=1; fi
+# Cursor ships as cursor-agent; some installs expose the same binary as agent.
+if command -v cursor-agent >/dev/null 2>&1; then
+  has_cursor=1
+  cursor_cli="cursor-agent"
+elif command -v agent >/dev/null 2>&1; then
+  has_cursor=1
+  cursor_cli="agent"
+fi
 
 install_codex=0
 install_claude=0
 install_grok=0
+install_cursor=0
 case "$target" in
   auto)
     install_codex=$has_codex
     install_claude=$has_claude
     install_grok=$has_grok
-    if ((install_codex == 0 && install_claude == 0 && install_grok == 0)); then
-      echo "error: none of the codex, claude, or grok CLIs is on PATH" >&2
+    install_cursor=$has_cursor
+    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0)); then
+      echo "error: none of the codex, claude, grok, or cursor-agent/agent CLIs is on PATH" >&2
       exit 1
     fi
     ;;
@@ -203,6 +224,13 @@ case "$target" in
     ((has_grok)) || { echo "error: grok CLI is not installed or not on PATH" >&2; exit 1; }
     install_grok=1
     ;;
+  cursor)
+    ((has_cursor)) || {
+      echo "error: neither cursor-agent nor agent is installed or on PATH" >&2
+      exit 1
+    }
+    install_cursor=1
+    ;;
   both)
     ((has_codex)) || { echo "error: codex CLI is not installed or not on PATH" >&2; exit 1; }
     ((has_claude)) || { echo "error: claude CLI is not installed or not on PATH" >&2; exit 1; }
@@ -216,11 +244,14 @@ repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd -P)
 codex_marketplace_source="$repo_root"
 claude_marketplace_source="$repo_root"
 grok_marketplace_source="$repo_root"
+# Cursor marketplace add only accepts a git URL (not a local path).
+cursor_marketplace_source="git@github.com:Zozi96/recallum-mcp.git"
 if ((remote_marketplace)); then
   codex_marketplace_source="git@github.com:Zozi96/recallum-mcp.git"
   claude_marketplace_source="Zozi96/recallum-mcp"
   # Grok accepts GitHub shorthand and normalizes it to an https git URL.
   grok_marketplace_source="Zozi96/recallum-mcp"
+  cursor_marketplace_source="git@github.com:Zozi96/recallum-mcp.git"
 fi
 
 tmp_dir=$(mktemp -d)
@@ -411,7 +442,7 @@ store_env_key_files() {
   if ((install_claude)) || [[ "$token_env_var" == "RECALLUM_API_KEY" ]]; then
     names+=("RECALLUM_API_KEY")
   fi
-  if ((install_codex || install_grok)); then
+  if ((install_codex || install_grok || install_cursor)); then
     local found=0
     local n
     if ((${#names[@]} > 0)); then
@@ -492,7 +523,7 @@ persist_api_key() {
   if ((install_claude)); then
     store_claude_plugin_secret "$resolved_api_key"
   fi
-  if ((install_codex || install_grok || install_claude)); then
+  if ((install_codex || install_grok || install_claude || install_cursor)); then
     store_env_key_files "$resolved_api_key"
   fi
   api_key_stored=1
@@ -1286,12 +1317,240 @@ PY
   esac
 }
 
+# --------------------------------------------------------------- Cursor -----
+
+install_for_cursor() {
+  local marketplace_file="$repo_root/.cursor-plugin/marketplace.json"
+  local cursor_manifest="$repo_root/plugins/recallum-memory/.cursor-plugin/plugin.json"
+  [[ -f "$marketplace_file" ]] || {
+    echo "error: Cursor marketplace file not found: $marketplace_file" >&2
+    exit 1
+  }
+  [[ -f "$cursor_manifest" ]] || {
+    echo "error: Cursor plugin manifest not found: $cursor_manifest" >&2
+    exit 1
+  }
+  [[ -n "$cursor_cli" ]] || {
+    echo "error: internal: cursor_cli is empty" >&2
+    exit 1
+  }
+
+  local marketplace_name
+  marketplace_name=$(python3 - "$marketplace_file" "$cursor_manifest" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    manifest = json.load(open(sys.argv[2], encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"error: invalid Cursor packaging JSON: {exc}")
+if data.get("name") != "recallum-local":
+    raise SystemExit("error: Cursor marketplace name must be recallum-local")
+plugins = data.get("plugins")
+if not isinstance(plugins, list) or not any(
+    isinstance(item, dict)
+    and item.get("name") == "recallum-memory"
+    and item.get("source") == "plugins/recallum-memory"
+    for item in plugins
+):
+    raise SystemExit("error: Cursor marketplace has an invalid recallum-memory plugin entry")
+if manifest.get("name") != "recallum-memory":
+    raise SystemExit("error: Cursor plugin.json name must be recallum-memory")
+if manifest.get("mcp") != "./mcp.json":
+    raise SystemExit('error: Cursor manifest must set "mcp": "./mcp.json"')
+print(data["name"])
+PY
+  )
+
+  # cursor-agent plugin marketplace list --format json
+  "$cursor_cli" plugin marketplace list --format json >"$tmp_dir/cursor-marketplaces.json" 2>/dev/null \
+    || "$cursor_cli" plugin marketplace list --format json >"$tmp_dir/cursor-marketplaces.json"
+
+  local marketplace_state
+  marketplace_state=$(python3 - "$tmp_dir/cursor-marketplaces.json" "$marketplace_name" "$cursor_marketplace_source" <<'PY'
+import json
+import sys
+from urllib.parse import urlsplit
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+items = data if isinstance(data, list) else data.get("marketplaces", [])
+if not isinstance(items, list):
+    raise SystemExit("error: unexpected cursor marketplace list JSON")
+wanted_name = sys.argv[2]
+wanted_source = sys.argv[3]
+
+
+def normalize(url: str) -> str:
+    value = (url or "").strip()
+    if value.startswith("git@"):
+        # git@github.com:Owner/repo.git → https://github.com/owner/repo
+        host_path = value.split("@", 1)[1]
+        host, _, path = host_path.partition(":")
+        path = path.removesuffix(".git")
+        return f"https://{host.lower()}/{path.lower()}"
+    parsed = urlsplit(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        path = parsed.path.rstrip("/").removesuffix(".git")
+        return f"https://{parsed.netloc.lower()}{path.lower()}"
+    return value.lower()
+
+
+matches = [i for i in items if isinstance(i, dict) and i.get("name") == wanted_name]
+if not matches:
+    print("missing")
+elif len(matches) != 1:
+    print("conflict")
+else:
+    have = normalize(str(matches[0].get("gitUrl") or matches[0].get("url") or ""))
+    want = normalize(wanted_source)
+    # Accept https vs ssh for the same GitHub repo.
+    if have == want or have.rstrip("/") == want.rstrip("/"):
+        print("matching")
+    elif "github.com/zozi96/recallum-mcp" in have and "github.com/zozi96/recallum-mcp" in want:
+        print("matching")
+    else:
+        print("conflict")
+PY
+  )
+
+  if [[ "$marketplace_state" == "conflict" && "$force_mcp" -ne 1 ]]; then
+    echo "error: Cursor marketplace '$marketplace_name' already points to a different location" >&2
+    echo "       Rerun with --force-mcp to remove and re-add $cursor_marketplace_source" >&2
+    exit 1
+  fi
+
+  # Plain "update" is known to leave a stale commit index; force reindex with
+  # remove + add when asked, or when the marketplace is missing.
+  if [[ "$marketplace_state" == "conflict" ]] || ((force_mcp)); then
+    if [[ "$marketplace_state" != "missing" ]]; then
+      run_action "$cursor_cli" plugin marketplace remove "$marketplace_name" || true
+    fi
+    marketplace_state="missing"
+  fi
+
+  if [[ "$marketplace_state" == "missing" ]]; then
+    run_action "$cursor_cli" plugin marketplace add "$cursor_marketplace_source"
+  else
+    echo "Cursor marketplace '$marketplace_name' already points at this repository."
+    # Still reindex on --remote so HEAD advances without a full remove.
+    if ((remote_marketplace)); then
+      run_action "$cursor_cli" plugin marketplace update "$marketplace_name" || true
+    fi
+  fi
+
+  # Write ~/.cursor/mcp.json. Cursor desktop does not expand shell ${ENV} in
+  # MCP configs reliably, and plugin variables are not always configurable in
+  # the UI for user marketplaces — so store a literal Bearer when we have a key.
+  local cursor_mcp="$HOME/.cursor/mcp.json"
+  local key_path=""
+  if [[ -n "${resolved_api_key-}" ]]; then
+    key_path="$tmp_dir/cursor-api-key"
+    umask 077
+    printf '%s' "$resolved_api_key" >"$key_path"
+    chmod 600 "$key_path"
+  fi
+
+  if ((dry_run)); then
+    if [[ -n "$key_path" ]]; then
+      echo "dry-run: write $cursor_mcp server recallum (url=$url, literal Bearer, mode 600)"
+    else
+      echo "dry-run: write $cursor_mcp server recallum (url=$url, Bearer \${$token_env_var})"
+    fi
+    echo "dry-run: patch Cursor plugin cache mcp.json if present; hide Claude .mcp.json there"
+  else
+    python3 - "$cursor_mcp" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+mcp_path = Path(sys.argv[1])
+url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+
+if key:
+    auth = f"Bearer {key}"
+else:
+    auth = f"Bearer ${{{token_env}}}"
+
+mcp_path.parent.mkdir(parents=True, exist_ok=True)
+data = {}
+if mcp_path.is_file():
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid JSON in {mcp_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {mcp_path} root must be a JSON object")
+servers = data.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    raise SystemExit(f"error: {mcp_path} mcpServers must be an object")
+
+servers["recallum"] = {
+    "type": "http",
+    "url": url,
+    "headers": {"Authorization": auth},
+}
+tmp = mcp_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(mcp_path)
+os.chmod(mcp_path, 0o600)
+print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
+
+# If the plugin is already installed into the Cursor cache, make its bundled
+# MCP usable without the Configure UI: same URL/auth, server key recallum_memory,
+# and move Claude's .mcp.json aside so Cursor does not try user_config URLs.
+cache_root = Path.home() / ".cursor/plugins/cache/recallum-local/recallum-memory"
+if not cache_root.is_dir():
+    raise SystemExit(0)
+patched = 0
+for snap in sorted(p for p in cache_root.iterdir() if p.is_dir()):
+    plugin_mcp = snap / "mcp.json"
+    body = {
+        "mcpServers": {
+            "recallum_memory": {
+                "type": "http",
+                "url": url,
+                "headers": {"Authorization": auth},
+            }
+        }
+    }
+    plugin_mcp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    os.chmod(plugin_mcp, 0o600)
+    patched += 1
+    claude_mcp = snap / ".mcp.json"
+    if claude_mcp.is_file():
+        aside = snap / ".mcp.json.claude-only-ignored-by-cursor"
+        if not aside.exists():
+            claude_mcp.replace(aside)
+        else:
+            claude_mcp.unlink()
+if patched:
+    print(f"Patched {patched} Cursor plugin cache snapshot(s) under {cache_root}.")
+PY
+  fi
+  [[ -z "$key_path" ]] || rm -f -- "$key_path"
+
+  if [[ -z "${resolved_api_key-}" ]]; then
+    echo "warning: no API key stored for Cursor; set $token_env_var or re-run without --no-store-api-key" >&2
+  fi
+
+  echo "Cursor: install/enable the 'recallum-memory' plugin from marketplace 'recallum-local'"
+  echo "        (Settings → Plugins, or /plugins in cursor-agent). The CLI cannot install plugins."
+  echo "        Then fully quit and reopen Cursor so MCP reloads."
+}
+
 resolve_api_key
 persist_api_key
 
 if ((install_codex)); then install_for_codex; fi
 if ((install_claude)); then install_for_claude; fi
 if ((install_grok)); then install_for_grok; fi
+if ((install_cursor)); then install_for_cursor; fi
 
 # Drop the in-memory copy once clients are configured. Files already hold it.
 resolved_api_key=""
@@ -1322,4 +1581,8 @@ if ((install_grok)); then
     echo "Grok Build: export $token_env_var before launching Grok, then start a new session."
   fi
   echo "            Verify with: grok mcp doctor recallum"
+fi
+if ((install_cursor)); then
+  echo "Cursor: after installing the plugin in the UI, restart Cursor and confirm the recallum MCP is ready."
+  echo "        MCP config was written to ~/.cursor/mcp.json (mode 600)."
 fi

@@ -19,8 +19,9 @@ Never pass the key as `claude --config api_token=...` or as a CLI flag (argv / p
 `--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `both`, or
 default `auto`. Run with `--dry-run` first to see the planned actions.
 
-Cursor is configured through its native plugin marketplace and Settings; `install.sh` does not
-install Cursor plugins.
+Cursor: `install.sh --target cursor` (or `auto` when `cursor-agent`/`agent` is on PATH) registers the
+marketplace and writes a mode-600 `~/.cursor/mcp.json` entry. Plugin install is still done in the
+Cursor UI (`/plugins` or Settings → Plugins); the CLI cannot install plugins.
 
 ## Setup — Codex
 
@@ -95,23 +96,24 @@ enabling the plugin prompts for it rather than pointing at someone else's.
 
 ## Setup — Cursor
 
-Cursor uses the repository's `.cursor-plugin/marketplace.json` and the plugin's
-`.cursor-plugin/plugin.json`. Add the marketplace with the current Cursor CLI, then install the
-plugin from `/add-plugin` or Settings:
+Prefer the installer (marketplace + desktop-safe MCP config):
 
 ```bash
-agent plugin marketplace add https://github.com/Zozi96/recallum-mcp.git
+export RECALLUM_API_KEY=rcl_…
+plugins/recallum-memory/scripts/install.sh --target cursor --url https://recallum.example.com/mcp/
 ```
 
-In Cursor Settings, enable `recallum-memory` and provide both required variables:
-`RECALLUM_MCP_URL` (your exact `/mcp/` endpoint) and `RECALLUM_API_KEY`. Enter them in Cursor rather
-than a checked-in file or relying on a shell-only export; after restarting Cursor, verify the MCP
-server is still enabled without displaying the key. For one-off local CLI testing, use
-`agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory`.
+Then install `recallum-memory` from marketplace `recallum-local` inside Cursor (Settings → Plugins
+or `/plugins`). Fully quit and reopen Cursor. The installer writes `~/.cursor/mcp.json` with a
+literal Bearer (mode 600) because Cursor desktop does not reliably expand shell env vars and plugin
+Configure is often unavailable for user marketplaces. For one-off local CLI testing:
 
-The server appears as `recallum` and its tools are listed under Available Tools. Cursor's
-`sessionStart` hook returns context through top-level `additional_context`, but delivery is
-best-effort and it cannot run before every prompt. The always-applied rule and the
+```bash
+agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory
+```
+
+Tools appear under Available Tools. Cursor's `sessionStart` hook returns context through top-level
+`additional_context`, but delivery is best-effort. The always-applied rule and the
 `recallum-memory` skill define the exact canonical-key fallback when that context is absent.
 
 ## Setup — Grok Build

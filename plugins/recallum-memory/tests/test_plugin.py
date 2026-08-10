@@ -64,6 +64,38 @@ elif args == ["mcp", "get", "recallum", "--json"]:
     print(json.dumps({"name": "recallum", "transport": transport}))
 """
 
+FAKE_CURSOR = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["cursor-agent", *args]) + "\\n")
+if args[:3] == ["plugin", "marketplace", "list"] and "--format" in args:
+    state = os.environ.get("FAKE_CURSOR_MARKETPLACE", "missing")
+    if state == "matching":
+        print(json.dumps([{
+            "name": "recallum-local",
+            "gitUrl": "https://github.com/Zozi96/recallum-mcp",
+            "scope": "user",
+        }]))
+    elif state == "conflict":
+        print(json.dumps([{
+            "name": "recallum-local",
+            "gitUrl": "https://github.com/other/other-repo",
+            "scope": "user",
+        }]))
+    else:
+        print(json.dumps([]))
+elif args[:3] == ["plugin", "marketplace", "add"]:
+    pass
+elif args[:3] == ["plugin", "marketplace", "remove"]:
+    pass
+elif args[:3] == ["plugin", "marketplace", "update"]:
+    pass
+else:
+    # Unknown subcommand: succeed quietly so install.sh probes stay green.
+    pass
+"""
+
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -1056,9 +1088,11 @@ class InstallerTestCase(unittest.TestCase):
         grok_marketplace: str = "missing",
         grok_plugin: str = "missing",
         grok_mcp: str = "missing",
+        cursor_marketplace: str = "missing",
         stub_codex: bool = True,
         stub_claude: bool = True,
         stub_grok: bool = True,
+        stub_cursor: bool = True,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -1067,6 +1101,7 @@ class InstallerTestCase(unittest.TestCase):
             ("codex", FAKE_CODEX, stub_codex),
             ("claude", FAKE_CLAUDE, stub_claude),
             ("grok", FAKE_GROK, stub_grok),
+            ("cursor-agent", FAKE_CURSOR, stub_cursor),
         ):
             if not wanted:
                 continue
@@ -1145,6 +1180,7 @@ class InstallerTestCase(unittest.TestCase):
                 "FAKE_CLAUDE_MARKETPLACE": claude_marketplace,
                 "FAKE_GROK_MARKETPLACE": grok_marketplace,
                 "FAKE_GROK_PLUGIN": grok_plugin,
+                "FAKE_CURSOR_MARKETPLACE": cursor_marketplace,
                 "GROK_HOME": str(grok_home),
                 "HOME": str(root),
                 # Pin the Claude config dir so the settings assertions never
@@ -1253,6 +1289,9 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: codex plugin marketplace add", result.stdout)
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
             self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: write", result.stdout)
+            self.assertIn(".cursor/mcp.json", result.stdout)
 
     def test_remote_uses_private_repository_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1279,6 +1318,7 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertNotIn("dry-run: codex", result.stdout)
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
             self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
 
     def test_explicit_target_requires_that_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1307,11 +1347,23 @@ class SharedInstallerTests(InstallerTestCase):
     def test_auto_target_fails_when_no_cli_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, log = self._fake_clis(
-                Path(directory), stub_codex=False, stub_claude=False, stub_grok=False
+                Path(directory),
+                stub_codex=False,
+                stub_claude=False,
+                stub_grok=False,
+                stub_cursor=False,
             )
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("none of the codex, claude, or grok CLIs", result.stderr)
+            self.assertIn("none of the codex, claude, grok, or cursor-agent/agent CLIs", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_explicit_cursor_target_requires_that_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), stub_cursor=False)
+            result = self._run(env, "--url", URL, "--target", "cursor", "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cursor-agent nor agent", result.stderr)
             self.assertFalse(log.exists())
 
 
@@ -1828,6 +1880,133 @@ class GrokInstallerTests(InstallerTestCase):
             result = self._run_grok(env, "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("grok mcp doctor recallum", result.stdout)
+
+
+class CursorInstallerTests(InstallerTestCase):
+    def _run_cursor(self, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+        return self._run(
+            env, "--url", URL, "--token-env-var", TOKEN_ENV_VAR, "--target", "cursor", *args
+        )
+
+    def test_dry_run_validates_and_does_not_mutate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._fake_clis(root)
+            result = self._run_cursor(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
+            self.assertIn(".cursor/mcp.json", result.stdout)
+            self.assertIn("literal Bearer", result.stdout)
+            self.assertFalse((root / ".cursor" / "mcp.json").exists())
+            self.assertNotIn("not-printed", result.stdout + result.stderr)
+
+    def test_writes_literal_bearer_into_cursor_mcp_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._fake_clis(root)
+            result = self._run_cursor(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            mcp_path = root / ".cursor" / "mcp.json"
+            self.assertTrue(mcp_path.is_file())
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            server = data["mcpServers"]["recallum"]
+            self.assertEqual(server["url"], URL)
+            self.assertEqual(server["headers"]["Authorization"], "Bearer not-printed")
+            self.assertEqual(oct(mcp_path.stat().st_mode & 0o777), "0o600")
+            calls = self._calls(log)
+            self.assertIn(
+                ["cursor-agent", "plugin", "marketplace", "add", "git@github.com:Zozi96/recallum-mcp.git"],
+                calls,
+            )
+
+    def test_matching_marketplace_skips_add_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), cursor_marketplace="matching")
+            result = self._run_cursor(env, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
+            self.assertIn("already points at this repository", result.stdout)
+
+    def test_conflict_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), cursor_marketplace="conflict")
+            result = self._run_cursor(env, "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            # No marketplace mutations before the conflict gate.
+            if log.exists() and log.read_text(encoding="utf-8").strip():
+                calls = self._calls(log)
+                self.assertTrue(
+                    all(c[:3] == ["cursor-agent", "plugin", "marketplace"] and c[3] == "list" for c in calls)
+                )
+
+    def test_force_reindexes_conflicting_marketplace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), cursor_marketplace="conflict")
+            result = self._run_cursor(env, "--force-mcp", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: cursor-agent plugin marketplace remove", result.stdout)
+            self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
+
+    def test_patches_existing_plugin_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            snap = (
+                root
+                / ".cursor"
+                / "plugins"
+                / "cache"
+                / "recallum-local"
+                / "recallum-memory"
+                / "deadbeef"
+            )
+            snap.mkdir(parents=True)
+            (snap / "mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum_memory": {
+                                "type": "http",
+                                "url": "${RECALLUM_MCP_URL}",
+                                "headers": {
+                                    "Authorization": "Bearer ${RECALLUM_API_KEY}"
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (snap / ".mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": "http",
+                                "url": "${user_config.mcp_url}",
+                                "headers": {
+                                    "Authorization": "Bearer ${user_config.api_token}"
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_cursor(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            patched = json.loads((snap / "mcp.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                patched["mcpServers"]["recallum_memory"]["url"],
+                URL,
+            )
+            self.assertEqual(
+                patched["mcpServers"]["recallum_memory"]["headers"]["Authorization"],
+                "Bearer not-printed",
+            )
+            self.assertFalse((snap / ".mcp.json").exists())
+            self.assertTrue((snap / ".mcp.json.claude-only-ignored-by-cursor").is_file())
 
 
 if __name__ == "__main__":
