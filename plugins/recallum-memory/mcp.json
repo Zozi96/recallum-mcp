@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "recallum": {
+    "recallum_memory": {
       "type": "http",
       "url": "${RECALLUM_MCP_URL}",
       "headers": {

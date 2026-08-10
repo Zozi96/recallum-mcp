@@ -77,10 +77,15 @@ file or rely on a shell-only export; restart Cursor and verify that the server r
 without displaying the key. For one-off local CLI testing, use
 `agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory`.
 
-The bundled server is named `recallum`. Cursor's `sessionStart` hook emits top-level
-`additional_context`, but delivery is best-effort and it cannot run before every prompt. The
-always-applied rule carries the exact canonical-project-key fallback. Recallum tools appear in
-Cursor's Available Tools list without a stable textual prefix.
+Cursor loads the plugin MCP server from `mcp.json` only when the Cursor manifest references it as
+`"mcp": "./mcp.json"` (skills, rules and hooks load by convention; an unreferenced root `mcp.json`
+registers nothing). The Cursor server key is `recallum_memory`, not `recallum`: Claude Code ships a
+root `.mcp.json` under the name `recallum` with `${user_config.*}` placeholders, and Cursor merges
+plugin MCP configs by server name. If both use `recallum`, the Claude entry overwrites the env-var
+Cursor entry and zero Recallum tools load. Claude's server name and tool prefix are unchanged.
+Cursor's `sessionStart` hook emits top-level `additional_context`, but delivery is best-effort and
+it cannot run before every prompt. The always-applied rule carries the exact canonical-project-key
+fallback. Recallum tools appear in Cursor's Available Tools list without a stable textual prefix.
 
 ## Prerequisites
 

@@ -53,12 +53,12 @@ install Cursor plugins.
 
 ## Setup — Claude Code
 
-Claude Code does not use a separate MCP registration. The plugin ships `.mcp.json`, whose `url` and
-`Authorization` header are filled from `userConfig`. Authentication uses
-`${RECALLUM_API_KEY:-${user_config.api_token}}`: the environment variable wins, with the masked
-plugin option as fallback. Claude Code substitutes `${user_config.*}` before expanding environment
-variables, which is what makes the nested default resolve — a generic nested `${A:-${B}}` in an
-`.mcp.json` does not, so do not copy this shape into a non-plugin config.
+Claude Code does not use a separate MCP registration. The plugin ships a root `.mcp.json` whose
+`url` and `Authorization` header are filled from `userConfig` only: `${user_config.mcp_url}` and
+`Bearer ${user_config.api_token}`. Exporting `RECALLUM_API_KEY` alone does not authenticate Claude
+at connect time — the installer or `/plugin configure` must copy the key into userConfig storage.
+Cursor uses a separate `mcp.json` under the server key `recallum_memory` so it does not collide with
+Claude's `recallum` entry when both configs are present in the same package.
 
 `mcp_url` is `required`, with no default: the endpoint must be your own Recallum server, so
 enabling the plugin prompts for it rather than pointing at someone else's.
@@ -116,7 +116,7 @@ best-effort and it cannot run before every prompt. The always-applied rule and t
 
 ## Setup — Grok Build
 
-Grok does **not** resolve Claude-style `${user_config.*}` placeholders in a plugin `.mcp.json`.
+Grok does **not** resolve Claude-style `${user_config.*}` placeholders in a plugin MCP config.
 Register the MCP server natively in `~/.grok/config.toml` (the installer does this) so the URL and
 `Authorization: Bearer ${RECALLUM_API_KEY}` form are real values Grok expands at connect time. That
 native entry takes precedence over any broken plugin-bundled MCP definition with the same name.

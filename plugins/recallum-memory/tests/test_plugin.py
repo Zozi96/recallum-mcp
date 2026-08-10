@@ -770,10 +770,17 @@ class ManifestTests(unittest.TestCase):
 
     def test_cursor_manifest_uses_required_variable_only_credentials(self) -> None:
         manifest = self._load(CURSOR_MANIFEST)
-        # Discovery relies on the agent-plugins.org convention filename
-        # (mcp.json at the plugin root); the manifest must not point at it
-        # explicitly, since a path string is not a guaranteed discovery
-        # mechanism for Cursor/Agent Plugins.
+        # Cursor 2026.08.04 loads skills/rules/hooks by convention but never
+        # registers a plugin MCP server unless the manifest references it
+        # (`"mcp": "./mcp.json"` or inline mcpServers). Verified with
+        # `agent --plugin-dir` probes.
+        #
+        # The Cursor server key must NOT be `recallum`: Claude Code's root
+        # `.mcp.json` uses that name with `${user_config.*}` placeholders, and
+        # Cursor merges both configs by server name. The Claude entry then
+        # overwrites the env-var Cursor entry and zero Recallum tools load.
+        # Server key `recallum_memory` coexists with Claude's `recallum`.
+        self.assertEqual(manifest["mcp"], "./mcp.json")
         self.assertNotIn("mcpServers", manifest)
         self.assertEqual(manifest["hooks"], "./hooks/cursor-hooks.json")
         self.assertEqual(manifest["rules"], "./rules/")
@@ -804,13 +811,19 @@ class ManifestTests(unittest.TestCase):
         key_schema = variables["properties"]["RECALLUM_API_KEY"]
         self.assertEqual(key_schema["minLength"], 1)
         self.assertNotIn("sensitive", key_schema)
-        server = self._load(PLUGIN_ROOT / "mcp.json")["mcpServers"]["recallum"]
+        cursor_servers = self._load(PLUGIN_ROOT / "mcp.json")["mcpServers"]
+        self.assertEqual(set(cursor_servers), {"recallum_memory"})
+        self.assertNotIn("recallum", cursor_servers)
+        server = cursor_servers["recallum_memory"]
         self.assertEqual(server["url"], "${RECALLUM_MCP_URL}")
         self.assertEqual(server["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}")
         serialized = json.dumps(server)
         self.assertNotIn("user_config", serialized)
         self.assertNotIn("default", serialized.lower())
         self.assertNotIn("rcl_", serialized)
+        claude_servers = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]
+        self.assertEqual(set(claude_servers), {"recallum"})
+        self.assertIn("user_config", json.dumps(claude_servers))
 
     def test_cursor_marketplace_points_at_plugin_source(self) -> None:
         marketplace = self._load(CURSOR_MARKETPLACE)
@@ -882,6 +895,9 @@ class ManifestTests(unittest.TestCase):
         # breaks on GUI launches that do not inherit the shell profile, so
         # the header must read userConfig only; install.sh is responsible for
         # bridging any env-provided key into userConfig storage.
+        # Claude keeps the convention filename and server key `recallum` so the
+        # tool prefix stays `mcp__plugin_recallum-memory_recallum__*`.
+        self.assertNotIn("mcpServers", self._load(CLAUDE_MANIFEST))
         server = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["recallum"]
         self.assertEqual(server["type"], "http")
         self.assertEqual(server["url"], "${user_config.mcp_url}")
