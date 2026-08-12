@@ -1396,7 +1396,10 @@ class SharedInstallerTests(InstallerTestCase):
             )
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("none of the codex, claude, grok, or cursor-agent/agent CLIs", result.stderr)
+            self.assertIn(
+                "none of the codex, claude, grok, or cursor-agent/agent CLIs",
+                result.stderr,
+            )
             self.assertFalse(log.exists())
 
     def test_explicit_cursor_target_requires_that_cli(self) -> None:
@@ -2088,7 +2091,13 @@ class CursorInstallerTests(InstallerTestCase):
             self.assertEqual(oct(mcp_path.stat().st_mode & 0o777), "0o600")
             calls = self._calls(log)
             self.assertIn(
-                ["cursor-agent", "plugin", "marketplace", "add", "git@github.com:Zozi96/recallum-mcp.git"],
+                [
+                    "cursor-agent",
+                    "plugin",
+                    "marketplace",
+                    "add",
+                    "git@github.com:Zozi96/recallum-mcp.git",
+                ],
                 calls,
             )
 
@@ -2110,7 +2119,11 @@ class CursorInstallerTests(InstallerTestCase):
             if log.exists() and log.read_text(encoding="utf-8").strip():
                 calls = self._calls(log)
                 self.assertTrue(
-                    all(c[:3] == ["cursor-agent", "plugin", "marketplace"] and c[3] == "list" for c in calls)
+                    all(
+                        c[:3] == ["cursor-agent", "plugin", "marketplace"]
+                        and c[3] == "list"
+                        for c in calls
+                    )
                 )
 
     def test_force_reindexes_conflicting_marketplace(self) -> None:
