@@ -66,3 +66,41 @@ escribir memorias: el líder consolida la captura al final.
 #### Scenario: Captura centralizada
 - **WHEN** un subagente descubre contexto reutilizable durante su tarea
 - **THEN** la guía vigente indica reportarlo al líder, que decide y ejecuta la captura única
+
+### Requirement: Ciclo de memoria visible al iniciar sesión
+Cada salida de `SessionStart` MUST exponer al agente un ciclo breve y accionable de tres momentos: usar el contexto inicial o digest disponible, ejecutar un único `recall` enfocado cuando cambie materialmente el subsistema, hipótesis o decisión y la memoria durable pueda afectar la siguiente acción, y capturar al finalizar sólo contexto reutilizable verificado. La guía MUST usar los nombres de herramienta visibles para el cliente activo y MUST conservar las reglas de consulta inglesa del delta, proyecto canónico, `limit=3`, supresión cuando el contexto activo ya sea suficiente y continuidad fail-open.
+
+#### Scenario: Inicio sin digest
+- **WHEN** el hook emite la instrucción estándar porque no obtuvo un digest
+- **THEN** la salida indica cargar `context` con el proyecto y foco de tarea, describe el checkpoint semántico y conserva la captura final
+
+#### Scenario: Inicio con digest disponible
+- **WHEN** el hook inyecta un digest compacto del proyecto
+- **THEN** la salida evita pedir otro `context` genérico, pero conserva el checkpoint semántico para un foco nuevo y la captura final
+
+#### Scenario: Proyecto todavía sin memorias
+- **WHEN** el servidor confirma que el proyecto no tiene memorias almacenadas al iniciar
+- **THEN** la salida omite la carga inicial innecesaria y mantiene la guía para recuperar ante un pivote posterior y capturar hallazgos al terminar
+
+#### Scenario: Contexto activo suficiente
+- **WHEN** el contexto inicial o digest ya contiene la memoria necesaria para la decisión siguiente
+- **THEN** la guía exige aplicar y verificar ese contexto sin ejecutar un `recall` redundante
+
+#### Scenario: Nombres de herramienta por cliente
+- **WHEN** el hook se ejecuta en Codex, Claude Code o Grok Build
+- **THEN** el ciclo breve nombra las herramientas según el prefijo y mecanismo de descubrimiento del cliente correspondiente
+
+### Requirement: Guía de vecinos, reconfirmación y prompts
+La skill y el recordatorio de `SessionStart` MUST enseñar el ciclo ampliado: tras un acierto útil de `recall` o `context`, la guía MUST presentar `related_memories` como paso opcional sólo cuando haga falta el entorno temático de una semilla, no en cada recuperación; ante la cola de memorias obsoletas MUST preferir `reconfirm` frente a volver a guardar el mismo contenido; y, si el cliente soporta prompts MCP, MUST nombrar `session-start`, `capture-scan` y `stale-review` como atajos del ciclo ya documentado.
+
+#### Scenario: Vecindario opcional
+- **WHEN** un `recall` o `context` devuelve una memoria útil y el agente necesita explorar el tema
+- **THEN** la guía vigente menciona `related_memories` como paso opcional, no obligatorio en cada recuperación
+
+#### Scenario: Cola obsoleta
+- **WHEN** el agente verifica una memoria marcada como stale que sigue siendo cierta
+- **THEN** la guía vigente indica `reconfirm` en lugar de un `remember` idéntico
+
+#### Scenario: Prompts como atajo
+- **WHEN** el cliente expone prompts MCP
+- **THEN** la guía vigente nombra `session-start`, `capture-scan` y `stale-review` como atajos del ciclo start → captura → revisión stale

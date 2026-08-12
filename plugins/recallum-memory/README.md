@@ -361,12 +361,14 @@ telemetry measurement, and prompts, queries, credentials, and memory content are
 
 Codex registers the server under its bare name; Claude Code namespaces a plugin-bundled server as
 `plugin:<plugin>:<server>` and rewrites every character outside `[A-Za-z0-9_-]` to `_` when building
-tool ids:
+tool ids. The installer also dual-writes a native user MCP `recallum` into `~/.claude.json` for
+Claude Desktop ToolSearch (`mcp__recallum__*`):
 
 | Client | Prefix |
 | --- | --- |
 | Codex | `mcp__recallum__` |
-| Claude Code | `mcp__plugin_recallum-memory_recallum__` |
+| Claude Code (plugin) | `mcp__plugin_recallum-memory_recallum__` |
+| Claude Code (native / Desktop) | `mcp__recallum__` |
 | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
 | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
 
@@ -404,10 +406,11 @@ from this repository is needed.
 | Tools missing after install | Start a **new** session; clients discover MCP tools when a session starts |
 | Cursor tools work but no Recallum context was injected | `sessionStart` context delivery is best-effort. The always-applied rule derives the same project key and calls `context`; confirm the rule is enabled |
 | Tools missing in `claude -p` | A restricted `agent` in `settings.json` can pin a tool allowlist that excludes MCP tools. Check the `agent` key and its `tools:` frontmatter |
-| `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code leaves plugin-bundled MCP tools behind `ToolSearch` instead of listing them, so a blind call to the fully qualified name fails while the server is connected. Search for the tool, then call it. `permissions.allow` does **not** make them load eagerly |
+| `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code often leaves MCP tools behind `ToolSearch`. Search (`+recallum` or `select:`) then call. On **Desktop**, also confirm native `~/.claude.json` → `mcpServers.recallum` (`mcp__recallum__*`). Nested `claude mcp list` is not Desktop proof. |
+| Desktop ToolSearch 0 results for `recallum` (CLI works) | Plugin hooks can run while plugin MCP never enters Desktop’s deferred catalog. Rerun `install.sh --target claude --force-mcp`, fully quit Claude.app, new session, ToolSearch `+recallum` |
 | Stale Codex plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target codex`, then start a new session |
 | Stale Claude Code plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Rerun `plugins/recallum-memory/scripts/install.sh --target claude --force-mcp`, then start a new session |
-| Claude authentication failure | Re-run `install.sh` (stores pluginSecrets + env file) or run `/plugin configure recallum-memory@recallum-local`. Exporting `RECALLUM_API_KEY` alone does nothing at connect time — the client reads `${user_config.api_token}` only. Confirm with `claude mcp get plugin:recallum-memory:recallum` |
+| Claude authentication failure | Re-run `install.sh` (pluginSecrets + native `~/.claude.json` Bearer) or `/plugin configure recallum-memory@recallum-local`. Plugin path reads `${user_config.api_token}` only; native path uses the dual-written Bearer. |
 | Grok authentication / handshake failure | Export `RECALLUM_API_KEY` and ensure `~/.grok/config.toml` has a real URL plus `Bearer ${RECALLUM_API_KEY}` — not `${user_config.mcp_url}`. Rerun `install.sh --target grok` |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |

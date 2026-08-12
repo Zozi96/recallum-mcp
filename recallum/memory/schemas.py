@@ -62,6 +62,31 @@ class SimilarMemory(BaseModel):
     reconfirmed_at: datetime | None = None
 
 
+class RelatedMemory(BaseModel):
+    """A thematic neighbour of an active seed memory."""
+
+    id: uuid.UUID
+    content: str
+    category: Literal["preference", "decision", "constraint", "fact"]
+    scope: Literal["global", "project"]
+    project: str | None = None
+    similarity: float
+
+
+class RelatedMemoriesResult(BaseModel):
+    """Bounded thematic neighbours for one seed memory."""
+
+    memory_id: uuid.UUID
+    related: list[RelatedMemory]
+
+
+class ReconfirmResult(BaseModel):
+    """Outcome of stamping freshness on an active memory."""
+
+    reconfirmed: bool
+    memory: MemoryOut | None = None
+
+
 class RememberResult(BaseModel):
     """Outcome of ``remember``; ``created`` is False for deduplicated stores.
 
@@ -175,8 +200,8 @@ class ContextItem(BaseModel):
     the full content is retrievable by id via ``get_memory``. ``stale`` marks
     an entry whose last confirmation (``reconfirmed_at``, else ``created_at``)
     is older than the server's staleness threshold: verify it against reality
-    before trusting it, then re-store it unchanged to reconfirm, update it,
-    or forget it.
+    before trusting it, then prefer reconfirm over identical re-remember,
+    or update or forget it.
     """
 
     id: uuid.UUID

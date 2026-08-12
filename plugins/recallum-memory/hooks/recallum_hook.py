@@ -29,12 +29,16 @@ from urllib.parse import urlsplit, urlunsplit
 # `mcp__recallum__*`. Claude Code registers a plugin-bundled server as
 # `plugin:<plugin>:<server>` and sanitizes every character outside
 # [A-Za-z0-9_-] to `_` when building tool ids, so the same tools are
-# `mcp__plugin_recallum-memory_recallum__*` there. Grok Build namespaces
-# MCP tools as `server__tool` for search_tool/use_tool, so `recallum__*`.
-# Cursor exposes them through its Available Tools list rather than a stable
-# textual prefix, so its hint uses semantic tool names instead.
+# `mcp__plugin_recallum-memory_recallum__*` there. The installer also
+# dual-writes a native user MCP server `recallum` (for Claude Desktop
+# ToolSearch), which surfaces as `mcp__recallum__*` — the same spelling
+# as Codex. Grok Build namespaces MCP tools as `server__tool` for
+# search_tool/use_tool, so `recallum__*`. Cursor exposes them through its
+# Available Tools list rather than a stable textual prefix, so its hint
+# uses semantic tool names instead.
 CODEX_TOOL_PREFIX = "mcp__recallum__"
 CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
+CLAUDE_NATIVE_TOOL_PREFIX = "mcp__recallum__"
 GROK_TOOL_PREFIX = "recallum__"
 
 # Opt-in digest configuration. The URL cannot be read from .mcp.json (its
@@ -174,10 +178,25 @@ def _tool(name: str) -> str:
     elif os.environ.get("PLUGIN_ROOT"):
         prefixes = [CODEX_TOOL_PREFIX]
     elif os.environ.get("CLAUDE_PLUGIN_ROOT"):
-        prefixes = [CLAUDE_TOOL_PREFIX]
+        # Plugin-bundled and installer dual-write native user MCP may both
+        # exist; name either form so Desktop (native) and CLI (either) work.
+        prefixes = [CLAUDE_TOOL_PREFIX, CLAUDE_NATIVE_TOOL_PREFIX]
     else:
-        prefixes = [CODEX_TOOL_PREFIX, CLAUDE_TOOL_PREFIX, GROK_TOOL_PREFIX]
-    return " or ".join(prefix + name for prefix in prefixes)
+        prefixes = [
+            CODEX_TOOL_PREFIX,
+            CLAUDE_TOOL_PREFIX,
+            CLAUDE_NATIVE_TOOL_PREFIX,
+            GROK_TOOL_PREFIX,
+        ]
+    # Preserve order but drop duplicate spellings (native Claude == Codex id).
+    seen: set[str] = set()
+    unique: list[str] = []
+    for prefix in prefixes:
+        if prefix in seen:
+            continue
+        seen.add(prefix)
+        unique.append(prefix)
+    return " or ".join(prefix + name for prefix in unique)
 
 
 def _lookup_hint() -> str:
@@ -208,8 +227,11 @@ def _lookup_hint() -> str:
         )
     if os.environ.get("CLAUDE_PLUGIN_ROOT"):
         return (
-            " In Claude Code a plugin's MCP tools are not always listed directly; "
-            "look them up with ToolSearch before concluding they are unavailable."
+            " In Claude Code, tools may appear as "
+            f"{CLAUDE_TOOL_PREFIX}* (plugin) and/or {CLAUDE_NATIVE_TOOL_PREFIX}* "
+            "(native user MCP for Desktop); they are not always listed directly — "
+            "use ToolSearch with +recallum or select: of the full name before "
+            "concluding they are unavailable."
         )
     return (
         " If tools are not listed directly, look them up with the client's tool "
@@ -221,6 +243,14 @@ def _lookup_hint() -> str:
 VISIBILITY_HINT = (
     " If the Recallum tools are not present after looking for them, tell the "
     "user once that memory is unavailable this session, then continue without it."
+)
+
+
+WORKFLOW_HINT = (
+    " Optional: after a useful recall/context hit, use related_memories only to "
+    "explore a seed's thematic neighborhood; for stale items prefer reconfirm "
+    "over identical remember. If MCP prompts are supported, use session-start, "
+    "capture-scan, or stale-review."
 )
 
 
@@ -513,6 +543,7 @@ def _session_context(project: str) -> str:
             f"({_tool('remember_batch')} for several items); follow the Recallum "
             "skill's scope and safety rules. Current user and repository "
             f"instructions override memory.{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
+            f"{WORKFLOW_HINT}"
         )
     if digest == "":
         return (
@@ -522,6 +553,7 @@ def _session_context(project: str) -> str:
             f"reusable context with {_tool('remember_batch')} per the Recallum "
             "skill's scope and safety rules. Current user and repository "
             f"instructions override memory.{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
+            f"{WORKFLOW_HINT}"
         )
     return (
         f"Recallum: before planning, call {_tool('context')} with "
@@ -531,7 +563,7 @@ def _session_context(project: str) -> str:
         "newly verified reusable context that would save a future agent "
         "rediscovery; follow the Recallum skill's scope and safety rules. "
         "Current user and repository instructions override memory."
-        f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
+        f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}{WORKFLOW_HINT}"
     )
 
 

@@ -21,7 +21,8 @@ Options:
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
   --remote                  Register the private GitHub repository instead of the local checkout
   --force-mcp               Replace an existing recallum setup: a differing Codex/Grok/Cursor MCP
-                            definition, or an already-installed Claude Code plugin
+                            definition, a differing Claude user MCP entry in ~/.claude.json, or
+                            reinstall an already-installed Claude Code plugin
   --api-key-file PATH       Read the API key from PATH (mode 600 recommended). Safer than
                             putting the key on the command line.
   --no-store-api-key        Do not prompt for or persist the API key (MCP registration only)
@@ -49,12 +50,13 @@ API key handling (default: store when a key is available or can be prompted):
 
   Codex        registers the MCP server against --token-env-var, and resolves that
                environment variable at connection time.
-  Claude Code  carries the MCP server inside the plugin. Its .mcp.json only reads
-               ${user_config.api_token}, so the key is always read from userConfig
-               storage (pluginConfigs options.api_token or pluginSecrets api_token);
-               RECALLUM_API_KEY / --token-env-var are installer-time SOURCES this
-               script uses to populate that storage, never something the client
-               reads directly.
+  Claude Code  keeps the plugin for hooks/skills (plugin .mcp.json still uses
+               ${user_config.api_token} / pluginSecrets). The installer ALSO dual-writes
+               a native user MCP server `recallum` into ~/.claude.json so Claude
+               Desktop (which often fails to register plugin-bundled HTTP MCP into
+               ToolSearch) still gets tools under mcp__recallum__*. Auth on that
+               native entry is a literal Bearer when a key is stored this run, or
+               Bearer ${token-env-var} with --no-store-api-key.
   Grok Build   registers the MCP server in ~/.grok/config.toml against
                --token-env-var (same env-var pattern as Codex). Claude-style
                ${user_config.*} placeholders in the plugin .mcp.json are not
@@ -733,18 +735,166 @@ if actual != expected:
 PY
 }
 
-# `.mcp.json` resolves `Bearer ${user_config.api_token}` only -- it does not
-# read RECALLUM_API_KEY (unlike Codex and Grok, Claude Code cannot follow an
-# env var at connection time; .mcp.json expansion is single-pass ${VAR} /
-# ${VAR:-default} only, so a nested env-with-userConfig-fallback is not
-# possible). The key must already be in userConfig storage: pluginConfigs
-# options.api_token or pluginSecrets api_token. persist_api_key/
-# store_claude_plugin_secret above should have put it there whenever a key
-# was resolved and --no-store-api-key was not passed.
+# Claude stores user-scoped MCP servers in ~/.claude.json (HOME), not under
+# CLAUDE_CONFIG_DIR. Claude Desktop registers these (codegraph, richai, …) while
+# plugin-bundled HTTP MCP with ${user_config.*} is often absent from the Desktop
+# deferred tool catalog. Dual-write keeps hooks on the plugin and tools on native.
+claude_user_mcp_file() {
+  printf '%s\n' "${HOME}/.claude.json"
+}
+
+# Print missing | matching | different for the native user MCP entry `recallum`.
+# Matching requires the install URL and the auth shape we would write this run
+# (literal Bearer when a key file is supplied, else Bearer ${token_env_var}).
+claude_native_mcp_state() {
+  local mcp_file key_path=""
+  mcp_file=$(claude_user_mcp_file)
+  if [[ -n "${resolved_api_key-}" ]]; then
+    key_path="$tmp_dir/claude-native-api-key-match"
+    umask 077
+    printf '%s' "$resolved_api_key" >"$key_path"
+    chmod 600 "$key_path"
+  fi
+  python3 - "$mcp_file" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+mcp_path = Path(sys.argv[1])
+want_url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+if key:
+    want_auth = f"Bearer {key}"
+else:
+    want_auth = f"Bearer ${{{token_env}}}"
+
+if not mcp_path.is_file():
+    print("missing")
+    raise SystemExit(0)
+try:
+    data = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"error: cannot read Claude user MCP file {mcp_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {mcp_path} root must be a JSON object")
+servers = data.get("mcpServers")
+if not isinstance(servers, dict) or "recallum" not in servers:
+    print("missing")
+    raise SystemExit(0)
+entry = servers.get("recallum")
+if not isinstance(entry, dict):
+    print("different")
+    raise SystemExit(0)
+headers = entry.get("headers") if isinstance(entry.get("headers"), dict) else {}
+auth = headers.get("Authorization") or headers.get("authorization") or ""
+entry_type = entry.get("type")
+type_ok = entry_type in (None, "http", "streamableHttp", "streamable_http")
+url_ok = entry.get("url") == want_url and type_ok
+if url_ok and auth == want_auth:
+    print("matching")
+else:
+    print("different")
+PY
+}
+
+# Create or replace ~/.claude.json mcpServers.recallum without putting the key
+# on argv (file merge, mode 600). Never prints the secret.
+ensure_claude_native_mcp() {
+  local mcp_file state key_path=""
+  mcp_file=$(claude_user_mcp_file)
+  state=$(claude_native_mcp_state)
+
+  case "$state" in
+    matching)
+      echo "Claude user MCP server 'recallum' in $mcp_file already matches; leaving it unchanged."
+      return 0
+      ;;
+    different)
+      if [[ "$force_mcp" -ne 1 ]]; then
+        echo "error: Claude user MCP server 'recallum' in $mcp_file exists with different settings;" >&2
+        echo "       rerun with --force-mcp to replace it (Desktop ToolSearch needs this entry)." >&2
+        exit 1
+      fi
+      ;;
+    missing) ;;
+    *)
+      echo "error: unexpected Claude native MCP state: $state" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ -n "${resolved_api_key-}" ]]; then
+    key_path="$tmp_dir/claude-native-api-key"
+    umask 077
+    printf '%s' "$resolved_api_key" >"$key_path"
+    chmod 600 "$key_path"
+  fi
+
+  if ((dry_run)); then
+    if [[ -n "$key_path" ]]; then
+      echo "dry-run: write $mcp_file server recallum (url=$url, literal Bearer, mode 600)"
+    else
+      echo "dry-run: write $mcp_file server recallum (url=$url, Bearer \${$token_env_var})"
+    fi
+    return 0
+  fi
+
+  python3 - "$mcp_file" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+mcp_path = Path(sys.argv[1])
+url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+auth = f"Bearer {key}" if key else f"Bearer ${{{token_env}}}"
+
+mcp_path.parent.mkdir(parents=True, exist_ok=True)
+data = {}
+if mcp_path.is_file():
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid JSON in {mcp_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {mcp_path} root must be a JSON object")
+servers = data.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    raise SystemExit(f"error: {mcp_path} mcpServers must be an object")
+
+servers["recallum"] = {
+    "type": "http",
+    "url": url,
+    "headers": {"Authorization": auth},
+}
+tmp = mcp_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(mcp_path)
+os.chmod(mcp_path, 0o600)
+print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
+PY
+}
+
+# Plugin-bundled `.mcp.json` resolves `Bearer ${user_config.api_token}` only --
+# it does not read RECALLUM_API_KEY (unlike Codex and Grok, Claude Code cannot
+# follow an env var at connection time for that file; expansion is single-pass
+# ${VAR} / ${VAR:-default} only). The key must already be in userConfig storage
+# for the plugin path: pluginConfigs options.api_token or pluginSecrets
+# api_token. persist_api_key/store_claude_plugin_secret above should have put
+# it there whenever a key was resolved and --no-store-api-key was not passed.
+#
+# The native ~/.claude.json entry (ensure_claude_native_mcp) can use a literal
+# Bearer or Bearer ${ENV} and is what Claude Desktop needs for ToolSearch.
 #
 # If RECALLUM_API_KEY is set in this shell but nothing landed in storage
-# (typically --no-store-api-key), that env var will NOT authenticate
-# anything -- .mcp.json never reads it -- so this fails loudly instead of
+# (typically --no-store-api-key), that env var will NOT authenticate the
+# *plugin* path -- .mcp.json never reads it -- so this fails loudly instead of
 # giving false confidence. If nothing is set anywhere, this only warns: the
 # install itself is valid, and the key is read at Claude Code launch, not
 # now, so an empty environment here is not proof of a broken install.
@@ -880,13 +1030,10 @@ PY
     exit 1
   }
 
-  # Claude Code carries the MCP server inside the plugin (.mcp.json) and fills
-  # it from userConfig, so there is no separate `claude mcp add` step. Only the
-  # non-sensitive endpoint is passed on the command line. The API key is always
-  # read from userConfig storage (persist_api_key/store_claude_plugin_secret
-  # above, or a masked `/plugin configure` fallback), keeping the credential
-  # out of argv and the process list. RECALLUM_API_KEY is only an
-  # installer-time source used to populate that storage.
+  # Plugin path: marketplace + plugin userConfig (hooks/skills + plugin .mcp.json).
+  # Native path: ~/.claude.json mcpServers.recallum for Claude Desktop ToolSearch.
+  # Only the non-sensitive endpoint is passed on the command line for plugin
+  # install. The API key stays out of argv (pluginSecrets + native file merge).
   claude plugin list --json >"$tmp_dir/claude-plugins.json"
   local plugin_state
   plugin_state=$(python3 - "$tmp_dir/claude-plugins.json" <<'PY'
@@ -917,10 +1064,14 @@ PY
       echo "       inline from this checkout: hooks and skills keep working, userConfig no longer" >&2
       echo "       resolves, and the bundled Recallum MCP server is dropped without an error." >&2
       echo "       Rerun with --force-mcp to re-register the marketplace and reinstall the plugin." >&2
-    else
-      echo "error: Claude Code plugin 'recallum-memory' is already installed; rerun with --force-mcp to reinstall it with this endpoint" >&2
+      exit 1
     fi
-    exit 1
+    # Plugin already installed: do not reinstall without --force-mcp, but still
+    # dual-write the native Desktop MCP entry (and fail if it differs without force).
+    echo "Claude Code plugin 'recallum-memory' is already installed; skipping reinstall."
+    echo "         Rerun with --force-mcp to reinstall the plugin with this endpoint."
+    ensure_claude_native_mcp
+    return 0
   fi
 
   if [[ "$marketplace_state" == "missing" ]]; then
@@ -944,6 +1095,7 @@ PY
     --config "mcp_url=$url"
   verify_claude_plugin_config
   verify_claude_credential
+  ensure_claude_native_mcp
 }
 
 # ------------------------------------------------------------ Grok Build -----
@@ -1561,18 +1713,20 @@ if ((install_codex)); then
 fi
 if ((install_claude)); then
   if ((claude_secret_stored)); then
-    echo "Claude Code: API key stored in pluginSecrets (works for GUI and terminal)."
-    echo "             Restart the Claude session to load the plugin and MCP tools."
+    echo "Claude Code: API key stored in pluginSecrets (plugin path) and dual-written to"
+    echo "             ~/.claude.json mcpServers.recallum for Desktop ToolSearch (secret not printed)."
   elif ((api_key_stored)) || [[ -n "${RECALLUM_API_KEY-}" ]]; then
-    echo "Claude Code: RECALLUM_API_KEY is set for this process; restart Claude to load tools."
-    echo "             GUI launches still need pluginSecrets or a desktop env var — re-run"
-    echo "             without --no-store-api-key, or use '/plugin configure recallum-memory@recallum-local'."
+    echo "Claude Code: native ~/.claude.json entry uses Bearer \${$token_env_var} or a stored key;"
+    echo "             GUI Desktop still needs a stored key for reliable auth — re-run without"
+    echo "             --no-store-api-key, or '/plugin configure recallum-memory@recallum-local'."
   else
-    echo "Claude Code: export RECALLUM_API_KEY in the environment that launches Claude,"
-    echo "             or set a masked fallback with"
-    echo "             '/plugin configure recallum-memory@recallum-local', then restart the session."
+    echo "Claude Code: export $token_env_var before launch, or re-run install to store the key,"
+    echo "             or '/plugin configure recallum-memory@recallum-local'."
     echo "             A GUI-launched Claude does not inherit your shell's exports."
   fi
+  echo "             Fully quit Claude.app (not only the tab), start a new Code session, then"
+  echo "             ToolSearch +recallum or select:mcp__recallum__context (Desktop)."
+  echo "             Shell 'claude mcp list' from Bash inside Desktop is not session proof."
 fi
 if ((install_grok)); then
   if ((env_file_stored)); then

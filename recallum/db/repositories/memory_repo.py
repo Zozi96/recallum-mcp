@@ -512,6 +512,46 @@ class MemoryRepository:
             ]
             return GraphSnapshot(memories, pairs, total, model_mismatch)
 
+    async def related_to(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        limit: int,
+        min_similarity: float,
+    ) -> Sequence[ScoredMemory]:
+        """Return seed-centered thematic neighbours under one user's RLS."""
+        async with self._sessions.for_user(user_id) as session:
+            seed = aliased(Memory, name="related_seed")
+            neighbour = aliased(Memory, name="related_neighbour")
+            distance = seed.embedding.cosine_distance(neighbour.embedding)
+            score = (literal(1.0) - distance).label("similarity")
+            stmt = (
+                select(neighbour, score)
+                .options(
+                    defer(neighbour.embedding, raiseload=True),
+                    defer(neighbour.content_tsv, raiseload=True),
+                )
+                .where(
+                    seed.id == memory_id,
+                    seed.user_id == user_id,
+                    seed.deleted_at.is_(None),
+                    seed.embedding_model.is_not(None),
+                    neighbour.user_id == user_id,
+                    neighbour.deleted_at.is_(None),
+                    neighbour.id != seed.id,
+                    neighbour.embedding_model.is_not(None),
+                    seed.embedding_model == neighbour.embedding_model,
+                    distance <= (1.0 - min_similarity),
+                )
+                .order_by(score.desc(), neighbour.id)
+                .limit(limit)
+            )
+            return [
+                ScoredMemory(memory=row[0], score=float(row[1]))
+                for row in (await session.execute(stmt)).all()
+            ]
+
     async def search_candidates(
         self,
         user_id: uuid.UUID,

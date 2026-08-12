@@ -54,10 +54,17 @@ Cursor UI (`/plugins` or Settings → Plugins); the CLI cannot install plugins.
 
 ## Setup — Claude Code
 
-Claude Code does not use a separate MCP registration. The plugin ships a root `.mcp.json` whose
-`url` and `Authorization` header are filled from `userConfig` only: `${user_config.mcp_url}` and
-`Bearer ${user_config.api_token}`. Exporting `RECALLUM_API_KEY` alone does not authenticate Claude
-at connect time — the installer or `/plugin configure` must copy the key into userConfig storage.
+Claude Code uses **two** complementary MCP registrations after `install.sh --target claude`:
+
+1. **Plugin-bundled** `.mcp.json` — `${user_config.mcp_url}` and
+   `Bearer ${user_config.api_token}` (pluginSecrets / `/plugin configure`). Tools appear as
+   `mcp__plugin_recallum-memory_recallum__*`. Exporting `RECALLUM_API_KEY` alone does **not**
+   authenticate this path.
+2. **Native user MCP** in `~/.claude.json` → `mcpServers.recallum` — real URL plus desktop-safe
+   Bearer (literal when the installer stores a key). Tools appear as `mcp__recallum__*`. **Claude
+   Desktop** often fails to put plugin-bundled HTTP MCP into the deferred ToolSearch catalog; the
+   native entry is what Desktop sessions need.
+
 Cursor uses a separate `mcp.json` under the server key `recallum_memory` so it does not collide with
 Claude's `recallum` entry when both configs are present in the same package.
 
@@ -67,31 +74,40 @@ enabling the plugin prompts for it rather than pointing at someone else's.
 1. Confirm the plugin marketplace and installation:
    `claude plugin marketplace list --json` must contain `recallum-local` at this repository root,
    and `claude plugin list --json` must contain the id `recallum-memory@recallum-local`.
-2. Check whether a credential can resolve: `RECALLUM_API_KEY` in the process environment, or
-   `pluginSecrets["recallum-memory@recallum-local"].api_token` in `~/.claude/.credentials.json`
-   (written by `install.sh` or `/plugin configure`). Never pass the key with
-   `--config api_token=...`: that puts the credential in argv, shell history, and the process list.
-   Only `mcp_url` is safe on the CLI, and `scripts/install.sh` does exactly that.
-
-   **With neither set, the failure is silent until the first tool call.** The server's bearer
-   middleware only guards tool invocation, so the MCP connection still reports healthy and
-   `claude mcp list` shows a connected server; the header is just the literal unexpanded
-   placeholder. Diagnose it by calling a tool — an unauthenticated call returns
-   `authentication required: send 'Authorization: Bearer <api-key>'`, and a wrong or revoked key
-   returns `invalid or revoked API key`. A healthy connection is not evidence of working auth.
-3. Confirm the server is reachable:
+2. Confirm the native Desktop entry (safe fields only):
 
    ```bash
-   claude mcp list | grep recallum
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+   data = json.loads(Path.home().joinpath(".claude.json").read_text() or "{}")
+   s = (data.get("mcpServers") or {}).get("recallum") or {}
+   headers = s.get("headers") or {}
+   auth = headers.get("Authorization") or ""
+   print({
+       "url": s.get("url"),
+       "type": s.get("type"),
+       "authorization": "Bearer ***" if auth.startswith("Bearer ") and len(auth) > 7 else auth or None,
+   })
+   PY
    ```
 
-   It appears as `plugin:recallum-memory:recallum`. A missing environment variable with no
-   configured fallback shows up as a connection failure. The installer may still call the fallback
-   unset when the environment variable is present; that warning does not block environment
-   expansion.
-4. Restart the Claude Code session after installation or reconfiguration so the plugin, its hooks,
-   and the MCP tools load.
-5. Verify the plugin manifest with `claude plugin validate <repo-root> --strict` and
+   Expect the install URL ending in `/mcp/` and a non-empty Bearer form.
+3. Check whether a plugin credential can resolve: `pluginSecrets["recallum-memory@recallum-local"].api_token`
+   in `~/.claude/.credentials.json` (written by `install.sh` or `/plugin configure`). Never pass
+   the key with `--config api_token=...`. Only `mcp_url` is safe on the CLI.
+
+   **With neither pluginSecrets nor a native Bearer, tool calls fail auth.** A healthy
+   `claude mcp list` line is not evidence of working Desktop ToolSearch.
+4. Session-level check (not nested shell):
+
+   - **CLI:** ToolSearch / tool list includes `mcp__plugin_recallum-memory_recallum__*` and/or
+     `mcp__recallum__*`.
+   - **Desktop:** ToolSearch `+recallum` or `select:mcp__recallum__context` must return matches.
+     Running `claude mcp list` from Bash **inside** a Desktop session uses a separate CLI process
+     and is a **false green** if Desktop’s own deferred catalog lacks Recallum.
+5. Fully quit Claude.app (Desktop) or restart the CLI session after install so hooks and MCP reload.
+6. Verify the plugin manifest with `claude plugin validate <repo-root> --strict` and
    `claude plugin validate <repo-root>/plugins/recallum-memory --strict`.
 
 ## Setup — Cursor
@@ -168,13 +184,14 @@ native entry takes precedence over any broken plugin-bundled MCP definition with
    | Client | Prefix |
    | --- | --- |
    | Codex | `mcp__recallum__` |
-   | Claude Code | `mcp__plugin_recallum-memory_recallum__` |
+   | Claude Code (plugin) | `mcp__plugin_recallum-memory_recallum__` |
+   | Claude Code (native / Desktop) | `mcp__recallum__` |
    | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
    | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every
-   character outside `[A-Za-z0-9_-]` to `_` when building tool ids, which is where the longer
-   prefix comes from.
+   character outside `[A-Za-z0-9_-]` to `_` when building tool ids (long prefix). The installer also
+   dual-writes a user MCP named `recallum` for Desktop ToolSearch (short prefix).
 3. Verify the session-start hook contributes context in a new session.
 
 ## Cross-session Check
@@ -197,11 +214,15 @@ echo the key while doing so.
 
 - Missing tools after install: start a new session, then inspect plugin installation and MCP
   discovery.
+- **Desktop ToolSearch 0 results for recallum (CLI works):** plugin hooks can fire while plugin MCP
+  tools never enter Desktop’s deferred catalog. Confirm `~/.claude.json` has `mcpServers.recallum`,
+  re-run `install.sh --target claude --force-mcp`, fully quit Claude.app, and re-check with
+  ToolSearch `+recallum` — not with nested `claude mcp list`.
 - Authentication failure on Codex: verify the named environment variable is present in the
   environment that launches Codex and that the key is active; do not request the value in chat.
-- Authentication failure on Claude Code: verify `RECALLUM_API_KEY` was exported before Claude
-  started, or re-run `/plugin configure recallum-memory@recallum-local`. Do not ask for the value
-  in chat and do not read it back.
+- Authentication failure on Claude Code: re-run install (pluginSecrets + native Bearer) or
+  `/plugin configure recallum-memory@recallum-local`. Do not ask for the value in chat and do not
+  read it back.
 - Authentication failure on Grok Build: verify `RECALLUM_API_KEY` is exported for the Grok process
   and that `~/.grok/config.toml` has `Authorization = "Bearer ${RECALLUM_API_KEY}"` (unexpanded).
   A plugin-only MCP entry showing `url = "${user_config.mcp_url}"` is broken on Grok — re-run

@@ -10,20 +10,24 @@ instructions always override recalled memory.
 
 ## Tool Names
 
-Recallum exposes nine tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
-`update`, `merge_memories`, `list_memories`, and `forget`. The prefix differs by client, because
+Recallum exposes eleven tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
+`update`, `merge_memories`, `list_memories`, `related_memories`, `reconfirm`, and `forget`. The
+prefix differs by client, because
 Claude Code namespaces a plugin-bundled MCP server:
 
 | Client | Prefix | Example |
 | --- | --- | --- |
 | Codex | `mcp__recallum__` | `mcp__recallum__context` |
-| Claude Code | `mcp__plugin_recallum-memory_recallum__` | `mcp__plugin_recallum-memory_recallum__context` |
+| Claude Code (plugin) | `mcp__plugin_recallum-memory_recallum__` | `mcp__plugin_recallum-memory_recallum__context` |
+| Claude Code (native / Desktop) | `mcp__recallum__` | `mcp__recallum__context` |
 | Grok Build | `recallum__` | `recallum__context` (via `search_tool` / `use_tool`) |
 | Cursor | Recallum MCP tools in Available Tools | the `context` tool in Available Tools |
 
 Use whichever client tool names are actually present in your tool list; the session hook names the
-right one. Cursor does not provide a stable textual tool prefix, so use the names shown in
-Available Tools. Below, tools are written unprefixed.
+forms that may apply. On Claude Code, **either** the plugin prefix or the native `mcp__recallum__`
+prefix (installer dual-write for Desktop ToolSearch) may be present — use ToolSearch (`+recallum`
+or `select:`) before concluding tools are missing. Cursor does not provide a stable textual tool
+prefix, so use the names shown in Available Tools. Below, tools are written unprefixed.
 
 ## Memory Language
 
@@ -71,10 +75,12 @@ Translating an existing, still-true memory is not a reason to call `update`.
    re-stored, `last_recalled_at`/`recall_count` say whether the memory actually matches recall
    queries, and `context_count` how often it rode along in session snapshots. An
    old memory that was never reconfirmed deserves verification before being trusted; verifying one
-   is a good moment to re-store it unchanged, which stamps `reconfirmed_at`. Context items flag
+   that is still true is a good moment to call `reconfirm`, which stamps `reconfirmed_at`. Context items flag
    this as `stale: true`, and `list_memories` with `stale=true` returns the full verification
    queue for the current scope.
-5. After substantial work, run one capture scan: what newly verified context would save a future
+5. After a useful `recall` or `context` hit, optionally call `related_memories` when exploring
+thematic neighbourhood around a seed would help; do not call it on every recall. After
+substantial work, run one capture scan: what newly verified context would save a future
    agent several minutes of rediscovery or prevent a likely mistake? Store only answers likely to
    remain true across sessions. Zero items is valid; prefer a few high-signal items over a recap,
    and do not split one underlying lesson into redundant memories. Collapse a rule, its cause, and
@@ -104,9 +110,12 @@ Translating an existing, still-true memory is not a reason to call `update`.
    `remember`. That retires the old memory and links it to its replacement, so the correction is
    recoverable and the two never both look current. Passing only `importance`, `category`, or
    `metadata` edits in place and keeps the id. Scope and project cannot be changed.
-10. Use `list_memories` only to browse or diagnose stored entries. Use `forget` only when the user
+10. Use `list_memories` only to browse or diagnose stored entries. In the stale queue, prefer
+`reconfirm` when the claim is still true instead of re-storing identical content. Use `forget` only when the user
     requests removal or confirms an entry is wrong with nothing replacing it -- if something
     replaces it, that is `update`.
+11. If the client supports MCP prompts, `session-start`, `capture-scan`, and `stale-review` are
+shortcuts for the start, capture, and stale-review parts of this workflow.
 
 ## Mid-task retrieval checkpoints
 
@@ -140,9 +149,9 @@ truncated text with `get_memory` when needed, and let current code and instructi
 outdated memory. A memory that agrees with both can be applied without rediscovering its content.
 
 This checkpoint policy is identical for Codex (`mcp__recallum__`), Claude Code
-(`mcp__plugin_recallum-memory_recallum__`), Grok Build (`recallum__` via `search_tool` /
-`use_tool`), and Cursor (the Recallum MCP tools listed in Available Tools): only the tool
-discovery step differs.
+(`mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` via ToolSearch), Grok Build
+(`recallum__` via `search_tool` / `use_tool`), and Cursor (the Recallum MCP tools listed in
+Available Tools): only the tool discovery step differs.
 
 ## Delegation
 

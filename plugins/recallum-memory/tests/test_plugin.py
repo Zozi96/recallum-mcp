@@ -255,6 +255,18 @@ class HookTests(unittest.TestCase):
         self.assertIn("newly verified reusable context", context)
         self.assertIn("save a future agent rediscovery", context)
 
+    def test_session_start_teaches_related_reconfirm_and_workflow_prompts(self) -> None:
+        context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
+        for term in (
+            "related_memories",
+            "reconfirm",
+            "session-start",
+            "capture-scan",
+            "stale-review",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, context)
+
     def test_session_start_pins_english_for_both_writes_and_queries(self) -> None:
         # The skill that explains the rule in full is loaded lazily, so the
         # hint has to carry it: a capture can happen before the skill ever
@@ -284,13 +296,14 @@ class HookTests(unittest.TestCase):
         # call-site form the hook actually emits.
         self.assertNotIn(f"call {GROK_PREFIX}context", context)
 
-    def test_claude_is_told_the_plugin_namespaced_tool_name(self) -> None:
+    def test_claude_is_told_plugin_and_native_tool_names(self) -> None:
         context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn(f"{CLAUDE_PREFIX}context", context)
         self.assertIn(f"{CLAUDE_PREFIX}recall", context)
-        # The Codex spelling is a strict prefix-free substring check away, so
-        # assert on a boundary that only the bare Codex name can satisfy.
-        self.assertNotIn(f"call {CODEX_PREFIX}context", context)
+        # Installer dual-write native user MCP (Desktop ToolSearch) uses the
+        # same spelling as Codex's bare server name.
+        self.assertIn(f"{CODEX_PREFIX}context", context)
+        self.assertIn(f"{CODEX_PREFIX}recall", context)
         self.assertNotIn(f"call {GROK_PREFIX}context", context)
 
     def test_grok_is_told_the_server_tool_name(self) -> None:
@@ -327,6 +340,10 @@ class HookTests(unittest.TestCase):
         """
         context = self._session_context({"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"})
         self.assertIn("ToolSearch", context)
+        self.assertIn("+recallum", context)
+        self.assertIn(CLAUDE_PREFIX, context)
+        self.assertIn(CODEX_PREFIX, context)
+        self.assertIn("unavailable this session", context)
 
     def test_grok_is_told_how_to_find_tools_via_search_tool(self) -> None:
         context = self._session_context({"GROK_PLUGIN_ROOT": "/plugins/recallum-memory"})
@@ -795,6 +812,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(codex["version"], claude["version"])
         self.assertEqual(codex["version"], grok["version"])
         self.assertEqual(codex["version"], cursor["version"])
+        self.assertEqual(codex["version"], "0.11.3")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
         self.assertIn("Cursor", grok["description"])
@@ -967,10 +985,18 @@ class ManifestTests(unittest.TestCase):
         source = HOOK.read_text(encoding="utf-8")
         namespace: dict[str, object] = {}
         for line in source.splitlines():
-            if line.startswith(("CODEX_TOOL_PREFIX", "CLAUDE_TOOL_PREFIX", "GROK_TOOL_PREFIX")):
+            if line.startswith(
+                (
+                    "CODEX_TOOL_PREFIX",
+                    "CLAUDE_TOOL_PREFIX",
+                    "CLAUDE_NATIVE_TOOL_PREFIX",
+                    "GROK_TOOL_PREFIX",
+                )
+            ):
                 exec(line, namespace)  # noqa: S102 - constant assignments only
         self.assertEqual(namespace["CODEX_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["CLAUDE_TOOL_PREFIX"], CLAUDE_PREFIX)
+        self.assertEqual(namespace["CLAUDE_NATIVE_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["GROK_TOOL_PREFIX"], GROK_PREFIX)
 
     def test_skills_document_the_tool_prefix_of_each_client(self) -> None:
@@ -989,6 +1015,21 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("capture scan", text)
         self.assertIn("passing test is evidence", text)
         self.assertIn("current branch or worktree", text)
+
+    def test_memory_skill_covers_workflow_extensions(self) -> None:
+        text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("eleven tools", text)
+        for term in (
+            "related_memories",
+            "reconfirm",
+            "session-start",
+            "capture-scan",
+            "stale-review",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, text)
 
     def test_memory_skill_pins_english_and_its_verbatim_exceptions(self) -> None:
         text = " ".join(
@@ -1458,16 +1499,20 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
             self.assertIn("dry-run: claude plugin install", result.stdout)
 
-    def test_endpoint_is_passed_as_userconfig_and_no_mcp_command_is_planned(self) -> None:
+    def test_endpoint_is_passed_as_userconfig_and_native_mcp_is_dual_written(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
             result = self._run_claude(env, "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             unescaped = result.stdout.replace("\\", "")
             self.assertIn(f"--config mcp_url={URL}", unescaped)
-            # The MCP server now ships inside the plugin, so the installer must
-            # never touch Claude Code's separate MCP registry.
-            self.assertNotIn("claude mcp", result.stdout)
+            # Dual-write is a file merge into ~/.claude.json — never `claude mcp add`
+            # (that would risk putting the Bearer on argv). Completion text may
+            # mention diagnosing with `claude mcp list`.
+            self.assertNotIn("claude mcp add", result.stdout)
+            self.assertNotIn("claude mcp remove", result.stdout)
+            self.assertIn(".claude.json", result.stdout)
+            self.assertIn("server recallum", result.stdout)
 
     def test_api_token_is_never_passed_on_the_command_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1499,18 +1544,145 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("/plugin configure recallum-memory@recallum-local", result.stdout)
 
-    def test_existing_installation_requires_force_before_mutation(self) -> None:
+    def test_existing_installation_without_marketplace_requires_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, log = self._fake_clis(Path(directory), claude_plugin="installed")
             result = self._run_claude(env)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--force-mcp", result.stderr)
+            self.assertIn("marketplace", result.stderr)
             self.assertEqual(
                 self._calls(log),
                 [
                     ["claude", "plugin", "marketplace", "list", "--json"],
                     ["claude", "plugin", "list", "--json"],
                 ],
+            )
+
+    def test_existing_plugin_still_dual_writes_native_mcp_without_reinstall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._fake_clis(
+                root, claude_plugin="installed", claude_marketplace="local"
+            )
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already installed", result.stdout)
+            self.assertNotIn("plugin uninstall", " ".join(" ".join(c) for c in self._calls(log)))
+            mcp_path = root / ".claude.json"
+            self.assertTrue(mcp_path.is_file())
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            server = data["mcpServers"]["recallum"]
+            self.assertEqual(server["url"], URL)
+            self.assertEqual(server["type"], "http")
+            # Key from env TOKEN_ENV_VAR value is stored as literal Bearer.
+            self.assertEqual(server["headers"]["Authorization"], "Bearer not-printed")
+            self.assertEqual(oct(mcp_path.stat().st_mode)[-3:], "600")
+            self.assertNotIn("not-printed", result.stdout)
+
+    def test_native_mcp_matching_is_left_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(
+                root, claude_plugin="installed", claude_marketplace="local"
+            )
+            mcp_path = root / ".claude.json"
+            mcp_path.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "codegraph": {"type": "stdio", "command": "codegraph"},
+                            "recallum": {
+                                "type": "http",
+                                "url": URL,
+                                "headers": {"Authorization": "Bearer not-printed"},
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_claude(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already matches", result.stdout)
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            self.assertIn("codegraph", data["mcpServers"])
+            self.assertEqual(data["mcpServers"]["recallum"]["url"], URL)
+
+    def test_native_mcp_different_url_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(
+                root, claude_plugin="installed", claude_marketplace="local"
+            )
+            mcp_path = root / ".claude.json"
+            mcp_path.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": "http",
+                                "url": "https://old.example/mcp/",
+                                "headers": {"Authorization": "Bearer not-printed"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_claude(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            # Unrelated content must not leak secrets from a different auth form.
+            self.assertNotIn("stale", result.stdout + result.stderr)
+
+    def test_force_rewrites_different_native_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Marketplace missing so force reinstall persists it (FAKE add path).
+            env, _ = self._fake_clis(root, claude_plugin="installed")
+            mcp_path = root / ".claude.json"
+            mcp_path.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "other": {"type": "stdio", "command": "x"},
+                            "recallum": {
+                                "type": "http",
+                                "url": "https://old.example/mcp/",
+                                "headers": {"Authorization": "Bearer stale-secret"},
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_claude(env, "--force-mcp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            self.assertIn("other", data["mcpServers"])
+            self.assertEqual(data["mcpServers"]["recallum"]["url"], URL)
+            self.assertEqual(
+                data["mcpServers"]["recallum"]["headers"]["Authorization"],
+                "Bearer not-printed",
+            )
+            self.assertNotIn("stale-secret", result.stdout + result.stderr)
+
+    def test_no_store_writes_env_placeholder_on_native_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            env.pop(TOKEN_ENV_VAR, None)
+            result = self._run_claude(env, "--no-store-api-key", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Bearer ${{{TOKEN_ENV_VAR}}}", result.stdout.replace("\\", ""))
+            # Non-dry path:
+            result = self._run_claude(env, "--no-store-api-key")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads((root / ".claude.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["mcpServers"]["recallum"]["headers"]["Authorization"],
+                f"Bearer ${{{TOKEN_ENV_VAR}}}",
             )
 
     def test_force_dry_run_plans_uninstall_then_reinstall(self) -> None:
@@ -1524,6 +1696,7 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertLess(uninstall, install)
             # `claude plugin uninstall` has no --scope flag.
             self.assertNotIn("--scope", planned[uninstall])
+            self.assertTrue(any(".claude.json" in line for line in planned))
 
     def test_matching_marketplace_is_updated_before_plugin_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

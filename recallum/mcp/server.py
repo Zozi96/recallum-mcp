@@ -1,4 +1,4 @@
-"""FastMCP server exposing nine tools and a read-only profile resource.
+"""FastMCP server exposing eleven tools and a read-only profile resource.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
 ``BearerAuthMiddleware``); tools and resources fail closed when the identity is
@@ -28,6 +28,8 @@ from recallum.memory.schemas import (
     ListResult,
     MergeResult,
     RecallResult,
+    ReconfirmResult,
+    RelatedMemoriesResult,
     RememberBatchItem,
     RememberBatchResult,
     RememberResult,
@@ -46,6 +48,7 @@ ALLOWED_PROFILE_RESOURCE_TEMPLATES = frozenset(
         "recallum://profile/{project}",
     }
 )
+ALLOWED_PROMPTS = frozenset({"session-start", "capture-scan", "stale-review"})
 
 if TYPE_CHECKING:
     from recallum.container import Container
@@ -62,8 +65,10 @@ Use recall to search, context to bootstrap a session (pass the task as
 `focus` to bias the snapshot toward it; the response always includes a
 `profile` always-on block that focus cannot evict), get_memory to fetch one
 memory by id (full text and, on request, what it replaced), list_memories to
-browse, update to correct or replace, forget to remove, and remember_batch
-for the end-of-session capture scan. When context reports omitted > 0, the
+browse, related_memories to optionally explore a seed's thematic neighborhood,
+reconfirm to stamp a still-true memory as fresh, update to correct or replace,
+forget to remove, and remember_batch for the end-of-session capture scan. When
+context reports omitted > 0, the
 budget left memories out: recall with a focused query reaches them. The
 read-only resource recallum://profile (and recallum://profile/{project})
 exposes the materialized profile without a tool call.
@@ -88,8 +93,9 @@ re-stored; `last_recalled_at`/`recall_count` say how often a memory matched
 a recall query, and `context_count` how often it rode along in a session
 snapshot. Context items carry `stale: true` once a memory has gone
 unconfirmed past the staleness threshold: verify those against reality
-before trusting them, then re-store unchanged (stamps `reconfirmed_at`),
-update, or forget. list_memories(stale=true) is the verification queue.
+ before trusting them, then prefer reconfirm over re-storing unchanged, or
+ update, forget, or merge_memories. The prompts session-start, capture-scan,
+ and stale-review are shortcuts when the client supports MCP prompts.
 All identity comes from the API key; tools never accept a user id.
 """
 
@@ -265,6 +271,32 @@ def build_mcp_server(container: Container) -> FastMCP:
 
     @mcp.tool
     @translates_domain_errors
+    async def related_memories(
+        memory_id: uuid.UUID,
+        limit: StrictPositiveLimit | None = None,
+    ) -> RelatedMemoriesResult:
+        """List bounded thematic neighbours of one active memory.
+
+        The response contains no embeddings or full graph. Unknown, foreign,
+        and retired ids return an empty related list.
+        """
+        return await memory_service().related_memories(
+            require_identity().user_id,
+            memory_id,
+            limit=limit,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
+    async def reconfirm(memory_id: uuid.UUID) -> ReconfirmResult:
+        """Stamp an active memory as freshly verified without rewriting it.
+
+        Unknown, foreign, and retired ids return reconfirmed=false.
+        """
+        return await memory_service().reconfirm(require_identity().user_id, memory_id)
+
+    @mcp.tool
+    @translates_domain_errors
     async def list_memories(
         scope: Literal["global", "project"] | None = None,
         project: str | None = None,
@@ -278,7 +310,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         stale=true is the verification queue: only memories whose last
         confirmation (reconfirmed_at, else created_at) is older than the
         server's staleness threshold. Verify each against reality, then
-        re-store it unchanged to reconfirm, update it, or forget it.
+        prefer reconfirm over identical re-remember, or update or forget it.
         stale=false keeps only fresh memories.
         """
         return await memory_service().list_memories(
@@ -364,6 +396,33 @@ def build_mcp_server(container: Container) -> FastMCP:
         """
         return await memory_service().forget(require_identity().user_id, memory_id)
 
+    @mcp.prompt(name="session-start")
+    def session_start(project: str | None = None, focus: str | None = None) -> str:
+        """Bootstrap project context before planning."""
+        task = f" and focus={focus!r}" if focus else ""
+        return (
+            f"Call context with project={project!r}{task}. If the task is known, "
+            "include focus; then use recall for focused detail when needed."
+        )
+
+    @mcp.prompt(name="capture-scan")
+    def capture_scan() -> str:
+        """Capture durable context at the end of a session."""
+        return (
+            "Run one end-of-session capture scan. Write zero or more atomic, "
+            "verified reusable items in English with remember_batch; never store "
+            "secrets, recaps, logs, guesses, or transient status. Zero items is valid."
+        )
+
+    @mcp.prompt(name="stale-review")
+    def stale_review() -> str:
+        """Review and resolve stale memories."""
+        return (
+            "Call list_memories with stale=true, then get_memory each item before "
+            "deciding. Prefer reconfirm for a claim that remains true; use update, "
+            "forget, or merge_memories when appropriate."
+        )
+
     return mcp
 
 
@@ -386,11 +445,12 @@ async def tool_names(mcp: FastMCP) -> list[str]:
 
 
 async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
-    """Fail fast if the server exposes unexpected resources or any prompts.
+    """Fail fast if the server exposes unexpected resources or prompts.
 
     Profile resources are allowed; BearerAuthMiddleware authenticates list/read.
     Uses the local compatibility seam so startup validation does not need a
-    bearer token. Prompts remain forbidden until designed.
+    bearer token. Only the three workflow prompts are allowlisted; an empty
+    prompt registry remains valid for resource-only compatibility fixtures.
     """
     from recallum.mcp.compatibility import (
         list_local_prompts,
@@ -416,9 +476,10 @@ async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
             f"unexpected resource templates exposed: {sorted(unexpected_templates)}"
         )
     prompts = await list_local_prompts(mcp)
-    if prompts:
-        names = [prompt.name for prompt in prompts]
-        raise RuntimeError(f"prompts exposed: {names}")
+    names = [prompt.name for prompt in prompts]
+    unexpected_prompts = set(names) - ALLOWED_PROMPTS
+    if unexpected_prompts:
+        raise RuntimeError(f"unexpected prompts exposed: {sorted(unexpected_prompts)}")
 
 
 __all__: list[Any] = [

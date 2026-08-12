@@ -1301,6 +1301,60 @@ class MemoryRepositoryContract:
         assert low.id not in {memory.id for memory in first.memories}
         assert first.total == 3
 
+    # -- related_to ------------------------------------------------------
+
+    async def test_related_to_crosses_buckets_but_not_users_or_models(
+        self, repo, user_id, other_user_id
+    ):
+        target = _embedding(2727)
+        seed = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="related seed",
+                content_hash=_hash("related-seed"),
+                embedding=target,
+            ),
+        )
+        project = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="related project",
+                content_hash=_hash("related-project"),
+                embedding=target,
+                scope="project",
+                project="alpha",
+                category="decision",
+            ),
+        )
+        incompatible = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="related other model",
+                content_hash=_hash("related-model"),
+                embedding=target,
+                embedding_model="other-model",
+            ),
+        )
+        foreign = await repo.create_memory(
+            other_user_id,
+            **self._kwargs(
+                content="related foreign",
+                content_hash=_hash("related-foreign"),
+                embedding=target,
+            ),
+        )
+
+        results = await repo.related_to(
+            user_id, seed.id, limit=10, min_similarity=0.9
+        )
+
+        assert [item.memory.id for item in results] == [project.id]
+        assert incompatible.id not in {item.memory.id for item in results}
+        assert foreign.id not in {item.memory.id for item in results}
+        assert await repo.related_to(
+            user_id, uuid.uuid4(), limit=10, min_similarity=0.9
+        ) == []
+
     # -- most_important_active ------------------------------------------
 
     async def test_most_important_active_orders_by_importance_then_recency(self, repo, user_id):

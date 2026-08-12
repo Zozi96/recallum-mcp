@@ -308,6 +308,35 @@ class FakeMemoryRepository:
         mismatch = any(memory.embedding_model is None for memory in selected) or len(models) > 1
         return GraphSnapshot(selected, pairs, len(rows), mismatch)
 
+    async def related_to(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        limit: int,
+        min_similarity: float,
+    ) -> Sequence[ScoredMemory]:
+        seed = self.rows.get(memory_id)
+        if (
+            seed is None
+            or seed.user_id != user_id
+            or seed.is_deleted
+            or seed.embedding_model is None
+        ):
+            return []
+        scored = [
+            ScoredMemory(memory=memory, score=_cosine(seed.embedding, memory.embedding))
+            for memory in self._active(user_id)
+            if (
+                memory.id != seed.id
+                and memory.embedding_model is not None
+                and memory.embedding_model == seed.embedding_model
+            )
+        ]
+        scored = [item for item in scored if item.score >= min_similarity]
+        scored.sort(key=lambda item: (-item.score, str(item.memory.id)))
+        return scored[:limit]
+
     def _vector_pool(
         self,
         user_id: uuid.UUID,

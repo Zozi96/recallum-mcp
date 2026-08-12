@@ -44,6 +44,8 @@ EXPECTED_TOOLS = {
     "list_memories",
     "update",
     "merge_memories",
+    "related_memories",
+    "reconfirm",
     "forget",
 }
 
@@ -659,11 +661,37 @@ async def test_validate_only_tools_are_exposed_rejects_a_prompt():
         await validate_only_tools_are_exposed(mcp)
 
 
-async def test_discovery_announces_exactly_nine_tools_without_user_inputs(server: ServerInfo):
+async def test_validate_only_tools_are_exposed_allows_the_three_workflow_prompts():
+    mcp = FastMCP(name="workflow")
+
+    @mcp.prompt(name="session-start")
+    def session_start() -> str:
+        return "start"
+
+    @mcp.prompt(name="capture-scan")
+    def capture_scan() -> str:
+        return "capture"
+
+    @mcp.prompt(name="stale-review")
+    def stale_review() -> str:
+        return "stale"
+
+    await validate_only_tools_are_exposed(mcp)
+
+
+async def test_discovery_announces_exactly_eleven_tools_and_three_prompts(
+    server: ServerInfo,
+):
     async with mcp_client(server.url, server.alice_token) as client:
         tools = await client.list_tools()
+        prompts = await client.list_prompts()
     names = {tool.name for tool in tools}
     assert names == EXPECTED_TOOLS
+    assert {prompt.name for prompt in prompts} == {
+        "session-start",
+        "capture-scan",
+        "stale-review",
+    }
     remember = next(tool for tool in tools if tool.name == "remember")
     assert "Ask before storing secrets" in remember.description
     assert "never infer consent" in remember.description

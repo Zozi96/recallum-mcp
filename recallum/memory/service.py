@@ -59,6 +59,9 @@ from recallum.memory.schemas import (
     ReassignResult,
     RecalledMemory,
     RecallResult,
+    ReconfirmResult,
+    RelatedMemoriesResult,
+    RelatedMemory,
     RememberBatchItem,
     RememberBatchItemOutcome,
     RememberBatchResult,
@@ -1035,9 +1038,51 @@ class MemoryService:
             model_mismatch=snapshot.model_mismatch,
         )
 
+    async def related_memories(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        limit: StrictPositiveLimit | None = None,
+    ) -> RelatedMemoriesResult:
+        """Return a bounded thematic neighbourhood for one active seed."""
+        effective_limit = self._clamp_limit(
+            limit, self._limits.graph_max_neighbours, self._limits.graph_max_neighbours
+        )
+        neighbours = await self._repo.related_to(
+            user_id,
+            memory_id,
+            limit=effective_limit,
+            min_similarity=self._limits.graph_min_similarity,
+        )
+        return RelatedMemoriesResult(
+            memory_id=memory_id,
+            related=[
+                RelatedMemory(
+                    id=item.memory.id,
+                    content=item.memory.content,
+                    category=item.memory.category,
+                    scope=item.memory.scope,
+                    project=item.memory.project,
+                    similarity=item.score,
+                )
+                for item in neighbours
+            ],
+        )
+
     # ------------------------------------------------------------------
     # forget
     # ------------------------------------------------------------------
+
+    async def reconfirm(
+        self, user_id: uuid.UUID, memory_id: uuid.UUID
+    ) -> ReconfirmResult:
+        """Stamp freshness on an active memory without rewriting its content."""
+        stamped = await self._repo.mark_reconfirmed(user_id, memory_id)
+        if stamped is None:
+            return ReconfirmResult(reconfirmed=False)
+        await self._rebuild_profiles_for_memory(user_id, stamped)
+        return ReconfirmResult(reconfirmed=True, memory=_to_memory_out(stamped))
 
     async def forget(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> ForgetResult:
         """Logical delete; unknown and foreign ids both report not forgotten."""

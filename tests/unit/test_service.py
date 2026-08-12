@@ -826,6 +826,61 @@ async def test_memory_graph_caps_strongest_edges_and_reports_truncation_and_mode
     assert graph.model_mismatch is True
 
 
+async def test_related_memories_crosses_buckets_isolates_models_and_clamps_limit():
+    vectors = {
+        "seed": [1.0, 0.0],
+        "project neighbour": [1.0, 0.0],
+        "category neighbour": [0.99, 0.1],
+        "another neighbour": [1.0, 0.0],
+        "foreign neighbour": [1.0, 0.0],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(graph_max_neighbours=2, graph_min_similarity=0.7),
+    )
+    seed = await service.remember(USER, content="seed", category="fact")
+    project = await service.remember(
+        USER, content="project neighbour", category="decision", project="other"
+    )
+    category = await service.remember(USER, content="category neighbour", category="preference")
+    another = await service.remember(USER, content="another neighbour", category="fact")
+    foreign = await service.remember(
+        uuid.uuid4(), content="foreign neighbour", category="fact"
+    )
+    repo.rows[category.memory.id].embedding_model = "other-model"
+
+    result = await service.related_memories(USER, seed.memory.id, limit=999)
+
+    assert len(result.related) == 2
+    assert {item.id for item in result.related} == {project.memory.id, another.memory.id}
+    assert all(item.project == "other" or item.project is None for item in result.related)
+    assert foreign.memory.id not in {item.id for item in result.related}
+
+
+async def test_related_memories_and_reconfirm_hide_unknown_foreign_and_retired_ids():
+    service, repo, _ = make_service()
+    own = await service.remember(USER, content="own memory", category="fact")
+    foreign_user = uuid.uuid4()
+    foreign = await service.remember(foreign_user, content="foreign memory", category="fact")
+    before = repo.rows[own.memory.id]
+
+    stamped = await service.reconfirm(USER, own.memory.id)
+    assert stamped.reconfirmed is True
+    assert stamped.memory is not None
+    assert stamped.memory.id == before.id
+    assert stamped.memory.content == before.content
+    assert stamped.memory.reconfirmed_at is not None
+    assert (await service.reconfirm(USER, foreign.memory.id)).reconfirmed is False
+    assert (await service.reconfirm(USER, uuid.uuid4())).reconfirmed is False
+
+    await service.forget(USER, own.memory.id)
+    assert (await service.reconfirm(USER, own.memory.id)).reconfirmed is False
+    assert (await service.related_memories(USER, own.memory.id)).related == []
+    assert (await service.related_memories(USER, foreign.memory.id)).related == []
+
+
 async def test_memory_graph_representative_default_bound_stays_capped():
     repo = FakeMemoryRepository()
     service = MemoryService(

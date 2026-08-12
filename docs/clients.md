@@ -83,20 +83,22 @@ textual prefix.
 
 ## Claude Code
 
-Claude Code carries the MCP server inside the plugin (`.mcp.json`) and fills
-`${user_config.*}` from plugin configuration:
+Claude Code keeps the plugin for hooks/skills (`.mcp.json` + `${user_config.*}`) and the installer
+**also** dual-writes a native user MCP server into `~/.claude.json` (`mcpServers.recallum`) so
+Claude Desktop ToolSearch can find tools under `mcp__recallum__*`.
 
 ```bash
 plugins/recallum-memory/scripts/install.sh --target claude --url https://recallum.example.com/mcp/
-export RECALLUM_API_KEY=rcl_YOUR_API_KEY
-# optional masked fallback:
+# optional masked plugin fallback:
 # /plugin configure recallum-memory@recallum-local
 ```
 
 Verify:
 
 ```bash
-claude mcp list | grep recallum   # plugin:recallum-memory:recallum
+claude mcp list | grep recallum   # plugin:recallum-memory:recallum and/or recallum
+# Desktop session: ToolSearch +recallum or select:mcp__recallum__context
+# Nested shell claude mcp list inside Desktop is not proof of Desktop tool registration
 ```
 
 ## Agent usage guidance
@@ -117,8 +119,9 @@ Never store full conversations; store the distilled fact.
 ```
 
 Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
-`mcp__plugin_recallum-memory_recallum__*`, Grok Build `recallum__*` via
-`search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in Available Tools.
+`mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` (native/Desktop), Grok Build
+`recallum__*` via `search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in
+Available Tools.
 
 ## Troubleshooting
 
