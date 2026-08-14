@@ -887,7 +887,7 @@ async def test_memory_graph_representative_default_bound_stays_capped():
         repository=repo,
         embeddings=FakeEmbeddingClient(dimensions=2),
     )
-    for index in range(201):
+    for index in range(MemoryLimits().graph_max_nodes + 1):
         await repo.create_memory(
             USER,
             scope="global",
@@ -908,7 +908,7 @@ async def test_memory_graph_representative_default_bound_stays_capped():
         degree[edge.source_id] += 1
         degree[edge.target_id] += 1
 
-    assert len(graph.nodes) == MemoryLimits().graph_max_nodes == 200
-    assert graph.total == 201
+    assert len(graph.nodes) == MemoryLimits().graph_max_nodes
+    assert graph.total == MemoryLimits().graph_max_nodes + 1
     assert graph.truncated is True
     assert max(degree.values()) <= MemoryLimits().graph_max_neighbours

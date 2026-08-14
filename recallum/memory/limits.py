@@ -28,7 +28,9 @@ class MemoryLimits(BaseModel):
     # The graph is an intentionally bounded projection. Pairwise comparison is
     # quadratic, so these conservative server-owned ceilings are part of the
     # safety boundary rather than client preferences.
-    graph_max_nodes: int = Field(default=200, gt=0, le=500)
+    # ponytail: ceiling is the pairwise O(n²) SQL in graph_snapshot; if users
+    # routinely exceed ~1k memories, move to per-node kNN / ANN edges.
+    graph_max_nodes: int = Field(default=1000, gt=0, le=2000)
     graph_max_neighbours: int = Field(default=4, gt=0, le=10)
     graph_min_similarity: float = Field(default=0.72, ge=0.5, le=1.0)
 
