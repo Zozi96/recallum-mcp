@@ -4,6 +4,12 @@ Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
 user; never share one between people.
 
+## Tool surface
+
+The server exposes eleven MCP tools: `remember`, `remember_batch`, `recall`,
+`context`, `get_memory`, `list_memories`, `update`, `merge_memories`,
+`related_memories`, `reconfirm`, and `forget`.
+
 Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, and Grok Build. Cursor
 uses its native marketplace and Settings flow below. Keep credentials in client-owned settings;
 do not rely on a shell-only export as the sole GUI strategy, and verify the setup after restart.

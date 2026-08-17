@@ -20,7 +20,7 @@ import re
 import unicodedata
 import uuid
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
 
@@ -34,6 +34,7 @@ from recallum.db.repositories.memory_repo import (
     MemoryRepository,
     ProfileGenerationConflict,
     ScoredMemory,
+    _cap_pairs_by_degree,
 )
 from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE, record_sanitized_failure
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
@@ -657,38 +658,48 @@ class MemoryService:
                 scores[scored.memory.id] += pool_weight / (RRF_K + rank)
                 entries.setdefault(scored.memory.id, scored)
 
-        weight = self._limits.recall_importance_weight
-        if weight:
-            # Competition ranking: equally important candidates must land on the
-            # same rank and so contribute equally. Ordering ties by anything
-            # else -- recency being the tempting choice -- would smuggle a
-            # second signal in through the tie-break and turn scores that ought
-            # to tie into scores that do not.
-            by_importance = sorted(entries.values(), key=lambda s: -s.memory.importance)
-            rank = 0
-            previous_importance: int | None = None
-            for position, scored in enumerate(by_importance, start=1):
-                if scored.memory.importance != previous_importance:
-                    rank = position
-                    previous_importance = scored.memory.importance
-                scores[scored.memory.id] += weight / (RRF_K + rank)
-
-        usage_weight = self._limits.recall_usage_weight
-        if usage_weight:
-            by_usage = sorted(entries.values(), key=lambda s: -s.memory.recall_count)
-            rank = 0
-            previous_count: int | None = None
-            for position, scored in enumerate(by_usage, start=1):
-                if scored.memory.recall_count != previous_count:
-                    rank = position
-                    previous_count = scored.memory.recall_count
-                scores[scored.memory.id] += usage_weight / (RRF_K + rank)
+        # Importance and usage are the same competition-rank voter with
+        # different keys and weights. Ties share a rank so a secondary
+        # signal cannot sneak in through the sort order.
+        self._add_competition_vote(
+            entries,
+            scores,
+            key=lambda scored: scored.memory.importance,
+            weight=self._limits.recall_importance_weight,
+        )
+        self._add_competition_vote(
+            entries,
+            scores,
+            key=lambda scored: scored.memory.recall_count or 0,
+            weight=self._limits.recall_usage_weight,
+        )
 
         ranked = sorted(
             scores.items(), key=lambda item: entries[item[0]].memory.created_at, reverse=True
         )
         ranked.sort(key=lambda item: item[1], reverse=True)
         return [(entries[memory_id], score) for memory_id, score in ranked]
+
+    def _add_competition_vote(
+        self,
+        entries: dict[uuid.UUID, ScoredMemory],
+        scores: dict[uuid.UUID, float],
+        *,
+        key: Callable[[ScoredMemory], int],
+        weight: float,
+    ) -> None:
+        """Add one RRF voter over already-found candidates, ties sharing a rank."""
+        if not weight:
+            return
+        ordered = sorted(entries.values(), key=lambda scored: -key(scored))
+        rank = 0
+        previous: int | None = None
+        for position, scored in enumerate(ordered, start=1):
+            value = key(scored)
+            if value != previous:
+                rank = position
+                previous = value
+            scores[scored.memory.id] += weight / (RRF_K + rank)
 
     # ------------------------------------------------------------------
     # context
@@ -997,18 +1008,12 @@ class MemoryService:
             category=validated_category,
             limit=effective_limit,
             min_similarity=self._limits.graph_min_similarity,
+            max_neighbours=self._limits.graph_max_neighbours,
+            scalable_enabled=self._limits.graph_scalable_enabled,
+            scalable_min_nodes=self._limits.graph_scalable_min_nodes,
         )
-        degree: defaultdict[uuid.UUID, int] = defaultdict(int)
         edges: list[MemoryGraphEdge] = []
-        for pair in sorted(
-            snapshot.pairs,
-            key=lambda pair: (-pair.similarity, str(pair.source_id), str(pair.target_id)),
-        ):
-            if (
-                degree[pair.source_id] >= self._limits.graph_max_neighbours
-                or degree[pair.target_id] >= self._limits.graph_max_neighbours
-            ):
-                continue
+        for pair in _cap_pairs_by_degree(snapshot.pairs, self._limits.graph_max_neighbours):
             source_id, target_id = sorted((pair.source_id, pair.target_id), key=str)
             edges.append(
                 MemoryGraphEdge(
@@ -1017,8 +1022,6 @@ class MemoryService:
                     similarity=pair.similarity,
                 )
             )
-            degree[source_id] += 1
-            degree[target_id] += 1
         return MemoryGraphResponse(
             nodes=[
                 MemoryGraphNode(
@@ -1036,6 +1039,8 @@ class MemoryService:
             total=snapshot.total,
             truncated=snapshot.total > len(snapshot.memories),
             model_mismatch=snapshot.model_mismatch,
+            edge_total=snapshot.edge_total,
+            edges_truncated=snapshot.edge_total > len(edges),
         )
 
     async def related_memories(

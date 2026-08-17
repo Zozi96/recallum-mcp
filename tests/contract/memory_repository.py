@@ -23,6 +23,7 @@ import hashlib
 import math
 import random
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,6 +43,17 @@ def _embedding(seed: int, dimensions: int = 768) -> list[float]:
     vector = [rng.uniform(-1.0, 1.0) for _ in range(dimensions)]
     norm = math.sqrt(sum(x * x for x in vector)) or 1.0
     return [x / norm for x in vector]
+
+
+def _angled_vector(angle_degrees: float, dimensions: int = 768) -> list[float]:
+    """Unit vector on the first coordinate plane at a known angle; the cosine
+    similarity of two of these is exactly ``cos(delta)``, so fixtures can pick
+    which pairs qualify under ``min_similarity``."""
+    radians = math.radians(angle_degrees)
+    vector = [0.0] * dimensions
+    vector[0] = math.cos(radians)
+    vector[1] = math.sin(radians)
+    return vector
 
 
 class MemoryRepositoryContract:
@@ -74,9 +86,7 @@ class MemoryRepositoryContract:
             "metadata": metadata or {},
         }
 
-    async def _text_pool(
-        self, repo, user_id, query, *, visibility, category=None, limit
-    ):
+    async def _text_pool(self, repo, user_id, query, *, visibility, category=None, limit):
         """Only the textual pool; no embedding, so the vector pool stays empty."""
         pools = await repo.search_candidates(
             user_id,
@@ -181,9 +191,7 @@ class MemoryRepositoryContract:
         assert await repo.soft_delete(user_id, created.id) is True
         assert await repo.get_active(user_id, created.id) is None
 
-    async def test_history_and_statistics_are_user_scoped(
-        self, repo, user_id, other_user_id
-    ):
+    async def test_history_and_statistics_are_user_scoped(self, repo, user_id, other_user_id):
         first = await repo.create_memory(
             user_id, **self._kwargs(content="history one", content_hash=_hash("history one"))
         )
@@ -264,9 +272,7 @@ class MemoryRepositoryContract:
             **self._kwargs(scope="project", project="beta", content_hash=_hash("vis-pb")),
         )
 
-        all_items, _ = await repo.list_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
+        all_items, _ = await repo.list_active(user_id, visibility=MemoryVisibility("all"), limit=10)
         assert {m.id for m in all_items} == {g.id, pa.id, pb.id}
 
         global_items, _ = await repo.list_active(
@@ -336,8 +342,8 @@ class MemoryRepositoryContract:
         )
         await repo.soft_delete(user_id, deleted.id)
 
-        results = await self._vector_pool(repo, 
-            user_id, query_vec, visibility=MemoryVisibility("global"), limit=10
+        results = await self._vector_pool(
+            repo, user_id, query_vec, visibility=MemoryVisibility("global"), limit=10
         )
         ids = {r.memory.id for r in results}
         assert visible.id in ids
@@ -354,8 +360,12 @@ class MemoryRepositoryContract:
                 ),
             )
 
-        results = await self._vector_pool(repo,
-            user_id, _embedding(0), visibility=MemoryVisibility("all"), limit=MAX_CANDIDATES + 10
+        results = await self._vector_pool(
+            repo,
+            user_id,
+            _embedding(0),
+            visibility=MemoryVisibility("all"),
+            limit=MAX_CANDIDATES + 10,
         )
         assert len(results) <= MAX_CANDIDATES
 
@@ -408,9 +418,7 @@ class MemoryRepositoryContract:
 
     # -- search_trigram ------------------------------------------------
 
-    async def test_search_trigram_matches_exact_words_and_rejects_unrelated(
-        self, repo, user_id
-    ):
+    async def test_search_trigram_matches_exact_words_and_rejects_unrelated(self, repo, user_id):
         """The portable extremes of the fuzzy leg's promise.
 
         An exact word in the content is a perfect extent match (1.0) in both
@@ -418,9 +426,7 @@ class MemoryRepositoryContract:
         threshold. How close a typo may be is pg_trgm's own business and is
         pinned Postgres-only in the integration suite, like stemming.
         """
-        hit = await repo.create_memory(
-            user_id, **self._kwargs(content="prefer pnpm for installs")
-        )
+        hit = await repo.create_memory(user_id, **self._kwargs(content="prefer pnpm for installs"))
         miss = await repo.create_memory(
             user_id, **self._kwargs(content="database of record is postgres")
         )
@@ -439,9 +445,7 @@ class MemoryRepositoryContract:
         assert miss.id not in scores
 
     async def test_search_trigram_pool_is_empty_unless_requested(self, repo, user_id):
-        await repo.create_memory(
-            user_id, **self._kwargs(content="prefer pnpm for installs")
-        )
+        await repo.create_memory(user_id, **self._kwargs(content="prefer pnpm for installs"))
         pools = await repo.search_candidates(
             user_id,
             query="pnpm",
@@ -466,8 +470,8 @@ class MemoryRepositoryContract:
             ),
         )
 
-        results = await self._text_pool(repo, 
-            user_id, "cat", visibility=MemoryVisibility("all"), limit=10
+        results = await self._text_pool(
+            repo, user_id, "cat", visibility=MemoryVisibility("all"), limit=10
         )
         ids = {r.memory.id for r in results}
         assert has_word.id in ids
@@ -490,7 +494,8 @@ class MemoryRepositoryContract:
             ),
         )
 
-        results = await self._text_pool(repo, 
+        results = await self._text_pool(
+            repo,
             user_id,
             "how do I trigger kubernetes docker rollouts",
             visibility=MemoryVisibility("all"),
@@ -512,8 +517,8 @@ class MemoryRepositoryContract:
             ),
         )
 
-        results = await self._text_pool(repo, 
-            user_id, "what is the", visibility=MemoryVisibility("all"), limit=10
+        results = await self._text_pool(
+            repo, user_id, "what is the", visibility=MemoryVisibility("all"), limit=10
         )
         assert results == []
 
@@ -525,9 +530,7 @@ class MemoryRepositoryContract:
         """
         broad = await repo.create_memory(
             user_id,
-            **self._kwargs(
-                content="postgres backups run nightly", content_hash=_hash("st-broad")
-            ),
+            **self._kwargs(content="postgres backups run nightly", content_hash=_hash("st-broad")),
         )
         narrow = await repo.create_memory(
             user_id,
@@ -536,7 +539,8 @@ class MemoryRepositoryContract:
             ),
         )
 
-        results = await self._text_pool(repo, 
+        results = await self._text_pool(
+            repo,
             user_id,
             "nightly postgres backups",
             visibility=MemoryVisibility("all"),
@@ -552,22 +556,20 @@ class MemoryRepositoryContract:
             **self._kwargs(content="frontend uses tailwind", content_hash=_hash("st-none")),
         )
 
-        results = await self._text_pool(repo, 
-            user_id, "zygote quantum harmonica", visibility=MemoryVisibility("all"), limit=10
+        results = await self._text_pool(
+            repo, user_id, "zygote quantum harmonica", visibility=MemoryVisibility("all"), limit=10
         )
         assert results == []
 
     async def test_search_text_excludes_soft_deleted(self, repo, user_id):
         row = await repo.create_memory(
             user_id,
-            **self._kwargs(
-                content="unique deletable searchterm", content_hash=_hash("st-deleted")
-            ),
+            **self._kwargs(content="unique deletable searchterm", content_hash=_hash("st-deleted")),
         )
         await repo.soft_delete(user_id, row.id)
 
-        results = await self._text_pool(repo, 
-            user_id, "searchterm", visibility=MemoryVisibility("all"), limit=10
+        results = await self._text_pool(
+            repo, user_id, "searchterm", visibility=MemoryVisibility("all"), limit=10
         )
         assert results == []
 
@@ -602,9 +604,7 @@ class MemoryRepositoryContract:
         retired = await repo.get_active(user_id, replacement.id)
         assert retired is not None
 
-        items, _ = await repo.list_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
+        items, _ = await repo.list_active(user_id, visibility=MemoryVisibility("all"), limit=10)
         assert [m.id for m in items] == [replacement.id]
 
     async def test_supersede_frees_the_original_content_for_reuse(self, repo, user_id):
@@ -626,9 +626,7 @@ class MemoryRepositoryContract:
         )
         assert replacement is not None
 
-    async def test_supersede_rejects_colliding_with_a_different_active_memory(
-        self, repo, user_id
-    ):
+    async def test_supersede_rejects_colliding_with_a_different_active_memory(self, repo, user_id):
         await repo.create_memory(
             user_id, **self._kwargs(content="taken content", content_hash=_hash("sup-taken"))
         )
@@ -674,9 +672,7 @@ class MemoryRepositoryContract:
     async def test_update_attributes_edits_in_place_and_keeps_the_id(self, repo, user_id):
         created = await repo.create_memory(
             user_id,
-            **self._kwargs(
-                content="attr content", content_hash=_hash("attr"), importance=3
-            ),
+            **self._kwargs(content="attr content", content_hash=_hash("attr"), importance=3),
         )
 
         updated = await repo.update_attributes(
@@ -777,14 +773,10 @@ class MemoryRepositoryContract:
         assert replacement.id != keeper.id
         assert await repo.get_active(user_id, keeper.id) is None
 
-    async def test_merge_collision_with_unrelated_active_row_changes_nothing(
-        self, repo, user_id
-    ):
+    async def test_merge_collision_with_unrelated_active_row_changes_nothing(self, repo, user_id):
         a = await repo.create_memory(user_id, **self._kwargs(content="merge source a"))
         b = await repo.create_memory(user_id, **self._kwargs(content="merge source b"))
-        bystander = await repo.create_memory(
-            user_id, **self._kwargs(content="the bystander claim")
-        )
+        bystander = await repo.create_memory(user_id, **self._kwargs(content="the bystander claim"))
 
         with pytest.raises(IntegrityError):
             await repo.merge_memories(
@@ -800,9 +792,7 @@ class MemoryRepositoryContract:
         self, repo, user_id, other_user_id
     ):
         mine = await repo.create_memory(user_id, **self._kwargs(content="my mergeable"))
-        theirs = await repo.create_memory(
-            other_user_id, **self._kwargs(content="their row")
-        )
+        theirs = await repo.create_memory(other_user_id, **self._kwargs(content="their row"))
 
         assert (
             await repo.merge_memories(
@@ -890,15 +880,11 @@ class MemoryRepositoryContract:
         assert near.id in ids
         assert far.id not in ids
 
-    async def test_similar_active_crosses_categories_but_not_scope_or_deleted(
-        self, repo, user_id
-    ):
+    async def test_similar_active_crosses_categories_but_not_scope_or_deleted(self, repo, user_id):
         target = _embedding(4242)
         itself = await repo.create_memory(
             user_id,
-            **self._kwargs(
-                content="the new one", content_hash=_hash("sim-self"), embedding=target
-            ),
+            **self._kwargs(content="the new one", content_hash=_hash("sim-self"), embedding=target),
         )
         other_category = await repo.create_memory(
             user_id,
@@ -973,9 +959,7 @@ class MemoryRepositoryContract:
 
     # -- freshness, usage and reassignment -------------------------------
 
-    async def test_mark_reconfirmed_stamps_own_active_rows_only(
-        self, repo, user_id, other_user_id
-    ):
+    async def test_mark_reconfirmed_stamps_own_active_rows_only(self, repo, user_id, other_user_id):
         created = await repo.create_memory(
             user_id, **self._kwargs(content="fresh claim", content_hash=_hash("fresh"))
         )
@@ -1012,9 +996,7 @@ class MemoryRepositoryContract:
         assert untouched.recall_count == 0
         assert untouched.last_recalled_at is None
 
-    async def test_list_active_staleness_filters_use_last_confirmation(
-        self, repo, user_id
-    ):
+    async def test_list_active_staleness_filters_use_last_confirmation(self, repo, user_id):
         """Pins the comparison direction and that the total honours the filter.
 
         Real rows are stamped "now", so the cutoffs bracket the present: a
@@ -1073,9 +1055,7 @@ class MemoryRepositoryContract:
 
         first = await repo.stale_embeddings_batch(user_id, model=model, after=None, limit=1)
         assert len(first) == 1
-        rest = await repo.stale_embeddings_batch(
-            user_id, model=model, after=first[0].id, limit=10
-        )
+        rest = await repo.stale_embeddings_batch(user_id, model=model, after=first[0].id, limit=10)
         # Keyset pagination: no overlap, nothing skipped, current-model row absent.
         assert len(rest) == 1
         assert {r.id for r in [*first, *rest]} == {legacy.id, foreign.id}
@@ -1088,11 +1068,7 @@ class MemoryRepositoryContract:
                 user_id, row.id, embedding=_embedding(7), model=model
             )
         assert (
-            list(
-                await repo.stale_embeddings_batch(
-                    user_id, model=model, after=None, limit=10
-                )
-            )
+            list(await repo.stale_embeddings_batch(user_id, model=model, after=None, limit=10))
             == []
         )
         assert (await repo.get_active(user_id, foreign.id)).embedding_model == model
@@ -1122,10 +1098,7 @@ class MemoryRepositoryContract:
         await repo.soft_delete(user_id, retired.id)
 
         assert (
-            await repo.count_active_visible(
-                user_id, visibility=MemoryVisibility.global_only()
-            )
-            == 1
+            await repo.count_active_visible(user_id, visibility=MemoryVisibility.global_only()) == 1
         )
         assert (
             await repo.count_active_visible(
@@ -1192,6 +1165,17 @@ class MemoryRepositoryContract:
         assert (await repo.get_active(other_user_id, foreign.id)).project == "alpha"
 
     # -- graph_snapshot --------------------------------------------------
+
+    @staticmethod
+    def _node_degrees(pairs) -> dict[uuid.UUID, int]:
+        """Count each node's incident pairs from BOTH endpoints. The scalable
+        path is per-node bounded, so the hub of a dense component must stay
+        under the cap no matter where its UUID sorts."""
+        degree: defaultdict[uuid.UUID, int] = defaultdict(int)
+        for pair in pairs:
+            degree[pair.source_id] += 1
+            degree[pair.target_id] += 1
+        return degree
 
     async def test_graph_snapshot_crosses_buckets_but_not_users_or_models(
         self, repo, user_id, other_user_id
@@ -1301,6 +1285,263 @@ class MemoryRepositoryContract:
         assert low.id not in {memory.id for memory in first.memories}
         assert first.total == 3
 
+    async def test_graph_snapshot_scalable_matches_pairwise_on_small_fixture(self, repo, user_id):
+        for index, angle in enumerate([0, 10, 20, 30, 40, 50]):
+            await repo.create_memory(
+                user_id,
+                **self._kwargs(
+                    content=f"parity memory {index}",
+                    content_hash=_hash(f"graph-parity-{index}"),
+                    embedding=_angled_vector(angle),
+                ),
+            )
+        pairwise = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+        )
+        scalable = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+            max_neighbours=10,
+            scalable_enabled=True,
+            scalable_min_nodes=1,
+        )
+        threshold_only = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+            max_neighbours=10,
+            scalable_enabled=False,
+            scalable_min_nodes=5,
+        )
+
+        assert pairwise.edge_total == 12
+        assert {(pair.source_id, pair.target_id) for pair in scalable.pairs} == {
+            (pair.source_id, pair.target_id) for pair in pairwise.pairs
+        }
+        assert scalable.edge_total == pairwise.edge_total
+        assert {(pair.source_id, pair.target_id) for pair in threshold_only.pairs} == {
+            (pair.source_id, pair.target_id) for pair in pairwise.pairs
+        }
+        assert threshold_only.edge_total == pairwise.edge_total
+
+    async def test_graph_snapshot_scalable_matches_pairwise_with_tied_similarities(
+        self, repo, user_id
+    ):
+        target = _embedding(4242)
+        for index in range(6):
+            await repo.create_memory(
+                user_id,
+                **self._kwargs(
+                    content=f"tie memory {index}",
+                    content_hash=_hash(f"graph-tie-{index}"),
+                    embedding=target,
+                ),
+            )
+        pairwise = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.9,
+        )
+        scalable = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.9,
+            max_neighbours=10,
+            scalable_enabled=True,
+            scalable_min_nodes=1,
+        )
+
+        assert len(pairwise.pairs) == 15
+        assert {(pair.source_id, pair.target_id) for pair in scalable.pairs} == {
+            (pair.source_id, pair.target_id) for pair in pairwise.pairs
+        }
+        assert scalable.edge_total == pairwise.edge_total == 15
+
+    async def test_graph_snapshot_scalable_dense_hub_bounds_per_node(self, repo, user_id):
+        # Pin the hub to the maximum UUID: a ``left.id < right.id`` neighbour
+        # filter would make the hub emit no edges of its own and keep every
+        # spoke through the spokes' own queries, so the per-node bound must be
+        # counted from both endpoints, not just ``source_id``.
+        hub = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="dense hub",
+                content_hash=_hash("dense-hub"),
+                embedding=[1.0] + [0.0] * 767,
+            ),
+            memory_id=uuid.UUID(int=2**128 - 1),
+        )
+        near_vectors = [
+            [0.8660254, 0.5] + [0.0] * 766,
+            [0.8660254, 0.0, 0.5] + [0.0] * 765,
+            [0.8660254, 0.0, -0.5] + [0.0] * 765,
+        ]
+        near_ids = []
+        for index, vector in enumerate(near_vectors):
+            memory = await repo.create_memory(
+                user_id,
+                **self._kwargs(
+                    content=f"dense near {index}",
+                    content_hash=_hash(f"dense-near-{index}"),
+                    embedding=vector,
+                ),
+                memory_id=uuid.UUID(int=index + 1),
+            )
+            near_ids.append(memory.id)
+
+        pairwise = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+        )
+        scalable = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+            max_neighbours=2,
+            scalable_enabled=True,
+            scalable_min_nodes=1,
+        )
+
+        hub_pairs = {tuple(sorted((hub.id, near_id), key=str)) for near_id in near_ids}
+        assert pairwise.edge_total == 3
+        assert scalable.edge_total == 3
+        scalable_pairs = {(pair.source_id, pair.target_id) for pair in scalable.pairs}
+        # No invented edges: every scalable pair is a qualifying hub pair.
+        assert scalable_pairs <= hub_pairs
+        assert scalable_pairs <= {(pair.source_id, pair.target_id) for pair in pairwise.pairs}
+        # Per-node bound holds on the snapshot itself, counted from both
+        # endpoints: the max-UUID hub keeps its strongest edges, not every
+        # spoke.
+        assert len(scalable.pairs) == 2
+        degrees = self._node_degrees(scalable.pairs)
+        assert max(degrees.values(), default=0) <= 2
+        assert degrees[hub.id] == 2
+
+    async def test_graph_snapshot_scalable_activation_routing(self, repo, user_id):
+        hub = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="activation hub",
+                content_hash=_hash("activation-hub"),
+                embedding=[1.0] + [0.0] * 767,
+            ),
+        )
+        near_vectors = [
+            [0.8660254, 0.5] + [0.0] * 766,
+            [0.8660254, 0.0, 0.5] + [0.0] * 765,
+            [0.8660254, 0.0, -0.5] + [0.0] * 765,
+        ]
+        near_ids = []
+        for index, vector in enumerate(near_vectors):
+            memory = await repo.create_memory(
+                user_id,
+                **self._kwargs(
+                    content=f"activation near {index}",
+                    content_hash=_hash(f"activation-near-{index}"),
+                    embedding=vector,
+                ),
+            )
+            near_ids.append(memory.id)
+        hub_pairs = {tuple(sorted((hub.id, near_id), key=str)) for near_id in near_ids}
+
+        # Flag off and node count at the threshold: pairwise, all three pairs.
+        pairwise = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+            max_neighbours=2,
+            scalable_enabled=False,
+            scalable_min_nodes=4,
+        )
+        # Flag off and node count strictly above the threshold: scalable.
+        threshold_only = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+            max_neighbours=2,
+            scalable_enabled=False,
+            scalable_min_nodes=3,
+        )
+        # Flag on below the threshold: scalable.
+        flag_only = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.8,
+            max_neighbours=2,
+            scalable_enabled=True,
+            scalable_min_nodes=100,
+        )
+
+        assert {(pair.source_id, pair.target_id) for pair in pairwise.pairs} == hub_pairs
+        assert len(pairwise.pairs) == 3
+        for routed in (threshold_only, flag_only):
+            assert {(pair.source_id, pair.target_id) for pair in routed.pairs} <= hub_pairs
+            # Per-node bounded query, counted from BOTH endpoints: no node
+            # exceeds the neighbour bound, even when it is the hub of a dense
+            # component, regardless of where its UUID sorts.
+            assert max(self._node_degrees(routed.pairs).values(), default=0) <= 2
+            assert routed.edge_total == 3
+
+    async def test_graph_snapshot_scalable_is_deterministic(self, repo, user_id):
+        for index, angle in enumerate([0, 15, 30]):
+            await repo.create_memory(
+                user_id,
+                **self._kwargs(
+                    content=f"deterministic memory {index}",
+                    content_hash=_hash(f"graph-deterministic-{index}"),
+                    embedding=_angled_vector(angle),
+                ),
+            )
+        first = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.7,
+            max_neighbours=2,
+            scalable_enabled=True,
+            scalable_min_nodes=1,
+        )
+        second = await repo.graph_snapshot(
+            user_id,
+            visibility=MemoryVisibility("all"),
+            category=None,
+            limit=10,
+            min_similarity=0.7,
+            max_neighbours=2,
+            scalable_enabled=True,
+            scalable_min_nodes=1,
+        )
+
+        assert [(pair.source_id, pair.target_id, pair.similarity) for pair in first.pairs] == [
+            (pair.source_id, pair.target_id, pair.similarity) for pair in second.pairs
+        ]
+        assert first.edge_total == second.edge_total
+
     # -- related_to ------------------------------------------------------
 
     async def test_related_to_crosses_buckets_but_not_users_or_models(
@@ -1344,16 +1585,12 @@ class MemoryRepositoryContract:
             ),
         )
 
-        results = await repo.related_to(
-            user_id, seed.id, limit=10, min_similarity=0.9
-        )
+        results = await repo.related_to(user_id, seed.id, limit=10, min_similarity=0.9)
 
         assert [item.memory.id for item in results] == [project.id]
         assert incompatible.id not in {item.memory.id for item in results}
         assert foreign.id not in {item.memory.id for item in results}
-        assert await repo.related_to(
-            user_id, uuid.uuid4(), limit=10, min_similarity=0.9
-        ) == []
+        assert await repo.related_to(user_id, uuid.uuid4(), limit=10, min_similarity=0.9) == []
 
     # -- most_important_active ------------------------------------------
 
@@ -1402,9 +1639,7 @@ class MemoryRepositoryContract:
         assert await repo.soft_delete(user_id, row.id) is True
         assert await repo.soft_delete(user_id, row.id) is False
 
-    async def test_soft_delete_false_for_unknown_and_other_user(
-        self, repo, user_id, other_user_id
-    ):
+    async def test_soft_delete_false_for_unknown_and_other_user(self, repo, user_id, other_user_id):
         assert await repo.soft_delete(user_id, uuid.uuid4()) is False
 
         row = await repo.create_memory(
@@ -1426,19 +1661,17 @@ class MemoryRepositoryContract:
         )
         await repo.soft_delete(user_id, row.id)
 
-        items, total = await repo.list_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
+        items, total = await repo.list_active(user_id, visibility=MemoryVisibility("all"), limit=10)
         assert row.id not in {m.id for m in items}
         assert total == 0
 
-        text_results = await self._text_pool(repo, 
-            user_id, "searchword", visibility=MemoryVisibility("all"), limit=10
+        text_results = await self._text_pool(
+            repo, user_id, "searchword", visibility=MemoryVisibility("all"), limit=10
         )
         assert text_results == []
 
-        vector_results = await self._vector_pool(repo, 
-            user_id, vec, visibility=MemoryVisibility("all"), limit=10
+        vector_results = await self._vector_pool(
+            repo, user_id, vec, visibility=MemoryVisibility("all"), limit=10
         )
         assert row.id not in {r.memory.id for r in vector_results}
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import cast, func, literal, or_, select, text, update
+from sqlalchemy import cast, func, literal, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,9 +56,7 @@ def _or_tsquery(query: str) -> Any:
     NULL, so such a query matches no rows instead of raising.
     """
     lexeme = func.unnest(
-        func.tsvector_to_array(
-            func.to_tsvector(cast(TEXT_SEARCH_CONFIG, REGCONFIG), query)
-        )
+        func.tsvector_to_array(func.to_tsvector(cast(TEXT_SEARCH_CONFIG, REGCONFIG), query))
     ).column_valued("lexeme")
     return cast(
         select(func.string_agg(func.quote_literal(lexeme), literal(" | "))).scalar_subquery(),
@@ -114,6 +112,127 @@ class GraphSnapshot:
     pairs: Sequence[GraphPair]
     total: int
     model_mismatch: bool
+    # Number of qualifying undirected pairs (above the similarity floor, same
+    # embedding model) before the per-node neighbour cap is applied. In the
+    # pairwise path this equals ``len(pairs)``; the scalable path derives the
+    # same exact count from the per-node counts of a single LATERAL query.
+    edge_total: int
+
+
+def _scalable_edges_enabled(scalable_enabled: bool, total: int, scalable_min_nodes: int) -> bool:
+    """Route edge computation to the bounded per-node path when either the
+    explicit operator flag is set or the active node count strictly exceeds
+    the activation threshold."""
+    return scalable_enabled or total > scalable_min_nodes
+
+
+def _cap_pairs_by_degree(pairs: Sequence[GraphPair], max_neighbours: int) -> list[GraphPair]:
+    """Greedily keep the strongest pairs under the per-node neighbour cap.
+
+    ``pairs`` are sorted by descending similarity with canonical ids as the
+    stable tie-break, so the strongest edges win when a node is over its cap;
+    a pair is dropped once either endpoint has reached ``max_neighbours``.
+    The fake repository reuses this so both edge paths apply the same cap.
+    """
+    ordered = sorted(
+        pairs,
+        key=lambda pair: (-pair.similarity, str(pair.source_id), str(pair.target_id)),
+    )
+    degree: dict[uuid.UUID, int] = {}
+    capped: list[GraphPair] = []
+    for pair in ordered:
+        if (
+            degree.get(pair.source_id, 0) >= max_neighbours
+            or degree.get(pair.target_id, 0) >= max_neighbours
+        ):
+            continue
+        capped.append(pair)
+        degree[pair.source_id] = degree.get(pair.source_id, 0) + 1
+        degree[pair.target_id] = degree.get(pair.target_id, 0) + 1
+    return capped
+
+
+async def _scalable_graph_edges(
+    session: AsyncSession,
+    *,
+    selected_ids: Sequence[uuid.UUID],
+    user_id: uuid.UUID,
+    min_similarity: float,
+    max_neighbours: int,
+) -> tuple[list[GraphPair], int]:
+    """Per-node bounded kNN edges over the selected subset, in one LATERAL query.
+
+    Each node's LATERAL returns its ``max_neighbours`` strongest qualifying
+    neighbours (``right.id != left.id`` -- the kNN must consider every other
+    node, not only higher ids) plus, via ``COUNT(*) OVER ()``, how many
+    qualifying neighbours that node has in total. The pre-cap pair count is
+    exact: cosine distance and model equality are symmetric, so every
+    qualifying undirected pair is counted from both endpoints and the halved
+    sum of each node's count (once per node) is the pre-cap qualifying pair
+    count.
+
+    The per-node ``LIMIT`` keeps the returned rows bounded even in a dense
+    component; the exact count costs evaluating the qualifying pairs
+    themselves, folded into this single statement instead of a second full
+    pairwise join. Rows are canonicalised to undirected pairs and deduped (a
+    pair can be emitted from both endpoints' top-k), then greedily capped per
+    node so the snapshot itself stays bounded -- not only the service-layer
+    greedy cap.
+    """
+    left = aliased(Memory, name="graph_left")
+    right = aliased(Memory, name="graph_right")
+    distance = left.embedding.cosine_distance(right.embedding)
+    score = (literal(1.0) - distance).label("similarity")
+    neighbours = (
+        select(
+            right.id.label("target_id"),
+            score,
+            func.count().over().label("node_count"),
+        )
+        .where(
+            right.id.in_(selected_ids),
+            right.id != left.id,
+            right.user_id == user_id,
+            right.embedding_model.is_not(None),
+            left.embedding_model == right.embedding_model,
+            distance <= (1.0 - min_similarity),
+        )
+        .order_by(score.desc(), right.id)
+        .limit(max_neighbours)
+        .lateral("graph_neighbours")
+    )
+    stmt = (
+        select(
+            left.id.label("source_id"),
+            neighbours.c.target_id,
+            neighbours.c.similarity,
+            neighbours.c.node_count,
+        )
+        .select_from(left)
+        .join(neighbours, true())
+        .where(
+            left.id.in_(selected_ids),
+            left.user_id == user_id,
+            left.embedding_model.is_not(None),
+        )
+    )
+    rows = (await session.execute(stmt)).all()
+    # ``node_count`` is the same for every row of one node's top-k, so each
+    # source node's count is taken once; every qualifying undirected pair is
+    # then counted from both endpoints, making the halved sum exact.
+    node_counts: dict[uuid.UUID, int] = {}
+    for row in rows:
+        node_counts.setdefault(row.source_id, int(row.node_count))
+    edge_total = sum(node_counts.values()) // 2
+    pairs: list[GraphPair] = []
+    seen: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    for row in rows:
+        source_id, target_id = sorted((row.source_id, row.target_id), key=str)
+        if (source_id, target_id) in seen:
+            continue
+        seen.add((source_id, target_id))
+        pairs.append(GraphPair(source_id, target_id, float(row.similarity)))
+    return _cap_pairs_by_degree(pairs, max_neighbours), edge_total
 
 
 class MemoryRepository:
@@ -250,9 +369,7 @@ class MemoryRepository:
     ) -> tuple[list[tuple[uuid.UUID, int]], int]:
         """Page zero-inclusive active memory counts without selecting content."""
         async with self._sessions.admin() as session:
-            total = (
-                await session.execute(select(func.count()).select_from(User))
-            ).scalar_one()
+            total = (await session.execute(select(func.count()).select_from(User))).scalar_one()
             rows = (
                 await session.execute(
                     select(User.id, User.active_memory_count)
@@ -309,11 +426,7 @@ class MemoryRepository:
             if after is not None:
                 filters.append(Memory.id > after)
             stmt = (
-                select(Memory)
-                .options(*_light())
-                .where(*filters)
-                .order_by(Memory.id)
-                .limit(limit)
+                select(Memory).options(*_light()).where(*filters).order_by(Memory.id).limit(limit)
             )
             return (await session.execute(stmt)).scalars().all()
 
@@ -357,6 +470,7 @@ class MemoryRepository:
         importance: int,
         source_client: str | None,
         metadata: dict[str, Any],
+        memory_id: uuid.UUID | None = None,
     ) -> Memory:
         """Insert a memory. Raises IntegrityError on exact active duplicate."""
         async with self._sessions.for_user(user_id) as session:
@@ -373,6 +487,8 @@ class MemoryRepository:
                 source_client=source_client,
                 metadata_=metadata,
             )
+            if memory_id is not None:
+                memory.id = memory_id
             session.add(memory)
             await session.flush()
             await self._increment_generation(session, user_id)
@@ -465,8 +581,18 @@ class MemoryRepository:
         category: str | None,
         limit: int,
         min_similarity: float,
+        max_neighbours: int = 4,
+        scalable_enabled: bool = False,
+        scalable_min_nodes: int = 2000,
     ) -> GraphSnapshot:
-        """Select bounded active nodes and comparable semantic pairs under RLS."""
+        """Select bounded active nodes and comparable semantic pairs under RLS.
+
+        Edges are computed by a pairwise self-join by default. When
+        ``scalable_enabled`` is set or the active node count strictly exceeds
+        ``scalable_min_nodes``, a single bounded per-node kNN LATERAL query
+        over the selected subset is used instead; the pre-cap qualifying pair
+        count is still reported exactly by both paths.
+        """
         async with self._sessions.for_user(user_id) as session:
             filters = self._filters(user_id, visibility=visibility, category=category)
             total = (
@@ -485,32 +611,44 @@ class MemoryRepository:
                 len(models) > 1
             )
             if len(memories) < 2:
-                return GraphSnapshot(memories, [], total, model_mismatch)
+                return GraphSnapshot(memories, [], total, model_mismatch, edge_total=0)
 
             selected_ids = [memory.id for memory in memories]
-            left = aliased(Memory, name="graph_left")
-            right = aliased(Memory, name="graph_right")
-            distance = left.embedding.cosine_distance(right.embedding)
-            score = (literal(1.0) - distance).label("similarity")
-            pair_stmt = (
-                select(left.id.label("source_id"), right.id.label("target_id"), score)
-                .where(
-                    left.id.in_(selected_ids),
-                    right.id.in_(selected_ids),
-                    left.id < right.id,
-                    left.user_id == user_id,
-                    right.user_id == user_id,
-                    left.embedding_model.is_not(None),
-                    left.embedding_model == right.embedding_model,
-                    distance <= (1.0 - min_similarity),
+            if _scalable_edges_enabled(scalable_enabled, total, scalable_min_nodes):
+                pairs, edge_total = await _scalable_graph_edges(
+                    session,
+                    selected_ids=selected_ids,
+                    user_id=user_id,
+                    min_similarity=min_similarity,
+                    max_neighbours=max_neighbours,
                 )
-                .order_by(score.desc(), left.id, right.id)
-            )
-            pairs = [
-                GraphPair(row.source_id, row.target_id, float(row.similarity))
-                for row in (await session.execute(pair_stmt)).all()
-            ]
-            return GraphSnapshot(memories, pairs, total, model_mismatch)
+            else:
+                left = aliased(Memory, name="graph_left")
+                right = aliased(Memory, name="graph_right")
+                distance = left.embedding.cosine_distance(right.embedding)
+                score = (literal(1.0) - distance).label("similarity")
+                pair_stmt = (
+                    select(left.id.label("source_id"), right.id.label("target_id"), score)
+                    .select_from(left, right)
+                    .where(
+                        left.id.in_(selected_ids),
+                        right.id.in_(selected_ids),
+                        left.id < right.id,
+                        left.user_id == user_id,
+                        right.user_id == user_id,
+                        left.embedding_model.is_not(None),
+                        right.embedding_model.is_not(None),
+                        left.embedding_model == right.embedding_model,
+                        distance <= (1.0 - min_similarity),
+                    )
+                    .order_by(score.desc(), left.id, right.id)
+                )
+                pairs = [
+                    GraphPair(row.source_id, row.target_id, float(row.similarity))
+                    for row in (await session.execute(pair_stmt)).all()
+                ]
+                edge_total = len(pairs)
+            return GraphSnapshot(memories, pairs, total, model_mismatch, edge_total=edge_total)
 
     async def related_to(
         self,
@@ -877,9 +1015,7 @@ class MemoryRepository:
                 source_client=(
                     source_client if source_client is not None else original.source_client
                 ),
-                metadata_=(
-                    metadata if metadata is not None else dict(original.metadata_ or {})
-                ),
+                metadata_=(metadata if metadata is not None else dict(original.metadata_ or {})),
             )
             session.add(replacement)
             # Retire the original first so it leaves the partial unique index
@@ -974,9 +1110,7 @@ class MemoryRepository:
                 embedding=embedding,
                 embedding_model=embedding_model,
                 importance=(
-                    importance
-                    if importance is not None
-                    else max(row.importance for row in rows)
+                    importance if importance is not None else max(row.importance for row in rows)
                 ),
                 source_client=source_client,
                 metadata_=metadata,
@@ -992,9 +1126,7 @@ class MemoryRepository:
             await session.refresh(replacement, attribute_names=["created_at"])
             return replacement, [row.id for row in rows]
 
-    async def mark_reconfirmed(
-        self, user_id: uuid.UUID, memory_id: uuid.UUID
-    ) -> Memory | None:
+    async def mark_reconfirmed(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
         """Stamp ``reconfirmed_at`` on an active memory and return the fresh row.
 
         Called when identical content is re-stored: the claim was just observed
@@ -1022,9 +1154,7 @@ class MemoryRepository:
                 )
             ).scalar_one_or_none()
 
-    async def mark_recalled(
-        self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
-    ) -> None:
+    async def mark_recalled(self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]) -> None:
         """Record that these memories matched a ``recall`` query.
 
         Recall hits only: ``context`` snapshot serves go through
@@ -1161,9 +1291,7 @@ class MemoryRepository:
     async def get_memory_generation(self, user_id: uuid.UUID) -> int:
         async with self._sessions.for_user(user_id) as session:
             value = (
-                await session.execute(
-                    select(User.memory_generation).where(User.id == user_id)
-                )
+                await session.execute(select(User.memory_generation).where(User.id == user_id))
             ).scalar_one()
             return int(value)
 
@@ -1194,9 +1322,7 @@ class MemoryRepository:
         async with self._sessions.for_user(user_id) as session:
             current = (
                 await session.execute(
-                    select(User.memory_generation)
-                    .where(User.id == user_id)
-                    .with_for_update()
+                    select(User.memory_generation).where(User.id == user_id).with_for_update()
                 )
             ).scalar_one()
             if int(current) != expected_generation:
@@ -1311,9 +1437,7 @@ class MemoryRepository:
         category: str | None,
     ) -> list[Any]:
         """Translate domain visibility into PostgreSQL adapter expressions."""
-        filters = self._visibility_filters(
-            user_id, visibility=visibility, active_only=True
-        )
+        filters = self._visibility_filters(user_id, visibility=visibility, active_only=True)
         if category is not None:
             filters.append(Memory.category == category)
         return filters

@@ -806,14 +806,22 @@
         "type": "object"
       },
       "MemoryGraphResponse": {
-        "description": "A bounded graph projection that never contains stored embeddings.",
+        "description": "A bounded graph projection that never contains stored embeddings.\n\n``total``/``truncated`` describe the presented node set (``total`` counts\nevery active memory under the current filters, before the node ceiling).\n``edge_total`` counts the qualifying undirected pairs above the minimum\nsimilarity with matching embedding models, before the per-node neighbour\ncap; ``edges_truncated`` is true when at least one such pair was dropped\nbecause an endpoint reached the cap.",
         "properties": {
+          "edge_total": {
+            "title": "Edge Total",
+            "type": "integer"
+          },
           "edges": {
             "items": {
               "$ref": "#/components/schemas/MemoryGraphEdge"
             },
             "title": "Edges",
             "type": "array"
+          },
+          "edges_truncated": {
+            "title": "Edges Truncated",
+            "type": "boolean"
           },
           "model_mismatch": {
             "title": "Model Mismatch",
@@ -840,7 +848,9 @@
           "edges",
           "total",
           "truncated",
-          "model_mismatch"
+          "model_mismatch",
+          "edge_total",
+          "edges_truncated"
         ],
         "title": "MemoryGraphResponse",
         "type": "object"
@@ -974,6 +984,131 @@
           "count"
         ],
         "title": "MemoryVolume",
+        "type": "object"
+      },
+      "MergeMemoriesRequest": {
+        "properties": {
+          "category": {
+            "enum": [
+              "preference",
+              "decision",
+              "constraint",
+              "fact"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "importance": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Importance"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "source_client": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Client"
+          },
+          "source_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "minItems": 2,
+            "title": "Source Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "source_ids",
+          "content",
+          "category"
+        ],
+        "title": "MergeMemoriesRequest",
+        "type": "object"
+      },
+      "MergeResult": {
+        "description": "Outcome of ``merge_memories``.\n\n``merged`` is False when any source id is unknown, foreign or already\nretired -- indistinguishable on purpose -- and nothing was changed.\n``superseded_ids`` lists every retired source; each is linked to the new\nmemory, so ``get_memory`` with history recovers exactly what was folded\nin. ``similar`` keeps the consolidation loop going: same-subject\nmemories that still remain after this merge.",
+        "properties": {
+          "memory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "merged": {
+            "title": "Merged",
+            "type": "boolean"
+          },
+          "similar": {
+            "items": {
+              "$ref": "#/components/schemas/SimilarMemory"
+            },
+            "title": "Similar",
+            "type": "array"
+          },
+          "superseded_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Superseded Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "merged"
+        ],
+        "title": "MergeResult",
         "type": "object"
       },
       "ProfileBlock": {
@@ -1306,6 +1441,109 @@
           "score"
         ],
         "title": "RecalledMemory",
+        "type": "object"
+      },
+      "ReconfirmResult": {
+        "description": "Outcome of stamping freshness on an active memory.",
+        "properties": {
+          "memory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reconfirmed": {
+            "title": "Reconfirmed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reconfirmed"
+        ],
+        "title": "ReconfirmResult",
+        "type": "object"
+      },
+      "RelatedMemoriesResult": {
+        "description": "Bounded thematic neighbours for one seed memory.",
+        "properties": {
+          "memory_id": {
+            "format": "uuid",
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "related": {
+            "items": {
+              "$ref": "#/components/schemas/RelatedMemory"
+            },
+            "title": "Related",
+            "type": "array"
+          }
+        },
+        "required": [
+          "memory_id",
+          "related"
+        ],
+        "title": "RelatedMemoriesResult",
+        "type": "object"
+      },
+      "RelatedMemory": {
+        "description": "A thematic neighbour of an active seed memory.",
+        "properties": {
+          "category": {
+            "enum": [
+              "preference",
+              "decision",
+              "constraint",
+              "fact"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "project"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "similarity": {
+            "title": "Similarity",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "category",
+          "scope",
+          "similarity"
+        ],
+        "title": "RelatedMemory",
         "type": "object"
       },
       "RememberResult": {
@@ -2692,6 +2930,57 @@
         ]
       }
     },
+    "/me/memories/merge": {
+      "post": {
+        "operationId": "merge_memories_me_memories_merge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeMemoriesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Merge Memories",
+        "tags": [
+          "self-service"
+        ]
+      }
+    },
     "/me/memories/reassign-project": {
       "post": {
         "operationId": "reassign_project_me_memories_reassign_project_post",
@@ -3141,6 +3430,128 @@
           }
         ],
         "summary": "Memory History",
+        "tags": [
+          "self-service"
+        ]
+      }
+    },
+    "/me/memories/{memory_id}/reconfirm": {
+      "post": {
+        "operationId": "reconfirm_memory_me_memories__memory_id__reconfirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Memory Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconfirmResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Reconfirm Memory",
+        "tags": [
+          "self-service"
+        ]
+      }
+    },
+    "/me/memories/{memory_id}/related": {
+      "get": {
+        "operationId": "related_memories_me_memories__memory_id__related_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelatedMemoriesResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "413": {
+            "description": "Request body too large"
+          },
+          "422": {
+            "description": "Validation error"
+          },
+          "503": {
+            "description": "Dependency unavailable"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
+        "summary": "Related Memories",
         "tags": [
           "self-service"
         ]

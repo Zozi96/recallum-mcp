@@ -24,6 +24,8 @@ from recallum.db.repositories.memory_repo import (
     GraphSnapshot,
     ProfileGenerationConflict,
     ScoredMemory,
+    _cap_pairs_by_degree,
+    _scalable_edges_enabled,
 )
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryVisibility
@@ -152,6 +154,9 @@ class FakeMemoryRepository:
         self.profiles: dict[tuple[uuid.UUID, str], Any] = {}
         self.last_list_offset: int | None = None
         self.profile_rebuild_failures: int = 0
+        # Routing marker for the graph edge strategy: None until graph_snapshot
+        # runs, then True when the bounded per-node path was selected.
+        self.last_graph_scalable: bool | None = None
         self.generations: dict[uuid.UUID, int] = {}
 
     def _bump(self, user_id: uuid.UUID) -> None:
@@ -184,7 +189,7 @@ class FakeMemoryRepository:
                 raise IntegrityError("create_memory", {}, Exception("duplicate key"))
         metadata = kwargs.pop("metadata", {})
         memory = Memory(
-            id=uuid.uuid4(),
+            id=kwargs.pop("memory_id", None) or uuid.uuid4(),
             user_id=user_id,
             created_at=datetime.now(UTC),
             deleted_at=None,
@@ -259,9 +264,7 @@ class FakeMemoryRepository:
         capped = min(limit, MAX_CANDIDATES)
         return CandidatePools(
             vector=(
-                self._vector_pool(
-                    user_id, embedding, embedding_model, visibility, category, capped
-                )
+                self._vector_pool(user_id, embedding, embedding_model, visibility, category, capped)
                 if embedding is not None
                 else []
             ),
@@ -283,6 +286,9 @@ class FakeMemoryRepository:
         category: str | None,
         limit: int,
         min_similarity: float,
+        max_neighbours: int = 4,
+        scalable_enabled: bool = False,
+        scalable_min_nodes: int = 2000,
     ) -> GraphSnapshot:
         rows = sorted(
             self._filtered(user_id, visibility, category),
@@ -291,22 +297,47 @@ class FakeMemoryRepository:
         rows.sort(key=lambda memory: memory.created_at, reverse=True)
         rows.sort(key=lambda memory: memory.importance, reverse=True)
         selected = rows[:limit]
-        pairs = []
+        all_pairs = []
         for index, left in enumerate(selected):
             for right in selected[index + 1 :]:
-                if (
-                    left.embedding_model is None
-                    or left.embedding_model != right.embedding_model
-                ):
+                if left.embedding_model is None or left.embedding_model != right.embedding_model:
                     continue
                 similarity = _cosine(left.embedding, right.embedding)
                 if similarity >= min_similarity:
                     source_id, target_id = sorted((left.id, right.id), key=str)
-                    pairs.append(GraphPair(source_id, target_id, similarity))
+                    all_pairs.append(GraphPair(source_id, target_id, similarity))
+        edge_total = len(all_pairs)
+        self.last_graph_scalable = _scalable_edges_enabled(
+            scalable_enabled, len(rows), scalable_min_nodes
+        )
+        if self.last_graph_scalable:
+            # Mirrors the repository's bounded per-node kNN path: every node
+            # keeps its strongest qualifying neighbours regardless of UUID
+            # order, pairs are canonicalised/deduped, then capped per node so
+            # the snapshot itself stays bounded.
+            bounded = []
+            for memory in selected:
+                node_pairs = [
+                    pair for pair in all_pairs if memory.id in (pair.source_id, pair.target_id)
+                ]
+                node_pairs.sort(
+                    key=lambda pair: (-pair.similarity, str(pair.source_id), str(pair.target_id))
+                )
+                bounded.extend(node_pairs[:max_neighbours])
+            seen: set[tuple[uuid.UUID, uuid.UUID]] = set()
+            deduped = []
+            for pair in bounded:
+                if (pair.source_id, pair.target_id) in seen:
+                    continue
+                seen.add((pair.source_id, pair.target_id))
+                deduped.append(pair)
+            pairs = _cap_pairs_by_degree(deduped, max_neighbours)
+        else:
+            pairs = all_pairs
         pairs.sort(key=lambda pair: (-pair.similarity, str(pair.source_id), str(pair.target_id)))
         models = {memory.embedding_model for memory in selected if memory.embedding_model}
         mismatch = any(memory.embedding_model is None for memory in selected) or len(models) > 1
-        return GraphSnapshot(selected, pairs, len(rows), mismatch)
+        return GraphSnapshot(selected, pairs, len(rows), mismatch, edge_total=edge_total)
 
     async def related_to(
         self,
@@ -553,9 +584,7 @@ class FakeMemoryRepository:
     ) -> int:
         return len(self._filtered(user_id, visibility, None))
 
-    async def get_profile(
-        self, user_id: uuid.UUID, *, project: str | None = None
-    ) -> Any:
+    async def get_profile(self, user_id: uuid.UUID, *, project: str | None = None) -> Any:
         key = (user_id, project or "")
         row = self.profiles.get(key)
         if row is None:
@@ -613,11 +642,13 @@ class FakeMemoryRepository:
     ):
         rows = self._filtered(user_id, visibility, None)
         static = [
-            m for m in rows
+            m
+            for m in rows
             if m.category in {"preference", "constraint"} or m.importance >= static_min_importance
         ]
         dynamic = [
-            m for m in rows
+            m
+            for m in rows
             if m.last_recalled_at is not None and m.last_recalled_at >= dynamic_since
         ]
         static.sort(key=lambda m: str(m.id))
@@ -647,9 +678,7 @@ class FakeMemoryRepository:
             if m.scope == "project" and m.project == to_project
         }
         source = [
-            m
-            for m in self._active(user_id)
-            if m.scope == "project" and m.project == from_project
+            m for m in self._active(user_id) if m.scope == "project" and m.project == from_project
         ]
         conflicts = sorted(
             (m for m in source if m.content_hash in target_hashes),
@@ -879,10 +908,7 @@ class FakeUserRepository:
             if keys is None:
                 active = 0
             else:
-                active = sum(
-                    key.revoked_at is None
-                    for key in await keys.list_for_user(user.id)
-                )
+                active = sum(key.revoked_at is None for key in await keys.list_for_user(user.id))
             rows.append((user, active))
         return rows, len(ordered)
 

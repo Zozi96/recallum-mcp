@@ -6,8 +6,9 @@ locally with Ollama, storage is PostgreSQL with pgvector.
 
 ## Features
 
-- **Nine MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
-  `get_memory`, `list_memories`, `update`, `merge_memories`, `forget`.
+- **Eleven MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
+  `get_memory`, `list_memories`, `update`, `merge_memories`,
+  `related_memories`, `reconfirm`, `forget`.
 - **Explicit supersession**: `update` retires a memory and links it to its
   replacement; `merge_memories` consolidates several restatements into one
   linked replacement; `remember` reports similar existing memories so
@@ -48,6 +49,7 @@ docker compose exec recallum uv run --no-sync recallum-admin issue-key --email y
 ```bash
 uv sync
 uv run pytest tests/unit                 # fast, no external services
+uv run pytest tests/unit/test_mcp_tools_docs.py # MCP tool-surface docs gate
 uv run pytest tests/integration          # needs Docker (pgvector container)
 uv run ruff check recallum tests
 ```

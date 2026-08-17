@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -25,6 +25,12 @@ def _user(container, email: str, password: str = "secret"):
     user = asyncio.run(container.api_key_service().create_user(email))
     asyncio.run(container.password_service().set_password(user, password))
     return user
+
+
+def _backdate(fakes, memory_id: str) -> None:
+    fakes["memories"].rows[uuid.UUID(memory_id)].created_at = datetime.now(UTC) - timedelta(
+        days=200
+    )
 
 
 def test_query_integer_contract_accepts_canonical_values_and_rejects_json_forms(monkeypatch):
@@ -81,10 +87,7 @@ def test_json_importance_rejects_ambiguous_and_out_of_range_values_before_servic
         )
         assert calls == 1
         for value in ('"7"', "true", "1.0"):
-            assert (
-                client.get("/api/v1/me/memories", params={"limit": value}).status_code
-                == 422
-            )
+            assert client.get("/api/v1/me/memories", params={"limit": value}).status_code == 422
         assert calls == 1
 
 
@@ -273,9 +276,7 @@ def test_embedding_degradation_and_key_ownership():
         assert recall.headers["Sunset"]
         assert recall.headers["Cache-Control"] == "no-store"
         assert recall.headers["Pragma"] == "no-cache"
-        post_recall = client.post(
-            "/api/v1/me/memories/search", json={"query": "Searchable phrase"}
-        )
+        post_recall = client.post("/api/v1/me/memories/search", json={"query": "Searchable phrase"})
         assert post_recall.status_code == 200
         assert post_recall.json()["mode"] == recall.json()["mode"]
         assert [item["id"] for item in post_recall.json()["results"]] == [
@@ -329,6 +330,8 @@ def test_router_requires_session_and_empty_statistics_are_zeroed():
             "total": 0,
             "truncated": False,
             "model_mismatch": False,
+            "edge_total": 0,
+            "edges_truncated": False,
         }
         assert client.get("/api/v1/me/stats").json() == {
             "active": 0,
@@ -377,9 +380,9 @@ def test_memory_graph_contract_filters_and_omits_vectors():
             "/api/v1/me/memories",
             json={"content": "other project", "category": "fact", "project": "beta"},
         )
-        fakes["memories"].rows[uuid.UUID(other.json()["memory"]["id"])].embedding_model = (
-            "legacy-model"
-        )
+        fakes["memories"].rows[
+            uuid.UUID(other.json()["memory"]["id"])
+        ].embedding_model = "legacy-model"
 
         response = client.get(
             "/api/v1/me/memory-graph",
@@ -401,9 +404,9 @@ def test_memory_graph_contract_filters_and_omits_vectors():
         assert "metadata" not in response.text
 
         whole_graph = client.get("/api/v1/me/memory-graph").json()
-        connected_ids = {
-            edge["source_id"] for edge in whole_graph["edges"]
-        } | {edge["target_id"] for edge in whole_graph["edges"]}
+        connected_ids = {edge["source_id"] for edge in whole_graph["edges"]} | {
+            edge["target_id"] for edge in whole_graph["edges"]
+        }
         assert other.json()["memory"]["id"] not in connected_ids
         assert whole_graph["model_mismatch"] is True
 
@@ -513,9 +516,7 @@ def test_search_post_rejects_invalid_bodies_and_get_keeps_query_out_of_logs(capl
         assert client.post("/api/v1/me/memories/search", json={"query": ""}).status_code == 422
         assert client.post("/api/v1/me/memories/search", json={"query": 1}).status_code == 422
         with caplog.at_level("DEBUG"):
-            response = client.get(
-                "/api/v1/me/memories/search", params={"query": sentinel}
-            )
+            response = client.get("/api/v1/me/memories/search", params={"query": sentinel})
         assert response.status_code == 200
         assert response.headers["Deprecation"] == "true"
         assert response.headers["Sunset"] == Settings().web.get_search_sunset
@@ -585,3 +586,432 @@ def test_reassign_project_moves_memories_and_reports_conflicts():
         assert detail.status_code == 200
         assert detail.json()["recall_count"] == 0
         assert "reconfirmed_at" in detail.json()
+
+
+def test_related_neighbours_are_bounded_vector_free_and_delegate(monkeypatch):
+    vectors = {
+        "seed phrase": [1.0, 0.0],
+        "related one": [1.0, 0.05],
+        "related two": [1.0, 0.1],
+        "related three": [1.0, 0.15],
+        "related four": [1.0, 0.2],
+        "related five": [1.0, 0.25],
+        "unrelated topic": [0.0, 1.0],
+    }
+    container, _fakes = build_test_container(embedder=ScriptedEmbeddingClient(vectors))
+    user = _user(container, "related@example.com")
+    service = container.memory_service()
+    calls = []
+    original = service.related_memories
+
+    async def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "related_memories", counted)
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+
+        def create(content: str) -> dict:
+            return client.post(
+                "/api/v1/me/memories", json={"content": content, "category": "fact"}
+            ).json()["memory"]
+
+        seed = create("seed phrase")
+        related_ids = {
+            create(content)["id"]
+            for content in (
+                "related one",
+                "related two",
+                "related three",
+                "related four",
+                "related five",
+            )
+        }
+        create("unrelated topic")
+
+        response = client.get(f"/api/v1/me/memories/{seed['id']}/related")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["memory_id"] == seed["id"]
+        assert len(body["related"]) <= Settings().limits.graph_max_neighbours
+        assert {item["id"] for item in body["related"]} <= related_ids
+        assert body["related"][0]["content"] == "related one"
+        assert "embedding" not in response.text
+        assert "hash" not in response.text
+        assert calls[-1][0][0] == user.id
+        assert calls[-1][0][1] == uuid.UUID(seed["id"])
+        assert calls[-1][1] == {"limit": None}
+
+        bounded = client.get(f"/api/v1/me/memories/{seed['id']}/related", params={"limit": 2})
+        assert bounded.status_code == 200
+        assert len(bounded.json()["related"]) == 2
+        assert calls[-1][1] == {"limit": 2}
+        assert (
+            client.get(f"/api/v1/me/memories/{seed['id']}/related", params={"limit": 0}).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                f"/api/v1/me/memories/{seed['id']}/related", params={"limit": "two"}
+            ).status_code
+            == 422
+        )
+        assert calls[-1][1] == {"limit": 2}
+
+
+def test_related_neighbours_of_unknown_foreign_and_retired_seeds_are_indistinguishable():
+    container, _ = build_test_container()
+    alice = _user(container, "alice-related@example.com")
+    bob = _user(container, "bob-related@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, alice.email)
+        client.post(
+            "/api/v1/me/memories", json={"content": "alice active seed", "category": "fact"}
+        )
+        retired = client.post(
+            "/api/v1/me/memories", json={"content": "alice to retire", "category": "fact"}
+        ).json()["memory"]
+        client.post(
+            f"/api/v1/me/memories/{retired['id']}/supersede",
+            json={"content": "alice replacement"},
+        )
+        _login(client, bob.email)
+        foreign = client.post(
+            "/api/v1/me/memories", json={"content": "bob secret seed", "category": "constraint"}
+        ).json()["memory"]
+        _login(client, alice.email)
+
+        for seed_id in (str(uuid.uuid4()), foreign["id"], retired["id"]):
+            response = client.get(f"/api/v1/me/memories/{seed_id}/related")
+            assert response.status_code == 200
+            assert response.json() == {"memory_id": seed_id, "related": []}
+            assert "bob secret seed" not in response.text
+
+
+def test_reconfirm_flips_stale_status_and_is_visible_on_read():
+    container, fakes = build_test_container()
+    user = _user(container, "reconfirm@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        memory = client.post(
+            "/api/v1/me/memories", json={"content": "still true", "category": "fact"}
+        ).json()["memory"]
+        _backdate(fakes, memory["id"])
+
+        stale_before = client.get("/api/v1/me/memories", params={"stale": "true"}).json()
+        assert [item["id"] for item in stale_before["items"]] == [memory["id"]]
+        assert "embedding" not in client.get("/api/v1/me/memories", params={"stale": "true"}).text
+
+        response = client.post(f"/api/v1/me/memories/{memory['id']}/reconfirm")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["reconfirmed"] is True
+        assert body["memory"]["id"] == memory["id"]
+        assert body["memory"]["content"] == "still true"
+        stamped = datetime.fromisoformat(body["memory"]["reconfirmed_at"])
+        assert abs((datetime.now(UTC) - stamped).total_seconds()) < 60
+        assert "embedding" not in response.text
+        assert "hash" not in response.text
+
+        detail = client.get(f"/api/v1/me/memories/{memory['id']}").json()
+        assert detail["reconfirmed_at"] == body["memory"]["reconfirmed_at"]
+        assert detail["content"] == "still true"
+        stale_ids = {
+            item["id"]
+            for item in client.get("/api/v1/me/memories", params={"stale": "true"}).json()["items"]
+        }
+        fresh_ids = {
+            item["id"]
+            for item in client.get("/api/v1/me/memories", params={"stale": "false"}).json()["items"]
+        }
+        assert memory["id"] not in stale_ids
+        assert memory["id"] in fresh_ids
+
+
+def test_reconfirm_rejects_unknown_foreign_and_retired_without_changes():
+    container, fakes = build_test_container()
+    alice = _user(container, "alice-rec@example.com")
+    bob = _user(container, "bob-rec@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, alice.email)
+        client.post("/api/v1/me/memories", json={"content": "alice stays", "category": "fact"})
+        retired = client.post(
+            "/api/v1/me/memories", json={"content": "alice retires", "category": "fact"}
+        ).json()["memory"]
+        client.post(
+            f"/api/v1/me/memories/{retired['id']}/supersede",
+            json={"content": "alice next"},
+        )
+        _login(client, bob.email)
+        bob_memory = client.post(
+            "/api/v1/me/memories", json={"content": "bob rec stays", "category": "constraint"}
+        ).json()["memory"]
+        _login(client, alice.email)
+
+        outcomes = [
+            client.post(f"/api/v1/me/memories/{str(uuid.uuid4())}/reconfirm"),
+            client.post(f"/api/v1/me/memories/{bob_memory['id']}/reconfirm"),
+            client.post(f"/api/v1/me/memories/{retired['id']}/reconfirm"),
+        ]
+        for response in outcomes:
+            assert response.status_code == 404
+            assert response.json() == {"detail": "Memory not found"}
+
+        _login(client, bob.email)
+        bob_detail = client.get(f"/api/v1/me/memories/{bob_memory['id']}").json()
+        assert bob_detail["reconfirmed_at"] is None
+
+
+def test_merge_retires_sources_links_history_and_is_idempotent():
+    container, _ = build_test_container()
+    user = _user(container, "merge@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        first = client.post(
+            "/api/v1/me/memories", json={"content": "merge source one", "category": "fact"}
+        ).json()["memory"]
+        second = client.post(
+            "/api/v1/me/memories", json={"content": "merge source two", "category": "fact"}
+        ).json()["memory"]
+
+        response = client.post(
+            "/api/v1/me/memories/merge",
+            json={
+                "source_ids": [first["id"], second["id"]],
+                "content": "merged claim",
+                "category": "fact",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["merged"] is True
+        assert set(body["superseded_ids"]) == {first["id"], second["id"]}
+        survivor = body["memory"]
+        assert survivor["id"] not in {first["id"], second["id"]}
+        assert survivor["content"] == "merged claim"
+        assert "embedding" not in response.text
+        assert "hash" not in response.text
+
+        assert client.get(f"/api/v1/me/memories/{first['id']}").status_code == 404
+        assert client.get(f"/api/v1/me/memories/{second['id']}").status_code == 404
+        history = client.get(f"/api/v1/me/memories/{survivor['id']}/history").json()["items"]
+        assert {item["content"] for item in history} == {"merge source one", "merge source two"}
+
+        again = client.post(
+            "/api/v1/me/memories/merge",
+            json={
+                "source_ids": [first["id"], second["id"]],
+                "content": "merged claim",
+                "category": "fact",
+            },
+        )
+        assert again.status_code == 404
+        assert client.get("/api/v1/me/stats").json()["active"] == 1
+
+
+def test_merge_validation_matrix_is_rejected_without_mutation():
+    container, _ = build_test_container()
+    user = _user(container, "merge-validation@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+
+        def create(content: str, project: str | None = None) -> dict:
+            payload = {"content": content, "category": "fact"}
+            if project is not None:
+                payload["project"] = project
+            return client.post("/api/v1/me/memories", json=payload).json()["memory"]
+
+        a = create("mv source a")
+        b = create("mv source b")
+        project_x = create("mv x one", project="x")
+        project_y = create("mv y one", project="y")
+        many = [create(f"mv many {index}") for index in range(11)]
+
+        invalid = [
+            {"source_ids": [a["id"]], "content": "x", "category": "fact"},
+            {"source_ids": [a["id"], a["id"]], "content": "x", "category": "fact"},
+            {"source_ids": [m["id"] for m in many], "content": "x", "category": "fact"},
+            {"source_ids": [a["id"], b["id"]], "content": "   ", "category": "fact"},
+            {"source_ids": [project_x["id"], project_y["id"]], "content": "x", "category": "fact"},
+        ]
+        for payload in invalid:
+            assert client.post("/api/v1/me/memories/merge", json=payload).status_code == 422
+        assert (
+            client.post(
+                "/api/v1/me/memories/merge",
+                json={"source_ids": [a["id"], b["id"]], "content": "x", "category": "nonsense"},
+            ).status_code
+            == 422
+        )
+        for memory in (a, b, project_x, project_y):
+            assert client.get(f"/api/v1/me/memories/{memory['id']}").status_code == 200
+        assert client.get("/api/v1/me/stats").json()["active"] == 15
+
+
+def test_merge_with_foreign_source_fails_for_both_users():
+    container, _ = build_test_container()
+    alice = _user(container, "alice-merge@example.com")
+    bob = _user(container, "bob-merge@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, alice.email)
+        alice_memory = client.post(
+            "/api/v1/me/memories", json={"content": "alice merge", "category": "fact"}
+        ).json()["memory"]
+        _login(client, bob.email)
+        bob_memory = client.post(
+            "/api/v1/me/memories", json={"content": "bob merge", "category": "fact"}
+        ).json()["memory"]
+        _login(client, alice.email)
+
+        response = client.post(
+            "/api/v1/me/memories/merge",
+            json={
+                "source_ids": [alice_memory["id"], bob_memory["id"]],
+                "content": "cross user merge",
+                "category": "fact",
+            },
+        )
+        assert response.status_code == 404
+        assert client.get(f"/api/v1/me/memories/{alice_memory['id']}").status_code == 200
+        _login(client, bob.email)
+        assert client.get(f"/api/v1/me/memories/{bob_memory['id']}").status_code == 200
+
+
+def test_merge_literal_route_is_not_captured_by_parametrized_routes(monkeypatch):
+    container, _ = build_test_container()
+    user = _user(container, "ordering@example.com")
+    service = container.memory_service()
+    calls = []
+    original = service.merge
+
+    async def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "merge", counted)
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        memory = client.post(
+            "/api/v1/me/memories", json={"content": "literal route", "category": "fact"}
+        ).json()["memory"]
+        response = client.post(
+            "/api/v1/me/memories/merge",
+            json={
+                "source_ids": [str(uuid.uuid4()), memory["id"]],
+                "content": "x",
+                "category": "fact",
+            },
+        )
+        # The literal path matched: the service was reached with the real body,
+        # never an invalid-uuid 422 for a captured ``{memory_id}`` route.
+        assert response.status_code == 404
+        assert len(calls) == 1
+        assert calls[0][0][0] == user.id
+        assert str(calls[0][1]["source_ids"][1]) == memory["id"]
+
+
+def test_stale_filter_reaches_service_with_the_authenticated_user(monkeypatch):
+    container, fakes = build_test_container()
+    user = _user(container, "stale-queue@example.com")
+    service = container.memory_service()
+    calls = []
+    original = service.list_memories
+
+    async def counted(user_id, **kwargs):
+        calls.append((user_id, kwargs))
+        return await original(user_id, **kwargs)
+
+    monkeypatch.setattr(service, "list_memories", counted)
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        fresh = client.post(
+            "/api/v1/me/memories", json={"content": "fresh memory", "category": "fact"}
+        ).json()["memory"]
+        stale = client.post(
+            "/api/v1/me/memories", json={"content": "old memory", "category": "fact"}
+        ).json()["memory"]
+        _backdate(fakes, stale["id"])
+
+        stale_response = client.get("/api/v1/me/memories", params={"stale": "true"})
+        assert stale_response.status_code == 200
+        assert [item["id"] for item in stale_response.json()["items"]] == [stale["id"]]
+        assert "embedding" not in stale_response.text
+        assert calls[-1][0] == user.id
+        assert calls[-1][1]["stale"] is True
+
+        fresh_response = client.get("/api/v1/me/memories", params={"stale": "false"})
+        assert [item["id"] for item in fresh_response.json()["items"]] == [fresh["id"]]
+        assert calls[-1][1]["stale"] is False
+
+        unfiltered = client.get("/api/v1/me/memories")
+        assert len(unfiltered.json()["items"]) == 2
+        assert calls[-1][1]["stale"] is None
+
+
+def test_reconfirm_merge_and_related_delegate_with_forwarded_params(monkeypatch):
+    container, _ = build_test_container()
+    user = _user(container, "delegation@example.com")
+    service = container.memory_service()
+    calls = {"related": [], "reconfirm": [], "merge": []}
+    originals = {
+        "related": service.related_memories,
+        "reconfirm": service.reconfirm,
+        "merge": service.merge,
+    }
+
+    def make_spy(name: str):
+        async def spy(*args, **kwargs):
+            calls[name].append((args, kwargs))
+            return await originals[name](*args, **kwargs)
+
+        return spy
+
+    monkeypatch.setattr(service, "related_memories", make_spy("related"))
+    monkeypatch.setattr(service, "reconfirm", make_spy("reconfirm"))
+    monkeypatch.setattr(service, "merge", make_spy("merge"))
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        first = client.post(
+            "/api/v1/me/memories", json={"content": "delegate first", "category": "fact"}
+        ).json()["memory"]
+        second = client.post(
+            "/api/v1/me/memories", json={"content": "delegate second", "category": "fact"}
+        ).json()["memory"]
+
+        client.get(f"/api/v1/me/memories/{first['id']}/related", params={"limit": 2})
+        client.post(f"/api/v1/me/memories/{second['id']}/reconfirm")
+        client.post(
+            "/api/v1/me/memories/merge",
+            json={
+                "source_ids": [first["id"], second["id"]],
+                "content": "delegated merge",
+                "category": "fact",
+                "importance": 7,
+                "metadata": {"k": "v"},
+                "source_client": "test",
+            },
+        )
+
+        assert calls["related"] == [((user.id, uuid.UUID(first["id"])), {"limit": 2})]
+        assert calls["reconfirm"] == [((user.id, uuid.UUID(second["id"])), {})]
+        args, kwargs = calls["merge"][0]
+        assert args == (user.id,)
+        assert kwargs == {
+            "source_ids": [uuid.UUID(first["id"]), uuid.UUID(second["id"])],
+            "content": "delegated merge",
+            "category": "fact",
+            "importance": 7,
+            "metadata": {"k": "v"},
+            "source_client": "test",
+        }

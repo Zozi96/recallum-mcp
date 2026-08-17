@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
@@ -195,6 +196,94 @@ async def test_recall_usage_weight_breaks_retrieval_ties():
     older_id = await seed(service, repo)
     weighted = await service.recall(USER, query="alpha beta")
     assert weighted.results[0].id == older_id
+
+
+async def test_recall_usage_weight_zero_usage_never_reorders():
+    """Weight 0.0: even a huge count difference leaves scores and order
+    identical to the relevance-only ranking (usage causes no reordering)."""
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "alpha pipeline notes": [1.0] + [0.0] * 7,
+            "alpha beta pipeline": [0.6, 0.8] + [0.0] * 6,
+            "alpha beta": [1.0] + [0.0] * 7,
+        }
+    )
+    service, repo, _ = make_service(
+        limits=MemoryLimits(recall_trigram_weight=0.0),  # usage weight = 0.0 default
+        embedder=embedder,
+    )
+    older = await service.remember(
+        USER, content="alpha pipeline notes", category="fact", importance=5
+    )
+    newer = await service.remember(
+        USER, content="alpha beta pipeline", category="fact", importance=5
+    )
+
+    repo.rows[older.memory.id].recall_count = 1000
+    first = await service.recall(USER, query="alpha beta")
+    first_ids = [r.id for r in first.results]
+    first_scores = [r.score for r in first.results]
+
+    repo.rows[older.memory.id].recall_count = 0
+    repo.rows[newer.memory.id].recall_count = 1000
+    second = await service.recall(USER, query="alpha beta")
+
+    assert [r.id for r in second.results] == first_ids
+    assert [r.score for r in second.results] == first_scores
+    # The tie still falls to the recency tie-break: usage carried no vote.
+    assert first_ids[0] == newer.memory.id
+
+
+async def test_recall_usage_vote_never_leaves_the_owner_s_active_rows():
+    """Isolation at weight > 0: only the owner's active memories participate,
+    ranked from the owner's own counts; foreign and retired rows never vote."""
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "alpha pipeline notes": [1.0] + [0.0] * 7,
+            "alpha beta pipeline": [0.6, 0.8] + [0.0] * 6,
+            "alpha beta": [1.0] + [0.0] * 7,
+        }
+    )
+    other = uuid.uuid4()
+    service, repo, _ = make_service(
+        limits=MemoryLimits(recall_usage_weight=0.5, recall_trigram_weight=0.0),
+        embedder=embedder,
+    )
+    owner_older = await service.remember(
+        USER, content="alpha pipeline notes", category="fact", importance=5
+    )
+    owner_newer = await service.remember(
+        USER, content="alpha beta pipeline", category="fact", importance=5
+    )
+    foreign_older = await service.remember(
+        other, content="alpha pipeline notes", category="fact", importance=5
+    )
+    await service.remember(other, content="alpha beta pipeline", category="fact", importance=5)
+    repo.rows[owner_older.memory.id].recall_count = 50
+    repo.rows[foreign_older.memory.id].recall_count = 10**6
+
+    result = await service.recall(USER, query="alpha beta")
+    returned_ids = [r.id for r in result.results]
+
+    # An active memory of a second owner with high usage never participates.
+    assert foreign_older.memory.id not in returned_ids
+    assert set(returned_ids) == {owner_older.memory.id, owner_newer.memory.id}
+    # The tie breaks from the owner's own counts only.
+    assert returned_ids[0] == owner_older.memory.id
+
+    # A retired owner memory with accumulated usage stops participating.
+    await service.forget(USER, owner_older.memory.id)
+    result = await service.recall(USER, query="alpha beta")
+    assert owner_older.memory.id not in [r.id for r in result.results]
+
+
+def test_recall_usage_weight_defaults_off_and_is_capped():
+    assert MemoryLimits().recall_usage_weight == 0.0
+    assert MemoryLimits(recall_usage_weight=1.0).recall_usage_weight == 1.0
+    with pytest.raises(ValidationError):
+        MemoryLimits(recall_usage_weight=-0.1)
+    with pytest.raises(ValidationError):
+        MemoryLimits(recall_usage_weight=1.1)
 
 
 # ---------------------------------------------------------------------------

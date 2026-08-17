@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import ScoredMemory
@@ -302,6 +303,64 @@ async def test_recall_importance_weight_zero_restores_pure_relevance():
 
     fused = service._reciprocal_rank_fusion([low, high], [high, low])
     assert fused[0][1] == fused[1][1], "importance must carry no weight at 0.0"
+
+
+async def test_recall_usage_weight_zero_usage_contributes_nothing():
+    """Weight 0.0: recall_count is never read, so scores and order match the
+    relevance-only fusion no matter how the counts differ."""
+    service, _, _ = make_service()
+    better = _scored("better", age_days=10)
+    popular = _scored("popular", age_days=0)
+    popular.memory.recall_count = 1000
+
+    plain = service._reciprocal_rank_fusion([better, popular], [better, popular])
+    popular.memory.recall_count = 0
+    better.memory.recall_count = 1000
+    flipped = service._reciprocal_rank_fusion([better, popular], [better, popular])
+
+    assert [(item[0].memory.id, item[1]) for item in plain] == [
+        (item[0].memory.id, item[1]) for item in flipped
+    ]
+    assert plain[0][0].memory.id == better.memory.id
+
+
+async def test_recall_usage_cap_cannot_displace_a_clearly_better_match():
+    """At the maximum weight (1.0) a usage-#1 row still cannot unseat a row
+    ranked #1 in both retrieval legs: a full usage sweep is worth no more
+    than one primary signal."""
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        limits=MemoryLimits(recall_usage_weight=1.0),
+    )
+    best = _scored("best", age_days=0)
+    popular = _scored("popular", age_days=0)
+    popular.memory.recall_count = 10**6
+
+    fused = service._reciprocal_rank_fusion([best, popular], [best, popular])
+
+    assert fused[0][0].memory.id == best.memory.id
+
+
+async def test_recall_usage_competition_ranking_never_tips_equal_counts():
+    """Equal recall_count lands on one competition rank, so usage adds an
+    equal contribution and recency stays the only tie-break."""
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        limits=MemoryLimits(recall_usage_weight=0.5),
+    )
+    older = _scored("older", age_days=0)
+    newer = _scored("newer", age_days=10)
+    older.memory.recall_count = 5
+    newer.memory.recall_count = 5
+
+    fused = service._reciprocal_rank_fusion([older, newer], [newer, older])
+
+    assert fused[0][1] == fused[1][1], "equal counts must contribute equally"
+    assert [item[0].memory.content for item in fused] == ["newer", "older"]
 
 
 async def test_recall_runs_both_signals_in_one_repository_call():
@@ -912,3 +971,205 @@ async def test_memory_graph_representative_default_bound_stays_capped():
     assert graph.total == MemoryLimits().graph_max_nodes + 1
     assert graph.truncated is True
     assert max(degree.values()) <= MemoryLimits().graph_max_neighbours
+
+
+@pytest.mark.parametrize(
+    ("enabled", "count", "threshold", "expected_scalable"),
+    [
+        (False, 2, 3, False),  # off + below -> pairwise
+        (False, 3, 3, False),  # off + at -> pairwise (strict >)
+        (False, 4, 3, True),  # off + above -> scalable
+        (True, 2, 3, True),  # on + below -> scalable
+        (True, 3, 3, True),  # on + at -> scalable
+        (True, 4, 3, True),  # on + above -> scalable
+    ],
+)
+async def test_memory_graph_scalable_routing_matrix(
+    enabled, count, threshold, expected_scalable
+):
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=4),
+        limits=MemoryLimits(
+            graph_scalable_enabled=enabled,
+            graph_scalable_min_nodes=threshold,
+        ),
+    )
+    for index in range(count):
+        await service.remember(USER, content=f"routing memory {index}", category="fact")
+    await service.memory_graph(USER)
+    assert repo.last_graph_scalable is expected_scalable
+
+
+async def test_memory_graph_pairwise_default_edge_signals():
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(
+            {"a": [1.0, 0.0], "b": [0.99, 0.1], "c": [0.8, 0.6]}
+        ),
+        limits=MemoryLimits(graph_min_similarity=0.7, graph_max_neighbours=4),
+    )
+    await service.remember(USER, content="a", category="fact")
+    await service.remember(USER, content="b", category="fact")
+    await service.remember(USER, content="c", category="fact")
+
+    graph = await service.memory_graph(USER)
+
+    assert repo.last_graph_scalable is False
+    assert len(graph.edges) == 3
+    assert graph.edge_total == len(graph.edges)
+    assert graph.edges_truncated is False
+    assert graph.edge_total == 3
+
+
+async def test_memory_graph_dense_hub_reports_honest_edge_truncation():
+    vectors = {
+        "hub": [1.0, 0.0, 0.0],
+        "near one": [0.8660254, 0.5, 0.0],
+        "near two": [0.8660254, 0.0, 0.5],
+        "near three": [0.8660254, 0.0, -0.5],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(
+            graph_max_neighbours=2,
+            graph_min_similarity=0.8,
+            graph_scalable_enabled=True,
+        ),
+    )
+    hub = await service.remember(USER, content="hub", category="fact", importance=10)
+    near_one = await service.remember(USER, content="near one", category="fact")
+    near_two = await service.remember(USER, content="near two", category="fact")
+    near_three = await service.remember(USER, content="near three", category="fact")
+
+    graph = await service.memory_graph(USER)
+
+    hub_pairs = {
+        frozenset((hub.memory.id, other.memory.id))
+        for other in (near_one, near_two, near_three)
+    }
+    edge_pairs = {frozenset((edge.source_id, edge.target_id)) for edge in graph.edges}
+    assert graph.edge_total == 3
+    assert graph.edges_truncated is True
+    assert graph.edge_total > len(graph.edges)
+    assert len(graph.edges) == 2
+    assert edge_pairs <= hub_pairs
+    assert all(edge.similarity >= 0.8 for edge in graph.edges)
+
+
+async def test_memory_graph_sparse_scalable_reports_no_edge_truncation():
+    vectors = {
+        "a": [1.0, 0.0],
+        "b": [0.95, 0.32],
+        "c": [0.9, 0.44],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(
+            graph_max_neighbours=2,
+            graph_min_similarity=0.7,
+            graph_scalable_enabled=True,
+        ),
+    )
+    await service.remember(USER, content="a", category="fact")
+    await service.remember(USER, content="b", category="fact")
+    await service.remember(USER, content="c", category="fact")
+
+    graph = await service.memory_graph(USER)
+
+    assert len(graph.edges) == 3
+    assert graph.edge_total == len(graph.edges)
+    assert graph.edges_truncated is False
+
+
+async def test_memory_graph_scalable_single_node_reports_zero_edges():
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient({"solo": [1.0, 0.0]}),
+        limits=MemoryLimits(graph_scalable_enabled=True),
+    )
+    await service.remember(USER, content="solo", category="fact")
+
+    graph = await service.memory_graph(USER)
+
+    assert graph.edges == []
+    assert graph.edge_total == 0
+    assert graph.edges_truncated is False
+
+
+async def test_memory_graph_scalable_invents_no_neighbours_below_threshold():
+    vectors = {
+        "seed": [1.0, 0.0],
+        "close": [0.99, 0.1],
+        "distant": [-0.9, 0.44],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(graph_min_similarity=0.7, graph_scalable_enabled=True),
+    )
+    seed = await service.remember(USER, content="seed", category="fact")
+    close = await service.remember(USER, content="close", category="fact")
+    distant = await service.remember(USER, content="distant", category="fact")
+
+    graph = await service.memory_graph(USER)
+
+    edge_pairs = {frozenset((edge.source_id, edge.target_id)) for edge in graph.edges}
+    assert edge_pairs == {frozenset((seed.memory.id, close.memory.id))}
+    assert distant.memory.id not in {node for pair in edge_pairs for node in pair}
+    assert graph.edge_total == 1
+    assert graph.edges_truncated is False
+
+
+async def test_memory_graph_scalable_is_deterministic():
+    vectors = {
+        "hub": [1.0, 0.0, 0.0],
+        "near one": [0.8660254, 0.5, 0.0],
+        "near two": [0.8660254, 0.0, 0.5],
+        "near three": [0.8660254, 0.0, -0.5],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(
+            graph_max_neighbours=2,
+            graph_min_similarity=0.8,
+            graph_scalable_enabled=True,
+        ),
+    )
+    await service.remember(USER, content="hub", category="fact", importance=10)
+    await service.remember(USER, content="near one", category="fact")
+    await service.remember(USER, content="near two", category="fact")
+    await service.remember(USER, content="near three", category="fact")
+
+    first = await service.memory_graph(USER)
+    second = await service.memory_graph(USER)
+
+    assert [(e.source_id, e.target_id, e.similarity) for e in first.edges] == [
+        (e.source_id, e.target_id, e.similarity) for e in second.edges
+    ]
+    assert (first.edge_total, first.edges_truncated) == (
+        second.edge_total,
+        second.edges_truncated,
+    )
+
+
+def test_memory_limits_scalable_graph_defaults_and_bounds():
+    limits = MemoryLimits()
+    assert limits.graph_scalable_enabled is False
+    assert limits.graph_scalable_min_nodes > limits.graph_max_nodes
+    with pytest.raises(ValidationError):
+        MemoryLimits(graph_scalable_min_nodes=0)
+    with pytest.raises(ValidationError):
+        MemoryLimits(graph_max_nodes=0)
+    with pytest.raises(ValidationError):
+        MemoryLimits(graph_max_neighbours=0)

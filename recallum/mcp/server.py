@@ -100,6 +100,52 @@ All identity comes from the API key; tools never accept a user id.
 """
 
 
+def _session_start_prompt(project: str | None, focus: str | None) -> str:
+    """Text returned by the session-start MCP prompt (pure, unit-testable)."""
+    task = f" and focus={focus!r}" if focus else ""
+    return (
+        f"Call context with project={project!r}{task}. If the task is known, "
+        "include focus; then use recall for focused detail when needed."
+    )
+
+
+def _capture_scan_prompt() -> str:
+    """Text returned by the capture-scan MCP prompt (pure, unit-testable).
+
+    Reading ``similar`` on every outcome is the contract: the server reports
+    same-subject memories but never resolves them, so each must be reconciled
+    by the agent before the capture closes.
+    """
+    return (
+        "Run one end-of-session capture scan. Write zero or more atomic, "
+        "verified reusable items in English with remember_batch; never store "
+        "secrets, recaps, logs, guesses, or transient status. Zero items is "
+        "valid. Read the similar field on every remember and remember_batch "
+        "outcome: it lists existing memories about the same subject, and the "
+        "server never resolves them for you. Merge when a similar memory "
+        "restates or refines the same claim as your new item; update or forget "
+        "the similar memory when it contradicts the new claim or is incorrect "
+        "-- never merge a contradiction. Decide each similar outcome explicitly "
+        "before closing the capture."
+    )
+
+
+def _stale_review_prompt() -> str:
+    """Text returned by the stale-review MCP prompt (pure, unit-testable).
+
+    Every verified stale item must end in one of the four resolutions; having
+    merely looked at an item is not a conclusion.
+    """
+    return (
+        "Call list_memories with stale=true, then get_memory each item and "
+        "verify it against reality before deciding. End every verified item "
+        "with exactly one of reconfirm (still true), update (changed), forget "
+        "(no longer applies), or merge_memories (restatement of an active "
+        "claim). Concluding a review without one of those four actions leaves "
+        "the item unresolved."
+    )
+
+
 def build_mcp_server(container: Container) -> FastMCP:
     """Create the FastMCP server wired to the given DI container."""
     mcp = FastMCP(
@@ -399,29 +445,17 @@ def build_mcp_server(container: Container) -> FastMCP:
     @mcp.prompt(name="session-start")
     def session_start(project: str | None = None, focus: str | None = None) -> str:
         """Bootstrap project context before planning."""
-        task = f" and focus={focus!r}" if focus else ""
-        return (
-            f"Call context with project={project!r}{task}. If the task is known, "
-            "include focus; then use recall for focused detail when needed."
-        )
+        return _session_start_prompt(project, focus)
 
     @mcp.prompt(name="capture-scan")
     def capture_scan() -> str:
         """Capture durable context at the end of a session."""
-        return (
-            "Run one end-of-session capture scan. Write zero or more atomic, "
-            "verified reusable items in English with remember_batch; never store "
-            "secrets, recaps, logs, guesses, or transient status. Zero items is valid."
-        )
+        return _capture_scan_prompt()
 
     @mcp.prompt(name="stale-review")
     def stale_review() -> str:
         """Review and resolve stale memories."""
-        return (
-            "Call list_memories with stale=true, then get_memory each item before "
-            "deciding. Prefer reconfirm for a claim that remains true; use update, "
-            "forget, or merge_memories when appropriate."
-        )
+        return _stale_review_prompt()
 
     return mcp
 
@@ -472,9 +506,7 @@ async def validate_only_tools_are_exposed(mcp: FastMCP) -> None:
         uri for uri in template_uris if uri and uri not in ALLOWED_PROFILE_RESOURCE_TEMPLATES
     }
     if unexpected_templates:
-        raise RuntimeError(
-            f"unexpected resource templates exposed: {sorted(unexpected_templates)}"
-        )
+        raise RuntimeError(f"unexpected resource templates exposed: {sorted(unexpected_templates)}")
     prompts = await list_local_prompts(mcp)
     names = [prompt.name for prompt in prompts]
     unexpected_prompts = set(names) - ALLOWED_PROMPTS

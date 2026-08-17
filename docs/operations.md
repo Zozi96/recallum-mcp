@@ -260,10 +260,35 @@ importance or category, strands nothing — those reseed onto the same memory.
 You do not have to prune preemptively: a stranded row shows up as `?<id>` in
 the `misses:` section of the report, so prune when you see one. Grow the dataset
 with real queries agents got wrong: every fixed regression should leave a
-query behind. `--trigram-weight` / `--importance-weight` override one knob for
-an A/B run; numbers are only comparable against the same dataset and the same
-embedding model. Persist a winning value via the `RECALLUM__LIMITS__*`
-environment variables.
+query behind. `--trigram-weight` / `--importance-weight` / `--usage-weight`
+override one knob for an A/B run; numbers are only comparable against the
+same dataset and the same embedding model. Persist a winning value via the
+`RECALLUM__LIMITS__*` environment variables.
+
+This ranking evaluation is deliberately separate from the workflow/checkpoint
+evaluator (`scripts/eval_agent_workflow.py`): that one measures how well agents
+follow an adherence policy across recorded runs, while `recallum-admin eval`
+measures retrieval ranking quality on the golden dataset. The two are never
+blended — this report carries only MRR, recall@k and the tagged misses list.
+
+### Comparing the usage vote
+
+`recall_usage_weight` (the vote `recall_count` gets in fusion) ships at `0.0`
+so it never affects production ranking until a measured decision raises it.
+To compare a candidate weight against the baseline on the *identical* dataset
+and configuration, run the same command twice and diff the reports:
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin eval \
+  --email eval@example.com --dataset scripts/eval_dataset.json                # baseline: usage weight 0.0
+docker compose exec recallum uv run --no-sync recallum-admin eval \
+  --email eval@example.com --dataset scripts/eval_dataset.json --usage-weight 0.3  # candidate
+```
+
+The applied override is recorded in the report's `tunables:` line. Note that
+the eval user's memories start with `recall_count = 0`; run the baseline first
+so its ordinary recalls accumulate usage, then read the candidate report for
+what a positive weight actually changes.
 
 ### Reading the language tags
 
@@ -289,6 +314,43 @@ Both cross-language tags are an **optimistic** bound: Spanish and English
 technical vocabulary share Latin roots and the trigram leg is character-based,
 so cognates hand those queries a partial lexical freebie that real mixed-language
 traffic will not always get.
+
+## Graph edge strategy (scalable path)
+
+`memory_graph` computes edges with a pairwise O(n²) self-join by default, which
+is correct but quadratic in the number of active nodes. A scalable path is
+available: a bounded per-node kNN query over the already-selected node subset,
+using the existing embedding index (no new index is required).
+
+Activate the scalable path when **either** of these holds:
+
+- The operator flag `RECALLUM__LIMITS__GRAPH_SCALABLE_ENABLED=true` is set.
+- The active node count is **strictly above**
+  `RECALLUM__LIMITS__GRAPH_SCALABLE_MIN_NODES` (default `2000`), with the flag
+  off or unset.
+
+Default deployments keep the pairwise path: the flag ships unset and the
+default threshold (2000) sits above the default node ceiling (1000), so a
+typical user stays on the pairwise path. Routing compares the **uncapped**
+active node count against the threshold, not the number of presented nodes:
+because the default threshold equals the maximum node ceiling (2000), a user
+with more than 2000 active memories auto-routes to the scalable path even
+with the flag off, on a projection the pairwise path would otherwise present
+uncapped. Raise `graph_scalable_min_nodes` above your expected active-memory
+volume if the scalable path must only ever be an explicit opt-in.
+
+On the scalable path, each node contributes at most `graph_max_neighbours`
+edges; edges still require `graph_min_similarity` and matching embedding
+models. Truncation stays honest and observable: the response's `edge_total`
+reports the number of qualifying undirected pairs before the per-node cap, and
+`edges_truncated` is true when at least one qualifying pair was dropped because
+an endpoint reached the cap. The per-node kNN keeps the returned edge rows
+bounded; computing the exact pre-cap `edge_total` still evaluates the
+qualifying pairs themselves, so the exact count shares the cost of the
+pairwise path even though the edges themselves stay bounded. `total`/`truncated`
+keep their existing node-level meaning. To see both paths produce the same
+edges and signals before enabling the flag, run the graph parity/truncation
+integration tests (`tests/integration/test_graph_edges.py`).
 
 ## Users and API keys
 

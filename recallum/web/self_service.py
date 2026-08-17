@@ -28,9 +28,12 @@ from recallum.memory.schemas import (
     ListResult,
     MemoryGraphResponse,
     MemoryOut,
+    MergeResult,
     ProfileBlock,
     ReassignResult,
     RecallResult,
+    ReconfirmResult,
+    RelatedMemoriesResult,
     RememberResult,
 )
 from recallum.memory.service import MemoryService
@@ -93,6 +96,16 @@ class ReassignProjectRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     from_project: str = Field(min_length=1)
     to_project: str = Field(min_length=1)
+
+
+class MergeMemoriesRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    source_ids: list[uuid.UUID] = Field(min_length=2)
+    content: str
+    category: Category
+    importance: StrictImportanceInput | None = None
+    metadata: Metadata | None = None
+    source_client: str | None = None
 
 
 class MemoryLocationImmutableRequest(BaseModel):
@@ -386,6 +399,23 @@ def create_self_service_router(
             to_project=body.to_project,
         )
 
+    @router.post("/memories/merge", response_model=MergeResult)
+    async def merge_memories(body: MergeMemoriesRequest, current: identity) -> MergeResult:
+        # Registered before the ``{memory_id}`` routes so the literal path can
+        # never be captured by the parametrized ones.
+        result = await memories.merge(
+            current.user.id,
+            source_ids=body.source_ids,
+            content=body.content,
+            category=body.category,
+            importance=body.importance,
+            metadata=body.metadata,
+            source_client=body.source_client,
+        )
+        if not result.merged or result.memory is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return result
+
     @router.get("/memories/{memory_id}", response_model=MemoryOut)
     async def get_memory(memory_id: uuid.UUID, current: identity) -> MemoryOut:
         row = await repository.get_active(current.user.id, memory_id)
@@ -422,6 +452,21 @@ def create_self_service_router(
         result = await memories.forget(current.user.id, memory_id)
         if not result.forgotten:
             raise HTTPException(status_code=404, detail="Memory not found")
+
+    @router.post("/memories/{memory_id}/reconfirm", response_model=ReconfirmResult)
+    async def reconfirm_memory(memory_id: uuid.UUID, current: identity) -> ReconfirmResult:
+        result = await memories.reconfirm(current.user.id, memory_id)
+        if not result.reconfirmed or result.memory is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return result
+
+    @router.get("/memories/{memory_id}/related", response_model=RelatedMemoriesResult)
+    async def related_memories(
+        memory_id: uuid.UUID,
+        current: identity,
+        limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
+    ) -> RelatedMemoriesResult:
+        return await memories.related_memories(current.user.id, memory_id, limit=limit)
 
     @router.get("/memories/{memory_id}/history", response_model=HistoryResponse)
     async def memory_history(memory_id: uuid.UUID, current: identity) -> HistoryResponse:

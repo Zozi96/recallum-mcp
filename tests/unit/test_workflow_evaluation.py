@@ -16,7 +16,9 @@ from recallum.workflow_evaluation import (
     compare_policies,
     load_runs,
     load_scenarios,
+    matrix_report,
     render_comparison,
+    validate_matrix,
     validate_runs,
     validate_scenarios,
 )
@@ -25,18 +27,37 @@ ROOT = Path(__file__).resolve().parents[2]
 SCENARIOS = ROOT / "scripts" / "agent_workflow_scenarios.json"
 RUNS = ROOT / "scripts" / "agent_workflow_runs.json"
 
+# A complete observed run of session-rotation-pivot: context, pivot recall,
+# and a decision-phase check that satisfies the scenario's criteria.
+_PIVOT_EVENTS = [
+    {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"]},
+    {
+        "phase": "session-rotation",
+        "tool": "recall",
+        "returned_memory_keys": ["memory:session-rotation-ttl"],
+    },
+    {
+        "phase": "decision",
+        "tool": "checks",
+        "applied_criterion_keys": ["criterion:preserve-session-ttl"],
+    },
+]
+
 
 def test_fixture_scores_same_scenarios_and_reports_each_metric() -> None:
     scenarios = load_scenarios(SCENARIOS)
     runs = load_runs(RUNS, scenarios)
-    report = compare_policies(scenarios, runs)
+    # The committed runs file now also carries observed client runs (S005); the
+    # fixture-policy metrics are asserted over the fixture runs only.
+    fixture_runs = [run for run in runs if run.source == "fixture"]
+    report = compare_policies(scenarios, fixture_runs)
     policies = report.by_policy()
 
     assert set(policies) == {"baseline", "checkpoints"}
     baseline = policies["baseline"]
     checkpoints = policies["checkpoints"]
-    assert baseline.critical_retrieval_rate == pytest.approx(2 / 3)
-    assert checkpoints.critical_retrieval_rate == pytest.approx(1.0)
+    assert baseline.critical_retrieval_rate == pytest.approx(2 / 4)
+    assert checkpoints.critical_retrieval_rate == pytest.approx(3 / 4)
     assert baseline.application_criteria_rate < checkpoints.application_criteria_rate
     assert baseline.total_recall_calls == 3
     assert checkpoints.total_recall_calls == 2
@@ -203,8 +224,8 @@ def test_initial_context_satisfies_critical_and_late_criteria_only() -> None:
         ],
     }
     report = compare_policies(scenarios, validate_runs(payload, scenarios)).by_policy()["x"]
-    assert report.application_criteria_rate == pytest.approx(1 / 3)
-    assert report.critical_retrieval_rate == pytest.approx(1 / 3)
+    assert report.application_criteria_rate == pytest.approx(1 / 4)
+    assert report.critical_retrieval_rate == pytest.approx(1 / 4)
     score = report.scenarios[0]
     assert score.application_criteria_satisfied
 
@@ -377,8 +398,8 @@ def test_observed_repetitions_are_grouped_by_client_and_provenance() -> None:
     report = compare_policies(scenarios, runs).by_group()[("observed", "codex", "checkpoints")]
     assert report.repetitions == 2
     assert report.completed_runs == 2
-    assert report.coverage_rate == pytest.approx(2 / 6)
-    assert report.critical_retrieval_rate == 2 / 6
+    assert report.coverage_rate == pytest.approx(2 / 8)
+    assert report.critical_retrieval_rate == 2 / 8
     assert report.average_recall_calls == 1
 
 
@@ -502,3 +523,211 @@ def test_tool_allowlist_rejects_secret_sentinel() -> None:
             },
             scenarios,
         )
+
+
+def _matrix_payload(
+    clients: tuple[str, ...] = ("codex",),
+    policy: str = "checkpoints",
+    repetitions: int = 3,
+    scenarios: list[str] | None = None,
+) -> dict:
+    if scenarios is None:
+        scenarios = [scenario.id for scenario in load_scenarios(SCENARIOS).scenarios]
+    return {
+        "version": "1",
+        "checkpoint_policy": policy,
+        "cells": [
+            {
+                "client": client,
+                "policy": policy,
+                "scenario": scenario,
+                "repetitions": repetitions,
+            }
+            for client in clients
+            for scenario in scenarios
+        ],
+        "scenario_rationale": {},
+    }
+
+
+def test_matrix_report_marks_unconfigured_cell_as_omitted_gap() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    matrix = validate_matrix(_matrix_payload(clients=("codex", "claude-code")))
+    report = matrix_report(scenarios, [], matrix).by_group()
+    assert set(report) == {
+        ("observed", "codex", "checkpoints"),
+        ("observed", "claude-code", "checkpoints"),
+    }
+    codex = report[("observed", "codex", "checkpoints")]
+    assert codex.gap == "omitted"
+    assert codex.coverage_rate == 0.0
+    assert codex.critical_retrieval_rate == 0.0
+    assert codex.application_criteria_rate == 0.0
+    assert set(codex.missing_runs) == {scenario.id for scenario in scenarios.scenarios}
+    assert any("missing run" in miss for miss in codex.misses)
+    assert any(
+        codex.policy in miss and scenario.id in miss
+        for scenario in scenarios.scenarios
+        for miss in codex.misses
+    )
+
+
+def test_matrix_report_marks_all_incomplete_cell_as_gap() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {
+                    "source": "observed",
+                    "client": "codex",
+                    "run_id": f"inc-{scenario.id}",
+                    "policy": "checkpoints",
+                    "scenario": scenario.id,
+                    "status": "incomplete",
+                    "events": [],
+                }
+                for scenario in scenarios.scenarios
+            ],
+        },
+        scenarios,
+    )
+    matrix = validate_matrix(_matrix_payload(clients=("codex",)))
+    codex = matrix_report(scenarios, runs, matrix).by_group()[("observed", "codex", "checkpoints")]
+    assert codex.gap == "incomplete"
+    assert codex.coverage_rate == 0.0
+    assert codex.critical_retrieval_rate == 0.0
+    assert codex.application_criteria_rate == 0.0
+    assert len(codex.incomplete_runs) == len(scenarios.scenarios)
+    assert any("incomplete run" in miss for miss in codex.misses)
+
+
+def test_matrix_report_rates_over_declared_repetitions() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {
+                    "source": "observed",
+                    "client": "codex",
+                    "run_id": "one",
+                    "policy": "checkpoints",
+                    "scenario": "session-rotation-pivot",
+                    "events": _PIVOT_EVENTS,
+                }
+            ],
+        },
+        scenarios,
+    )
+    matrix = validate_matrix(_matrix_payload(clients=("codex",), repetitions=3))
+    report = matrix_report(scenarios, runs, matrix).by_group()[("observed", "codex", "checkpoints")]
+    expected = len(scenarios.scenarios) * 3
+    critical_count = sum(bool(s.critical_memory_keys) for s in scenarios.scenarios)
+    assert report.gap is None
+    assert report.repetitions == 3
+    assert report.completed_runs == 1
+    assert report.coverage_rate == pytest.approx(1 / expected)
+    assert report.critical_retrieval_rate == pytest.approx(1 / (critical_count * 3))
+    assert report.application_criteria_rate == pytest.approx(1 / expected)
+
+
+def test_matrix_report_expected_counts_scope_to_the_matrix_group() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    runs = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {
+                    "source": "observed",
+                    "client": "codex",
+                    "run_id": "group-only",
+                    "policy": "checkpoints",
+                    "scenario": "session-rotation-pivot",
+                    "events": _PIVOT_EVENTS,
+                }
+            ],
+        },
+        scenarios,
+    )
+    # The matrix declares only session-rotation-pivot; scenarios that exist only
+    # in the JSON dataset must not inflate denominators or appear as missing runs.
+    matrix = validate_matrix(_matrix_payload(scenarios=["session-rotation-pivot"], repetitions=3))
+    report = matrix_report(scenarios, runs, matrix).by_group()[("observed", "codex", "checkpoints")]
+    assert report.gap is None
+    assert report.expected_scenario_count == 1
+    assert report.expected_critical_count == 1
+    assert report.missing_runs == []
+    assert report.coverage_rate == pytest.approx(1 / 3)
+    assert report.critical_retrieval_rate == pytest.approx(1 / 3)
+    assert report.application_criteria_rate == pytest.approx(1 / 3)
+    assert not any("missing run" in miss for miss in report.misses)
+
+
+def test_observed_gap_is_not_filled_by_fixture_success() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    fixture_runs = load_runs(RUNS, scenarios)
+    observed_incomplete = validate_runs(
+        {
+            "version": "1",
+            "runs": [
+                {
+                    "source": "observed",
+                    "client": "codex",
+                    "run_id": "inc",
+                    "policy": "checkpoints",
+                    "scenario": "session-rotation-pivot",
+                    "status": "incomplete",
+                    "events": [],
+                }
+            ],
+        },
+        scenarios,
+    )
+    matrix = validate_matrix(_matrix_payload(clients=("codex",)))
+    report = matrix_report(scenarios, [*fixture_runs, *observed_incomplete], matrix)
+    assert ("fixture", None, "checkpoints") not in report.by_group()
+    codex = report.by_group()[("observed", "codex", "checkpoints")]
+    assert codex.gap == "incomplete"
+    assert codex.completed_runs == 0
+    assert codex.coverage_rate == 0.0
+
+
+def test_matrix_validation_rejects_invalid_cells() -> None:
+    payload = _matrix_payload()
+    payload["cells"][0]["repetitions"] = 0
+    with pytest.raises(ValueError, match="at least 1"):
+        validate_matrix(payload)
+    payload = _matrix_payload()
+    payload["cells"][0]["repetitions"] = True
+    with pytest.raises(ValueError, match="integer"):
+        validate_matrix(payload)
+    payload = _matrix_payload()
+    payload["cells"].append(dict(payload["cells"][0]))
+    with pytest.raises(ValueError, match="duplicate matrix cell"):
+        validate_matrix(payload)
+    payload = _matrix_payload()
+    payload["cells"][1]["repetitions"] = 5
+    with pytest.raises(ValueError, match="share one repetition count"):
+        validate_matrix(payload)
+    payload = _matrix_payload()
+    payload["prompt"] = "secret"
+    with pytest.raises(ValueError, match="forbidden"):
+        validate_matrix(payload)
+
+
+def test_matrix_report_rejects_unknown_scenario() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    payload = _matrix_payload()
+    payload["cells"][0]["scenario"] = "not-a-scenario"
+    with pytest.raises(ValueError, match="unknown scenarios"):
+        matrix_report(scenarios, [], validate_matrix(payload))
+
+
+def test_matrix_report_renders_gap_marks_without_success_values() -> None:
+    scenarios = load_scenarios(SCENARIOS)
+    matrix = validate_matrix(_matrix_payload(clients=("codex", "claude-code")))
+    text = render_comparison(matrix_report(scenarios, [], matrix))
+    assert "observed" in text
+    assert "omitted" in text
+    assert "0.00" in text

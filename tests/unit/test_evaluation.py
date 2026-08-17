@@ -166,3 +166,39 @@ async def test_render_report_names_the_misses():
     assert "misses:" in text
     assert "adversarial" in text
     assert "beta" in text
+
+
+async def test_render_report_never_blends_workflow_evaluator_metrics():
+    """The ranking report carries MRR, recall@k and tagged misses only."""
+    service, _ = make_eval_service()
+    dataset = load_dataset(DATASET)
+    report = await run_eval(service, USER, dataset, k=1)
+    report.tunables = {"recall_usage_weight": 0.3}
+    text = render_report(report)
+
+    assert "MRR" in text
+    assert "R@1" in text
+    assert "tunables: recall_usage_weight=0.3" in text
+    assert "[adversarial]" in text
+    # The workflow/checkpoint evaluator's metric vocabulary never appears.
+    for workflow_metric in (
+        "coverage",
+        "critical",
+        "applied",
+        "avg-recalls",
+        "avg-chars",
+        "incomplete",
+        "checkpoints",
+    ):
+        assert workflow_metric not in text
+
+
+async def test_run_eval_is_dry_and_reproducible():
+    """Same dataset and configuration produce byte-identical reports."""
+    dataset = load_dataset(DATASET)
+    first_service, _ = make_eval_service()
+    second_service, _ = make_eval_service()
+    first = render_report(await run_eval(first_service, USER, dataset, k=10))
+    second = render_report(await run_eval(second_service, USER, dataset, k=10))
+
+    assert first == second

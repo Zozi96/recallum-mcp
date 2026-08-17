@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 
 from recallum.auth.api_keys import hash_token
 from recallum.cli import _run, build_parser
+from recallum.evaluation import EvalReport
 from tests.fakes import build_test_container
 
 
@@ -218,3 +220,63 @@ async def test_cli_oversized_password_stops_before_lookup_argon_and_persistence(
     assert lookup_calls == []
     assert argon_calls == []
     assert persistence_calls == []
+
+
+def test_eval_usage_weight_parses_as_float_and_defaults_to_none():
+    args = parse(["eval", "--email", "a@b.c", "--dataset", "dataset.json"])
+    assert args.usage_weight is None
+
+    args = parse(
+        ["eval", "--email", "a@b.c", "--dataset", "dataset.json", "--usage-weight", "0.3"]
+    )
+    assert args.usage_weight == 0.3
+
+
+async def test_eval_unknown_email_exits_1(capsys):
+    container, _ = build_test_container()
+
+    code = await _run(
+        parse(["eval", "--email", "ghost@example.com", "--dataset", "missing.json"]), container
+    )
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "does not exist" in captured.err
+
+
+async def test_eval_usage_weight_reaches_service_limits_and_report_tunables(
+    monkeypatch, capsys
+):
+    container, _ = build_test_container()
+    await _run(parse(["create-user", "--email", "eval@example.com"]), container)
+    capsys.readouterr()
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_eval(service, user_id, dataset, *, k):
+        captured["service"] = service
+        return EvalReport(outcomes=[], k=k)
+
+    monkeypatch.setattr("recallum.cli.run_eval", fake_run_eval)
+    dataset = Path(__file__).resolve().parents[2] / "scripts" / "eval_dataset.json"
+
+    code = await _run(
+        parse(
+            [
+                "eval",
+                "--email",
+                "eval@example.com",
+                "--dataset",
+                str(dataset),
+                "--usage-weight",
+                "0.3",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    assert captured["service"]._limits.recall_usage_weight == 0.3
+    out = capsys.readouterr().out
+    assert "tunables: recall_usage_weight=0.3" in out

@@ -80,6 +80,15 @@ def main() -> int:
             provider="dokploy",
             window="Sunday 02:00 UTC",
         )
+    elif "feature-toggle" in prompt:
+        call(
+            url,
+            token,
+            "recall",
+            project=os.environ["RECALLUM_BENCHMARK_PROJECT"],
+            query="feature-toggle",
+        )
+        update_config(workspace, "feature_config.json", enabled=True)
     else:
         update_config(workspace, "auth_config.json", key_storage="hashed")
     return 0

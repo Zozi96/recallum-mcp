@@ -6,9 +6,29 @@
       "policy": "baseline",
       "scenario": "session-rotation-pivot",
       "events": [
-        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
-        {"phase": "session-rotation", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": []},
-        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": []}
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 60,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "session-rotation",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "decision",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": []
+        }
       ]
     },
     {
@@ -16,9 +36,33 @@
       "policy": "baseline",
       "scenario": "covered-by-initial-context",
       "events": [
-        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
-        {"phase": "implementation", "tool": "recall", "returned_memory_keys": ["memory:api-auth"], "served_chars": 40, "applied_criterion_keys": []},
-        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-hashed-keys"]}
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 60,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "implementation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 40,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "decision",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
       ]
     },
     {
@@ -26,10 +70,45 @@
       "policy": "baseline",
       "scenario": "repeated-checkpoint-results",
       "events": [
-        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:deploy-dokploy"], "served_chars": 80, "applied_criterion_keys": ["criterion:use-dokploy"]},
-        {"phase": "deployment", "tool": "recall", "returned_memory_keys": ["memory:release-window"], "served_chars": 100, "applied_criterion_keys": []},
-        {"phase": "verification", "tool": "recall", "returned_memory_keys": ["memory:release-window"], "served_chars": 100, "applied_criterion_keys": []},
-        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-dokploy", "criterion:respect-release-window"]}
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 80,
+          "applied_criterion_keys": [
+            "criterion:use-dokploy"
+          ]
+        },
+        {
+          "phase": "deployment",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:release-window"
+          ],
+          "served_chars": 100,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "verification",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:release-window"
+          ],
+          "served_chars": 100,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "decision",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": [
+            "criterion:use-dokploy",
+            "criterion:respect-release-window"
+          ]
+        }
       ]
     },
     {
@@ -37,9 +116,33 @@
       "policy": "checkpoints",
       "scenario": "session-rotation-pivot",
       "events": [
-        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
-        {"phase": "session-rotation", "tool": "recall", "returned_memory_keys": ["memory:session-rotation-ttl"], "served_chars": 120, "applied_criterion_keys": []},
-        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:preserve-session-ttl"]}
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 60,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "session-rotation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:session-rotation-ttl"
+          ],
+          "served_chars": 120,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "decision",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
       ]
     },
     {
@@ -47,8 +150,24 @@
       "policy": "checkpoints",
       "scenario": "covered-by-initial-context",
       "events": [
-        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:api-auth"], "served_chars": 60, "applied_criterion_keys": []},
-        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-hashed-keys"]}
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 60,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "decision",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
       ]
     },
     {
@@ -56,9 +175,826 @@
       "policy": "checkpoints",
       "scenario": "repeated-checkpoint-results",
       "events": [
-        {"phase": "triage", "tool": "context", "returned_memory_keys": ["memory:deploy-dokploy"], "served_chars": 80, "applied_criterion_keys": ["criterion:use-dokploy"]},
-        {"phase": "deployment", "tool": "recall", "returned_memory_keys": ["memory:release-window"], "served_chars": 100, "applied_criterion_keys": []},
-        {"phase": "decision", "tool": "other", "returned_memory_keys": [], "served_chars": 0, "applied_criterion_keys": ["criterion:use-dokploy", "criterion:respect-release-window"]}
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 80,
+          "applied_criterion_keys": [
+            "criterion:use-dokploy"
+          ]
+        },
+        {
+          "phase": "deployment",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:release-window"
+          ],
+          "served_chars": 100,
+          "applied_criterion_keys": []
+        },
+        {
+          "phase": "decision",
+          "tool": "other",
+          "returned_memory_keys": [],
+          "served_chars": 0,
+          "applied_criterion_keys": [
+            "criterion:use-dokploy",
+            "criterion:respect-release-window"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "f8809840857d3c19",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 120
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "635587d87ac2bf03",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 120
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "6d8baa05766a8195",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 120
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "b65d436f44db4c45",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 146
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "cc6e03c873bc0915",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 146
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "8dd1fa4b4f600f0a",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 146
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "3b750708a91b40be",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 141
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-dokploy"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "5e79fe9329c207ad",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 141
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-dokploy"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "f65bf541cf1d7f3e",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 141
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-dokploy"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "700e88883637b70f",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "cold-start-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-feature-toggle"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "84e4e905faf3fd37",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "cold-start-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-feature-toggle"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "d538bc98a3c9fff4",
+      "source": "observed",
+      "client": "claude-code",
+      "client_version": "2.1.233",
+      "policy": "checkpoints",
+      "scenario": "cold-start-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-feature-toggle"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "649a88a8cd0e3763",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 120
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "session-rotation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:session-rotation-ttl"
+          ],
+          "served_chars": 170
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "ebc5273c0c2da90e",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 120
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "session-rotation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:session-rotation-ttl"
+          ],
+          "served_chars": 170
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "6edf8a54a16128d7",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "session-rotation-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 120
+        },
+        {
+          "phase": "session-rotation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:session-rotation-ttl"
+          ],
+          "served_chars": 170
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:preserve-session-ttl"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "a3cdb127334d4d10",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 146
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "d0209a09fdff7491",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 146
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "633146456ab58ddf",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "covered-by-initial-context",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:api-auth"
+          ],
+          "served_chars": 146
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-hashed-keys"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "dadaf9636c8be06e",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 141
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": []
+        }
+      ]
+    },
+    {
+      "run_id": "10ab45ff8d7a650c",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 141
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "deployment",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:release-window"
+          ],
+          "served_chars": 163
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-dokploy",
+            "criterion:respect-release-window"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "262d4792584858d0",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "cold-start-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "implementation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:feature-toggle"
+          ],
+          "served_chars": 157
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-feature-toggle"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "d8b4441bc54d1017",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "repeated-checkpoint-results",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [
+            "memory:deploy-dokploy"
+          ],
+          "served_chars": 141
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "deployment",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:release-window"
+          ],
+          "served_chars": 163
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-dokploy",
+            "criterion:respect-release-window"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "37a3c18e52bed3d8",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "cold-start-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "implementation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:feature-toggle"
+          ],
+          "served_chars": 157
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-feature-toggle"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "3555c0a856e8cca6",
+      "source": "observed",
+      "client": "grok-build",
+      "client_version": "1.0.4",
+      "policy": "checkpoints",
+      "scenario": "cold-start-pivot",
+      "status": "complete",
+      "events": [
+        {
+          "phase": "triage",
+          "tool": "context",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "triage",
+          "tool": "recall",
+          "returned_memory_keys": [],
+          "served_chars": 68
+        },
+        {
+          "phase": "implementation",
+          "tool": "recall",
+          "returned_memory_keys": [
+            "memory:feature-toggle"
+          ],
+          "served_chars": 157
+        },
+        {
+          "phase": "decision",
+          "tool": "checks",
+          "applied_criterion_keys": [
+            "criterion:use-feature-toggle"
+          ]
+        }
       ]
     }
   ]

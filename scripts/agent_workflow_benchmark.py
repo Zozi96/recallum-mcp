@@ -3,7 +3,9 @@
 
 The command supplied after ``--`` is executed as an argv list.  No client is
 started by default and neither its output nor its queries are written to the
-trace.
+trace.  ``--dry-run`` runs without any agent: it emits a versioned payload with
+zero runs, which every matrix cell renders as an ``omitted`` gap with no agent
+traces and no success values.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "remote:6da6a46335d49d55"
 MAX_REQUEST_BYTES = 256 * 1024
 ALLOWED_TOOLS = {"context", "recall"}
+SUPPORTED_CLIENTS = ("cursor", "codex", "claude-code", "grok-build")
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,22 @@ FIXTURES = {
             ),
         ),
     ),
+    "cold-start-pivot": Fixture(
+        "Read task.md and implement the cold-start feature; pivot=feature-toggle.",
+        (),
+        ("memory:feature-toggle",),
+        "implementation",
+        "Update feature_config.json using the feature-toggle memory.",
+        "feature_config.json",
+        (("enabled", False),),
+        (("criterion:use-feature-toggle", "enabled", True),),
+        (
+            (
+                "memory:feature-toggle",
+                "The cold-start feature toggle must be enabled (`enabled`: true).",
+            ),
+        ),
+    ),
 }
 
 
@@ -204,7 +223,12 @@ class ProbeServer(ThreadingHTTPServer):
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         if tool == "context":
             keys = self.fixture.initial
-            phase = "triage"
+            # Extra context after a later-phase recall must not rewind the
+            # timeline to "triage": validate_runs requires non-decreasing
+            # scenario phases. Attribute the extra call to the latest
+            # recorded phase so a real client that re-opens context after
+            # the pivot still produces a valid observed run.
+            phase = self.events[-1]["phase"] if self.events else "triage"
         else:
             query = " ".join(str(arguments.get(key, "")) for key in ("query", "focus"))
             if self.fixture.pivot_phase and any(
@@ -289,7 +313,12 @@ def run_once(
         encoding="utf-8",
     )
     grok_dir = workspace / ".grok"
-    grok_dir.mkdir()
+    if client == "grok-build":
+        real_grok_home = Path(os.environ.get("GROK_HOME") or Path.home() / ".grok")
+        if real_grok_home.is_dir():
+            shutil.copytree(real_grok_home, grok_dir, dirs_exist_ok=True)
+        env["GROK_HOME"] = str(grok_dir)
+    grok_dir.mkdir(exist_ok=True)
     grok_config = grok_dir / "config.toml"
     grok_config.write_text(
         "[mcp_servers.recallum]\n"
@@ -401,31 +430,44 @@ def run_once(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=sorted(FIXTURES), required=True)
-    parser.add_argument("--client", required=True)
-    parser.add_argument("--policy", required=True)
+    parser.add_argument("--scenario", choices=sorted(FIXTURES))
+    parser.add_argument("--client")
+    parser.add_argument("--policy")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--client-version")
     parser.add_argument("--pass-env", action="append", default=[])
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="no agent: emit a versioned payload with zero runs; every matrix cell "
+        "renders as an omitted gap (clean omission)",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command and args.command[0] == "--" else args.command
-    if not command or args.repeat < 1:
-        parser.error("provide an agent argv after -- and a positive --repeat")
-    runs = [
-        run_once(
-            args.scenario,
-            args.client,
-            args.policy,
-            command,
-            args.timeout,
-            args.client_version,
-            tuple(args.pass_env),
-        )
-        for _ in range(args.repeat)
-    ]
+    if args.dry_run:
+        if command:
+            parser.error("--dry-run takes no agent argv after --")
+        runs: list[dict[str, Any]] = []
+    else:
+        if not (args.scenario and args.client and args.policy):
+            parser.error("provide --scenario, --client, and --policy")
+        if not command or args.repeat < 1:
+            parser.error("provide an agent argv after -- and a positive --repeat")
+        runs = [
+            run_once(
+                args.scenario,
+                args.client,
+                args.policy,
+                command,
+                args.timeout,
+                args.client_version,
+                tuple(args.pass_env),
+            )
+            for _ in range(args.repeat)
+        ]
     payload = {"version": "1", "runs": runs}
     text = json.dumps(payload, indent=2) + "\n"
     if args.output:

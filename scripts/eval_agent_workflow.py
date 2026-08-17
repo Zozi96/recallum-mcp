@@ -18,18 +18,33 @@ DEFAULT_RUNS = ROOT / "scripts" / "agent_workflow_runs.json"
 def main() -> int:
     from recallum.workflow_evaluation import (
         compare_policies,
+        load_matrix,
         load_runs,
         load_scenarios,
+        matrix_report,
         render_comparison,
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     parser.add_argument("--runs", type=Path, default=DEFAULT_RUNS)
+    parser.add_argument(
+        "--matrix",
+        type=Path,
+        help=(
+            "versioned benchmark matrix; reports every declared client/policy cell, "
+            "marking unconfigured or all-incomplete cells as gaps"
+        ),
+    )
     args = parser.parse_args()
     scenarios = load_scenarios(args.scenarios)
     runs = load_runs(args.runs, scenarios)
-    print(render_comparison(compare_policies(scenarios, runs)))
+    if args.matrix:
+        matrix = load_matrix(args.matrix)
+        report = matrix_report(scenarios, runs, matrix)
+    else:
+        report = compare_policies(scenarios, runs)
+    print(render_comparison(report))
     return 0
 
 

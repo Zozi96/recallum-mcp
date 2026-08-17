@@ -314,6 +314,7 @@ ephemeral `RECALLUM_BENCHMARK_TOKEN` and exposes these temporary variables to th
 | `RECALLUM_BENCHMARK_WORKSPACE` | temporary fixture workspace |
 | `RECALLUM_BENCHMARK_PROMPT` | synthetic task prompt |
 | `RECALLUM_BENCHMARK_PROJECT` | canonical project key |
+| `GROK_HOME` (grok-build only) | disposable Grok home: real plugin state plus probe `config.toml` |
 
 The child receives only a minimal process environment plus benchmark variables. Pass a client
 credential explicitly with one or more `--pass-env NAME` flags; arbitrary parent secrets are not
@@ -348,14 +349,24 @@ python3 scripts/agent_workflow_benchmark.py --scenario session-rotation-pivot --
 
 The Codex and Grok examples expect the Recallum plugin to be installed so its session hook is
 active. Claude receives a temporary copy through `--plugin-dir`; its bundled MCP endpoint is
-rewritten only in that copy. If a client reads its model credential from an environment variable,
-add `--pass-env NAME` before `--`. Never pass `RECALLUM_API_KEY`: the probe uses only its ephemeral
-benchmark token. The `--policy` value is a result label, so use distinct labels for the policy or
-plugin variants you intentionally compare.
+rewritten only in that copy. The Grok example runs against a disposable `GROK_HOME` seeded from
+your real Grok home (`$GROK_HOME`, else `~/.grok`) with the probe stanza overlaid onto its
+`config.toml`; the child environment sets `GROK_HOME` to that directory, so the installed plugin's
+hooks stay active while the Recallum MCP server points at the loopback probe. If a client reads its
+model credential from an environment variable, add `--pass-env NAME` before `--`. Never pass
+`RECALLUM_API_KEY`: the probe uses only its ephemeral benchmark token. The `--policy` value is a
+result label, so use distinct labels for the policy or plugin variants you intentionally compare.
 
 Repeat each scenario three times for a useful adherence sample. Fixture traces test evaluator
 math; observed traces test a supplied process against the probe. Neither is a ranking or production
 telemetry measurement, and prompts, queries, credentials, and memory content are never persisted.
+
+Operational guidance lives in the versioned benchmark runbook and matrix under
+`docs/delivery/openspec-memory-quality-batch/S004/runbook.md` and
+`docs/delivery/openspec-memory-quality-batch/S004/benchmark_matrix.json`: per-client launch
+commands, `omitted` vs `incomplete` interpretation, and what may be versioned. A report rendered
+with `scripts/eval_agent_workflow.py --matrix ...` marks unconfigured or all-incomplete client
+cells as gaps and never fills them from fixture traces.
 
 ### Tool names differ per client
 

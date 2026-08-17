@@ -28,11 +28,21 @@ class MemoryLimits(BaseModel):
     # The graph is an intentionally bounded projection. Pairwise comparison is
     # quadratic, so these conservative server-owned ceilings are part of the
     # safety boundary rather than client preferences.
-    # ponytail: ceiling is the pairwise O(n²) SQL in graph_snapshot; if users
-    # routinely exceed ~1k memories, move to per-node kNN / ANN edges.
     graph_max_nodes: int = Field(default=1000, gt=0, le=2000)
     graph_max_neighbours: int = Field(default=4, gt=0, le=10)
     graph_min_similarity: float = Field(default=0.72, ge=0.5, le=1.0)
+
+    # Scalable edge strategy: when ``graph_scalable_enabled`` is set, or the
+    # active node count exceeds ``graph_scalable_min_nodes`` (strict ``>``),
+    # graph edges come from a single bounded per-node kNN query over the
+    # selected subset instead of the pairwise O(n²) self-join. Both mechanisms
+    # are independent and default off: the flag ships unset and the threshold
+    # default sits above the default ``graph_max_nodes`` ceiling, so a typical
+    # deployment keeps the pairwise path. Routing uses the uncapped active
+    # count, so a user with more actives than ``graph_max_nodes`` (default
+    # 1000, max 2000) can still auto-route even with the flag off.
+    graph_scalable_enabled: bool = Field(default=False)
+    graph_scalable_min_nodes: int = Field(default=2000, gt=0)
 
     max_content_chars: int = Field(default=4000, gt=0)
     max_project_chars: int = Field(default=200, gt=0)

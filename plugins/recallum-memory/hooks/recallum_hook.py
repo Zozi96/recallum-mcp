@@ -248,9 +248,13 @@ VISIBILITY_HINT = (
 
 WORKFLOW_HINT = (
     " Optional: after a useful recall/context hit, use related_memories only to "
-    "explore a seed's thematic neighborhood; for stale items prefer reconfirm "
-    "over identical remember. If MCP prompts are supported, use session-start, "
-    "capture-scan, or stale-review."
+    "explore a seed's thematic neighborhood. Read the similar field on remember "
+    "and remember_batch outcomes and resolve it yourself -- merge memories that "
+    "restate or refine the same claim; update or forget a similar memory that "
+    "contradicts the new claim or is incorrect. For stale items prefer "
+    "reconfirm over identical remember, and end each reviewed item with exactly "
+    "one of reconfirm, update, forget, or merge_memories. If MCP prompts are "
+    "supported, use session-start, capture-scan, or stale-review."
 )
 
 

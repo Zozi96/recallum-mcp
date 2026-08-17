@@ -324,13 +324,23 @@ class MemoryGraphEdge(BaseModel):
 
 
 class MemoryGraphResponse(BaseModel):
-    """A bounded graph projection that never contains stored embeddings."""
+    """A bounded graph projection that never contains stored embeddings.
+
+    ``total``/``truncated`` describe the presented node set (``total`` counts
+    every active memory under the current filters, before the node ceiling).
+    ``edge_total`` counts the qualifying undirected pairs above the minimum
+    similarity with matching embedding models, before the per-node neighbour
+    cap; ``edges_truncated`` is true when at least one such pair was dropped
+    because an endpoint reached the cap.
+    """
 
     nodes: list[MemoryGraphNode]
     edges: list[MemoryGraphEdge]
     total: int
     truncated: bool
     model_mismatch: bool
+    edge_total: int
+    edges_truncated: bool
 
 
 class ForgetResult(BaseModel):

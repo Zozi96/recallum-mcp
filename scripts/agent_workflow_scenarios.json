@@ -34,6 +34,17 @@
       "critical_memory_keys": ["memory:release-window"],
       "application_criteria_keys": ["criterion:use-dokploy", "criterion:respect-release-window"],
       "expected_checkpoint": true
+    },
+    {
+      "id": "cold-start-pivot",
+      "corpus_keys": ["memory:feature-toggle"],
+      "initial_context_keys": [],
+      "phases": ["triage", "implementation", "decision"],
+      "pivot_phase": "implementation",
+      "decision_phase": "decision",
+      "critical_memory_keys": ["memory:feature-toggle"],
+      "application_criteria_keys": ["criterion:use-feature-toggle"],
+      "expected_checkpoint": true
     }
   ]
 }

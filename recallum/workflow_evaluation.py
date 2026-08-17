@@ -48,6 +48,7 @@ _RECALL_TOOLS = {"recall"}
 _ALLOWED_TOOLS = {"context", "recall", "checks", "other"}
 MAX_SCENARIOS = 100
 MAX_RUNS = 1000
+MAX_MATRIX_CELLS = 1000
 MAX_EVENTS = 100
 MAX_LIST_ITEMS = 100
 MAX_IDENTIFIER_LENGTH = 200
@@ -128,6 +129,9 @@ class PolicyReport:
     repetitions: int = 1
     completed_runs: int = 0
     _replicate_scores: list[ScenarioScore] = field(default_factory=list, repr=False)
+    # Set by matrix-driven reports only: "omitted" (cell never executed) or
+    # "incomplete" (runs present but none complete).  Never a substitute for data.
+    gap: str | None = None
 
     @property
     def scenario_count(self) -> int:
@@ -227,6 +231,34 @@ class ComparisonReport:
             (report.source, report.client, report.policy): report
             for report in self.policies
         }
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixCell:
+    client: str
+    policy: str
+    scenario: str
+    repetitions: int
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkMatrix:
+    version: str
+    checkpoint_policy: str
+    cells: tuple[MatrixCell, ...]
+    scenario_rationale: Mapping[str, str]
+
+    @property
+    def clients(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(cell.client for cell in self.cells))
+
+    @property
+    def policies(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(cell.policy for cell in self.cells))
+
+    @property
+    def scenarios(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(cell.scenario for cell in self.cells))
 
 
 def _object(value: Any, label: str) -> Mapping[str, Any]:
@@ -527,9 +559,20 @@ def _score_scenario(
 
 
 def score_policy(
-    dataset: ScenarioDataset, runs: Sequence[WorkflowRun], policy: str
+    dataset: ScenarioDataset,
+    runs: Sequence[WorkflowRun],
+    policy: str,
+    *,
+    scoped_scenarios: Sequence[Scenario] | None = None,
 ) -> PolicyReport:
+    """Score one policy; ``scoped_scenarios`` bounds expected counts and gaps.
+
+    Matrix reports pass the group's scenario rows so a scenario present in the
+    JSON dataset but absent from the matrix cell cannot inflate denominators or
+    surface as a missing run.
+    """
     selected = [run for run in runs if run.policy == policy]
+    scope = dataset.scenarios if scoped_scenarios is None else tuple(scoped_scenarios)
     by_scenario: dict[str, list[WorkflowRun]] = {}
     for run in selected:
         by_scenario.setdefault(run.scenario, []).append(run)
@@ -538,7 +581,7 @@ def score_policy(
     missing: list[str] = []
     incomplete: list[str] = []
     completed = 0
-    for scenario in dataset.scenarios:
+    for scenario in scope:
         candidates = by_scenario.get(scenario.id, [])
         if not candidates:
             missing.append(scenario.id)
@@ -563,15 +606,15 @@ def score_policy(
     client = selected[0].client if selected else None
     versions = {run.client_version for run in selected}
     client_version = next(iter(versions)) if len(versions) == 1 else None
-    repetitions = max((len(by_scenario.get(s.id, [])) for s in dataset.scenarios), default=1)
+    repetitions = max((len(by_scenario.get(s.id, [])) for s in scope), default=1)
     return PolicyReport(
         policy,
         scores,
         missing,
         incomplete,
-        expected_scenario_count=len(dataset.scenarios),
+        expected_scenario_count=len(scope),
         expected_critical_count=sum(
-            bool(scenario.critical_memory_keys) for scenario in dataset.scenarios
+            bool(scenario.critical_memory_keys) for scenario in scope
         ),
         source=source,
         client=client,
@@ -603,6 +646,101 @@ def compare_policies(dataset: ScenarioDataset, runs: Sequence[WorkflowRun]) -> C
     )
 
 
+_MATRIX_FIELDS = {"version", "checkpoint_policy", "cells", "scenario_rationale"}
+_MATRIX_CELL_FIELDS = {"client", "policy", "scenario", "repetitions"}
+
+
+def validate_matrix(payload: Mapping[str, Any]) -> BenchmarkMatrix:
+    root = _object(payload, "benchmark matrix")
+    _fields(root, _MATRIX_FIELDS, "benchmark matrix")
+    version = _string(root.get("version"), "benchmark matrix.version")
+    if version != "1":
+        raise ValueError("benchmark matrix.version must be '1'")
+    checkpoint_policy = _string(root.get("checkpoint_policy"), "benchmark matrix.checkpoint_policy")
+    raw_cells = root.get("cells")
+    if not isinstance(raw_cells, list) or not raw_cells:
+        raise ValueError("benchmark matrix needs a non-empty 'cells' list")
+    if len(raw_cells) > MAX_MATRIX_CELLS:
+        raise ValueError(f"benchmark matrix exceeds {MAX_MATRIX_CELLS} cells")
+    cells: list[MatrixCell] = []
+    seen: set[tuple[str, str, str]] = set()
+    group_repetitions: dict[tuple[str, str], int] = {}
+    for index, raw in enumerate(raw_cells):
+        item = _object(raw, f"cell[{index}]")
+        _fields(item, _MATRIX_CELL_FIELDS, f"cell[{index}]")
+        client = _string(item.get("client"), f"cell[{index}].client")
+        policy = _string(item.get("policy"), f"cell[{index}].policy")
+        scenario = _string(item.get("scenario"), f"cell[{index}].scenario")
+        repetitions = item.get("repetitions")
+        if isinstance(repetitions, bool) or not isinstance(repetitions, int):
+            raise ValueError(f"cell[{index}].repetitions must be an integer")
+        if repetitions < 1:
+            raise ValueError(f"cell[{index}].repetitions must be at least 1")
+        key = (client, policy, scenario)
+        if key in seen:
+            raise ValueError(f"duplicate matrix cell for '{client}/{policy}/{scenario}'")
+        seen.add(key)
+        group = (client, policy)
+        if group in group_repetitions and group_repetitions[group] != repetitions:
+            raise ValueError(
+                f"matrix cells for '{client}/{policy}' must share one repetition count"
+            )
+        group_repetitions[group] = repetitions
+        cells.append(MatrixCell(client, policy, scenario, repetitions))
+    scenario_rationale: dict[str, str] = {}
+    rationale = root.get("scenario_rationale")
+    if rationale is not None:
+        rationale_item = _object(rationale, "benchmark matrix.scenario_rationale")
+        for scenario, reason in rationale_item.items():
+            scenario_rationale[scenario] = _string(reason, f"scenario_rationale[{scenario}]")
+    return BenchmarkMatrix(version, checkpoint_policy, tuple(cells), scenario_rationale)
+
+
+def load_matrix(path: Path | str) -> BenchmarkMatrix:
+    return validate_matrix(_load_json(Path(path)))
+
+
+def matrix_report(
+    dataset: ScenarioDataset, runs: Sequence[WorkflowRun], matrix: BenchmarkMatrix
+) -> ComparisonReport:
+    """Report every declared matrix cell; unconfigured or all-incomplete cells are gaps.
+
+    Only observed runs for the cell's client and policy contribute.  Fixture traces
+    never backfill a cell, so an observed gap keeps zero success values.
+    """
+    matrix_scenarios = set(matrix.scenarios)
+    unknown = matrix_scenarios - set(dataset.by_id)
+    if unknown:
+        raise ValueError(f"matrix references unknown scenarios: {sorted(unknown)}")
+    groups: dict[tuple[str, str], list[MatrixCell]] = {}
+    for cell in matrix.cells:
+        groups.setdefault((cell.client, cell.policy), []).append(cell)
+    reports: list[PolicyReport] = []
+    for (client, policy), cells_for_group in sorted(groups.items()):
+        cell = cells_for_group[0]
+        cell_scenario_ids = {item.scenario for item in cells_for_group}
+        scoped_scenarios = [
+            scenario for scenario in dataset.scenarios if scenario.id in cell_scenario_ids
+        ]
+        selected = [
+            run
+            for run in runs
+            if run.source == "observed" and run.client == client and run.policy == policy
+        ]
+        report = score_policy(dataset, selected, policy, scoped_scenarios=scoped_scenarios)
+        report.repetitions = cell.repetitions
+        # score_policy derives source/client from runs; pin them so an unexecuted
+        # cell still reports as an observed gap rather than a fixture default.
+        report.source = "observed"
+        report.client = client
+        if not selected:
+            report.gap = "omitted"
+        elif report.completed_runs == 0:
+            report.gap = "incomplete"
+        reports.append(report)
+    return ComparisonReport(reports)
+
+
 def render_comparison(report: ComparisonReport) -> str:
     lines = ["workflow evaluation (ranking metrics are intentionally separate)"]
     legacy = all(item.source == "fixture" and item.client is None for item in report.policies)
@@ -612,7 +750,7 @@ def render_comparison(report: ComparisonReport) -> str:
         if legacy
         else (
             "source   client        policy             coverage  critical  applied  "
-            "avg-recalls  avg-chars  incomplete"
+            "avg-recalls  avg-chars  incomplete  gap"
         )
     )
     lines.extend([header, "-" * len(header)])
@@ -631,16 +769,13 @@ def render_comparison(report: ComparisonReport) -> str:
                 f"{item.source:<8} {(item.client or '-'): <12} {item.policy:<18} "
                 f"{item.coverage_rate:>8.2f} {item.critical_retrieval_rate:>8.2f} "
                 f"{item.application_criteria_rate:>7.2f} {item.average_recall_calls:>11.2f} "
-                f"{item.average_served_characters:>9.2f} {len(item.incomplete_runs):>10}"
+                f"{item.average_served_characters:>9.2f} {len(item.incomplete_runs):>10} "
+                f"{(item.gap or ''):>10}"
             )
     for item in sorted(report.policies, key=lambda value: value.policy):
         if item.misses:
             lines.append("")
-            label = (
-                item.policy
-                if legacy
-                else f"{item.source}/{item.client or '-'}/{item.policy}"
-            )
+            label = item.policy if legacy else f"{item.source}/{item.client or '-'}/{item.policy}"
             lines.append(f"misses [{label}]:")
             lines.extend(f"  - {miss}" for miss in item.misses)
     return "\n".join(lines)

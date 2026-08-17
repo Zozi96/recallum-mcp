@@ -1,0 +1,25 @@
+{
+  "version": "1",
+  "checkpoint_policy": "checkpoints",
+  "cells": [
+    { "client": "cursor", "policy": "checkpoints", "scenario": "session-rotation-pivot", "repetitions": 3 },
+    { "client": "cursor", "policy": "checkpoints", "scenario": "covered-by-initial-context", "repetitions": 3 },
+    { "client": "cursor", "policy": "checkpoints", "scenario": "repeated-checkpoint-results", "repetitions": 3 },
+    { "client": "cursor", "policy": "checkpoints", "scenario": "cold-start-pivot", "repetitions": 3 },
+    { "client": "codex", "policy": "checkpoints", "scenario": "session-rotation-pivot", "repetitions": 3 },
+    { "client": "codex", "policy": "checkpoints", "scenario": "covered-by-initial-context", "repetitions": 3 },
+    { "client": "codex", "policy": "checkpoints", "scenario": "repeated-checkpoint-results", "repetitions": 3 },
+    { "client": "codex", "policy": "checkpoints", "scenario": "cold-start-pivot", "repetitions": 3 },
+    { "client": "claude-code", "policy": "checkpoints", "scenario": "session-rotation-pivot", "repetitions": 3 },
+    { "client": "claude-code", "policy": "checkpoints", "scenario": "covered-by-initial-context", "repetitions": 3 },
+    { "client": "claude-code", "policy": "checkpoints", "scenario": "repeated-checkpoint-results", "repetitions": 3 },
+    { "client": "claude-code", "policy": "checkpoints", "scenario": "cold-start-pivot", "repetitions": 3 },
+    { "client": "grok-build", "policy": "checkpoints", "scenario": "session-rotation-pivot", "repetitions": 3 },
+    { "client": "grok-build", "policy": "checkpoints", "scenario": "covered-by-initial-context", "repetitions": 3 },
+    { "client": "grok-build", "policy": "checkpoints", "scenario": "repeated-checkpoint-results", "repetitions": 3 },
+    { "client": "grok-build", "policy": "checkpoints", "scenario": "cold-start-pivot", "repetitions": 3 }
+  ],
+  "scenario_rationale": {
+    "cold-start-pivot": "Gap-fill: pre-existing scenarios always seed initial context; none covers cold start (no SessionStart context) where the critical memory needs checkpoint recall. Synthetic keys only."
+  }
+}

@@ -241,6 +241,9 @@ class HookTests(unittest.TestCase):
         result = run_hook("session", json.dumps({"cwd": "/work/alpha"}), client_env)
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
+        # Cursor gets the flat shape; every other client wraps the same text.
+        if "additional_context" in output:
+            return output["additional_context"]
         self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "SessionStart")
         return output["hookSpecificOutput"]["additionalContext"]
 
@@ -266,6 +269,32 @@ class HookTests(unittest.TestCase):
         ):
             with self.subTest(term=term):
                 self.assertIn(term, context)
+
+    def test_session_start_carries_hygiene_criteria_in_every_client_variant(self) -> None:
+        """Each client variant carries stale-resolution and merge-vs-update.
+
+        The story's open question is resolved to "both criteria present in
+        every variant"; exact wording parity across clients is not asserted.
+        """
+        variants = (
+            {},
+            {"PLUGIN_ROOT": "/plugins/recallum-memory"},
+            {"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"},
+            {"GROK_PLUGIN_ROOT": "/plugins/recallum-memory"},
+            {"CURSOR_PLUGIN_ROOT": "/plugins/recallum-memory"},
+        )
+        for env in variants:
+            with self.subTest(env=sorted(env)):
+                context = " ".join(self._session_context(env).split())
+                self.assertIn(
+                    "exactly one of reconfirm, update, forget, or merge_memories",
+                    context,
+                )
+                self.assertIn("restate or refine the same claim", context)
+                self.assertIn("update or forget a similar memory that contradicts", context)
+                self.assertIn("related_memories", context)
+                self.assertIn("reconfirm over identical remember", context)
+                self.assertIn("session-start, capture-scan, or stale-review", context)
 
     def test_session_start_pins_english_for_both_writes_and_queries(self) -> None:
         # The skill that explains the rule in full is loaded lazily, so the
@@ -1030,6 +1059,27 @@ class ManifestTests(unittest.TestCase):
         ):
             with self.subTest(term=term):
                 self.assertIn(term, text)
+
+    def test_memory_skill_carries_stale_resolution_and_merge_vs_update(self) -> None:
+        text = " ".join(
+            (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        # Every verified stale item must conclude with exactly one resolution.
+        self.assertIn("end it with exactly one resolution", text)
+        for resolution in ("reconfirm", "update", "forget", "merge_memories"):
+            self.assertIn(resolution, text)
+        self.assertIn("every verified stale item ends in one of those four actions", text)
+        # Merge restatements of the same claim; update or forget contradictions.
+        self.assertIn("restate or refine one underlying claim", text)
+        self.assertIn("merge_memories", text)
+        self.assertIn("Never merge contradictions", text)
+        self.assertIn("`update` or `forget` it", text)
+        self.assertIn("server never resolves similar memories", text)
+        # Optional neighbourhood step and reconfirm preference stay intact.
+        self.assertIn("optionally call `related_memories`", text)
+        self.assertIn("prefer it over re-storing identical content", text)
 
     def test_memory_skill_pins_english_and_its_verbatim_exceptions(self) -> None:
         text = " ".join(

@@ -31,7 +31,14 @@ from recallum.mcp.errors import (
     EMBEDDING_UNAVAILABLE_MESSAGE,
     GENERIC_TOOL_ERROR_MESSAGE,
 )
-from recallum.mcp.server import INSTRUCTIONS, build_mcp_server, validate_only_tools_are_exposed
+from recallum.mcp.server import (
+    INSTRUCTIONS,
+    _capture_scan_prompt,
+    _session_start_prompt,
+    _stale_review_prompt,
+    build_mcp_server,
+    validate_only_tools_are_exposed,
+)
 from recallum.memory import MemoryValidationError
 from tests.fakes import FakeEmbeddingClient, build_test_container
 
@@ -677,6 +684,55 @@ async def test_validate_only_tools_are_exposed_allows_the_three_workflow_prompts
         return "stale"
 
     await validate_only_tools_are_exposed(mcp)
+
+
+NO_ACTION_TERMINAL_PHRASES = ("no action", "skip", "leave as is", "do nothing", "already reviewed")
+
+
+def test_stale_review_prompt_requires_an_explicit_resolution_per_verified_item():
+    """Every verified stale item must conclude with one of the four resolutions."""
+    text = _stale_review_prompt().lower()
+    assert "stale=true" in text
+    assert "exactly one of" in text
+    for resolution in ("reconfirm", "update", "forget", "merge_memories"):
+        assert resolution in text, resolution
+    assert "verify it against reality" in text
+    # No "already looked, no action" terminal state for a verified item.
+    for phrase in NO_ACTION_TERMINAL_PHRASES:
+        assert phrase not in text, phrase
+
+
+def test_capture_scan_prompt_requires_reading_similar_and_reconciling_without_auto_resolve():
+    text = _capture_scan_prompt().lower()
+    assert "remember_batch" in text
+    assert "zero items is valid" in text
+    assert "similar" in text
+    assert "server never resolves them" in text
+    # Merge restatements of the same claim; update or forget contradictions
+    # or incorrect facts; never merge a contradiction; the agent decides.
+    assert "restates or refines the same claim" in text
+    assert "update or forget" in text
+    assert "contradicts" in text
+    assert "never merge a contradiction" in text
+    assert "decide each similar outcome explicitly" in text
+
+
+def test_session_start_prompt_still_guides_context_then_recall():
+    text = _session_start_prompt("proj", "task")
+    assert "Call context with project='proj'" in text
+    assert "focus" in text
+    assert "recall" in text
+
+
+async def test_prompt_retrieval_returns_the_hygiene_guidance_text(server: ServerInfo):
+    """Retrieving the prompts over MCP returns exactly the pure-function text."""
+    async with mcp_client(server.url, server.alice_token) as client:
+        stale = await client.get_prompt("stale-review")
+        capture = await client.get_prompt("capture-scan")
+    stale_text = " ".join(m.content.text for m in stale.messages)
+    capture_text = " ".join(m.content.text for m in capture.messages)
+    assert stale_text == _stale_review_prompt()
+    assert capture_text == _capture_scan_prompt()
 
 
 async def test_discovery_announces_exactly_eleven_tools_and_three_prompts(

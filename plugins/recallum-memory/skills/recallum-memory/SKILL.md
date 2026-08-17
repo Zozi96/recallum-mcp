@@ -103,17 +103,21 @@ substantial work, run one capture scan: what newly verified context would save a
    memories about the same subject — across every category, since a `fact` can contradict a
    `decision` — which are otherwise invisible: the response shows your new memory and nothing
    else. Similarity means the two are about the same thing, never that they agree. Read both and
-   decide. When several active memories restate one underlying claim, consolidate them with
-   `merge_memories`: one consolidated statement, all sources retired and linked (recoverable via
-   `get_memory` history). Never merge contradictions — correct the wrong one with `update`.
+   decide. When several active memories restate or refine one underlying claim, consolidate them
+   with `merge_memories`: one consolidated statement, all sources retired and linked (recoverable
+   via `get_memory` history). Never merge contradictions — verify which one is wrong, then
+   `update` or `forget` it; the server never resolves similar memories for you.
 9. When a stored fact has changed, call `update` with the new `content` instead of `forget` plus
    `remember`. That retires the old memory and links it to its replacement, so the correction is
    recoverable and the two never both look current. Passing only `importance`, `category`, or
    `metadata` edits in place and keeps the id. Scope and project cannot be changed.
-10. Use `list_memories` only to browse or diagnose stored entries. In the stale queue, prefer
-`reconfirm` when the claim is still true instead of re-storing identical content. Use `forget` only when the user
-    requests removal or confirms an entry is wrong with nothing replacing it -- if something
-    replaces it, that is `update`.
+10. Use `list_memories` only to browse or diagnose stored entries. In the stale queue
+    (`stale=true`), verify each item with `get_memory` and end it with exactly one resolution:
+    `reconfirm` when the claim is still true — prefer it over re-storing identical content —
+    `update` when the fact changed, `forget` when the user requests removal or confirms the
+    entry is wrong with nothing replacing it (if something replaces it, that is `update`), or
+    `merge_memories` when it restates another active claim. Reviewing an item without concluding
+    is not a resolution; every verified stale item ends in one of those four actions.
 11. If the client supports MCP prompts, `session-start`, `capture-scan`, and `stale-review` are
 shortcuts for the start, capture, and stale-review parts of this workflow.
 

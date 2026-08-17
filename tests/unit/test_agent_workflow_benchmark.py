@@ -66,6 +66,7 @@ def test_fake_agent_observation_records_pivot_and_objective_check() -> None:
             "repeated-checkpoint-results",
             ["criterion:use-dokploy", "criterion:respect-release-window"],
         ),
+        ("cold-start-pivot", ["criterion:use-feature-toggle"]),
     ],
 )
 def test_fake_agent_objective_checks_cover_each_fixture(
@@ -97,11 +98,12 @@ def test_failed_launch_removes_the_temporary_workspace(
     assert not workspace.exists()
 
 
-def test_fixtures_cover_the_three_versioned_scenarios() -> None:
+def test_fixtures_cover_the_four_versioned_scenarios() -> None:
     assert set(FIXTURES) == {
         "session-rotation-pivot",
         "covered-by-initial-context",
         "repeated-checkpoint-results",
+        "cold-start-pivot",
     }
 
 
@@ -132,6 +134,50 @@ def test_probe_negotiates_with_fastmcp_and_separates_initial_from_pivot_memory(
         len(context.content[0].text),
         len(recall.content[0].text),
     ]
+
+
+def test_probe_does_not_rewind_phase_when_context_is_called_after_pivot(
+    probe_server: tuple[ProbeServer, str],
+) -> None:
+    probe, url = probe_server
+
+    async def exercise():
+        transport = StreamableHttpTransport(
+            url=url, headers={"Authorization": "Bearer token"}
+        )
+        async with Client(transport) as client:
+            await client.call_tool("context", {"project": "synthetic"})
+            await client.call_tool(
+                "recall", {"project": "synthetic", "query": "session-rotation-ttl"}
+            )
+            await client.call_tool("context", {"project": "synthetic"})
+
+    asyncio.run(exercise())
+    assert [event["phase"] for event in probe.events] == [
+        "triage",
+        "session-rotation",
+        "session-rotation",
+    ]
+    assert [event["tool"] for event in probe.events] == [
+        "context",
+        "recall",
+        "context",
+    ]
+    payload = {
+        "version": "1",
+        "runs": [
+            {
+                "run_id": "post-pivot-context",
+                "source": "observed",
+                "client": "grok-build",
+                "policy": "checkpoints",
+                "scenario": "session-rotation-pivot",
+                "status": "complete",
+                "events": probe.events,
+            }
+        ],
+    }
+    assert validate_runs(payload, load_scenarios(SCENARIOS))[0].run_id == "post-pivot-context"
 
 
 def test_probe_rejects_bad_auth_and_bounded_or_nonobject_requests(
@@ -226,6 +272,15 @@ def test_verifier_failure_and_absent_checkpoint_are_not_success(tmp_path: Path) 
     assert run["events"][-1]["applied_criterion_keys"] == []
 
 
+def test_dry_run_emits_clean_omission_payload(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--dry-run"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["version"] == "1"
+    assert payload["runs"] == []
+    with pytest.raises(SystemExit):
+        main(["--dry-run", "--", sys.executable, "not-run"])
+
+
 def test_agent_output_cannot_corrupt_cli_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -307,6 +362,48 @@ def test_exact_argv_placeholders_use_temporary_configs_and_workspace(tmp_path: P
     assert run["status"] == "complete"
     assert record["ok"] is True
     assert not Path(record["workspace"]).exists()
+
+
+def test_grok_build_child_sees_disposable_grok_home_with_probe_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_home = tmp_path / "real-grok-home"
+    (real_home / "marketplaces" / "recallum-local").mkdir(parents=True)
+    (real_home / "marketplaces" / "recallum-local" / "state").write_text(
+        "plugin-state", encoding="utf-8"
+    )
+    (real_home / "config.toml").write_text("real-secret-config", encoding="utf-8")
+    monkeypatch.setenv("GROK_HOME", str(real_home))
+    record_path = tmp_path / "record.json"
+    script = tmp_path / "inspect_grok.py"
+    script.write_text(
+        "import json, os, pathlib, sys\n"
+        "record_path = sys.argv[1]\n"
+        "home = pathlib.Path(os.environ['GROK_HOME'])\n"
+        "config = (home / 'config.toml').read_text(encoding='utf-8')\n"
+        "checks = [\n"
+        " 'plugin-state' == (home / 'marketplaces' / 'recallum-local' / 'state').read_text(\n"
+        "     encoding='utf-8'),\n"
+        " os.environ['RECALLUM_BENCHMARK_URL'] in config,\n"
+        " os.environ['RECALLUM_BENCHMARK_TOKEN'] in config,\n"
+        " 'real-secret-config' not in config,\n"
+        " home.parent.name.startswith('recallum-benchmark-'),\n"
+        "]\n"
+        "pathlib.Path(record_path).write_text(\n"
+        "    json.dumps({'ok': all(checks), 'home': str(home)}), encoding='utf-8'\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    run = run_once(
+        "covered-by-initial-context",
+        "grok-build",
+        "baseline",
+        [sys.executable, str(script), str(record_path)],
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert run["status"] == "complete"
+    assert record["ok"] is True
+    assert not Path(record["home"]).exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
