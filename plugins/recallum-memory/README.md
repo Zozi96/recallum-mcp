@@ -125,6 +125,16 @@ which prints the exact commands and mutates nothing:
 plugins/recallum-memory/scripts/install.sh --dry-run
 ```
 
+### Doctor
+
+Run the read-only, stdlib-only doctor to inspect client registrations, files, environment status,
+permissions, auth shape, and installed-version drift without printing secrets:
+
+```bash
+python3 plugins/recallum-memory/scripts/recallum_doctor.py
+python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
+```
+
 ### Options
 
 | Flag | Default | Meaning |

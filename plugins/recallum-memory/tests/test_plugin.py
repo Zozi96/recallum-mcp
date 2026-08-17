@@ -17,6 +17,25 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parents[1]
 HOOK = PLUGIN_ROOT / "hooks" / "recallum_hook.py"
 INSTALLER = PLUGIN_ROOT / "scripts" / "install.sh"
+DOCTOR = PLUGIN_ROOT / "scripts" / "recallum_doctor.py"
+
+
+def _load_doctor():
+    """Import the doctor as a module so its pure predicates can be unit-tested.
+
+    The other doctor tests drive it as a subprocess, which is right for
+    end-to-end redaction, but a redaction predicate deserves direct
+    table-driven coverage of the shapes that must never be echoed.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("recallum_doctor", DOCTOR)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 CODEX_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 GROK_MANIFEST = PLUGIN_ROOT / "plugin.json"
@@ -1821,6 +1840,53 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertIn("pluginSecrets", result.stdout)
             self.assertNotIn("secret-from-env", result.stdout)
 
+    def test_env_key_files_merge_second_variable_and_keep_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            first = "FIRST_RECALLUM_KEY"
+            second = "SECOND_RECALLUM_KEY"
+            env[first] = "first-secret"
+            env.pop(TOKEN_ENV_VAR, None)
+            result = self._run(env, "--url", URL, "--token-env-var", first, "--target", "codex")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env[second] = "second-secret"
+            env.pop(first, None)
+            result = self._run(env, "--url", URL, "--token-env-var", second, "--target", "codex")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env_file = root / ".config" / "recallum" / "env"
+            systemd_file = root / ".config" / "environment.d" / "99-recallum.conf"
+            body = env_file.read_text(encoding="utf-8")
+            systemd_body = systemd_file.read_text(encoding="utf-8")
+            self.assertEqual(body.count(f"export {first}="), 1)
+            self.assertEqual(body.count(f"export {second}="), 1)
+            self.assertIn(f"{first}=first-secret", systemd_body)
+            self.assertIn(f"{second}=second-secret", systemd_body)
+            self.assertNotIn("export ", systemd_body)
+            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(systemd_file.stat().st_mode & 0o777, 0o600)
+
+    def test_env_key_files_replace_existing_variable_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            name = "REPLACE_RECALLUM_KEY"
+            env[name] = "old-secret"
+            env.pop(TOKEN_ENV_VAR, None)
+            result = self._run(env, "--url", URL, "--token-env-var", name, "--target", "codex")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env[name] = "new-secret"
+            result = self._run(env, "--url", URL, "--token-env-var", name, "--target", "codex")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env_body = (root / ".config" / "recallum" / "env").read_text(encoding="utf-8")
+            systemd_body = (root / ".config" / "environment.d" / "99-recallum.conf").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(env_body.count(f"export {name}="), 1)
+            self.assertEqual(systemd_body.count(f"{name}="), 1)
+            self.assertIn("new-secret", env_body + systemd_body)
+            self.assertNotIn("old-secret", env_body + systemd_body)
+
     def test_api_key_file_is_used_without_env(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2243,6 +2309,397 @@ class CursorInstallerTests(InstallerTestCase):
             )
             self.assertFalse((snap / ".mcp.json").exists())
             self.assertTrue((snap / ".mcp.json.claude-only-ignored-by-cursor").is_file())
+
+
+class DoctorTests(unittest.TestCase):
+    def _write(self, home: Path, relative: str, contents: str, mode: int = 0o600) -> None:
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+        path.chmod(mode)
+
+    def _write_cli(self, home: Path, name: str, body: str) -> None:
+        path = home / "bin" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def _healthy_home(
+        self,
+        home: Path,
+        token: str = "rcl_doctor_secret_123",
+        codex_version: str = "0.12.0",
+    ) -> None:
+        self._write(
+            home,
+            ".cursor/mcp.json",
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "recallum": {
+                            "headers": {"Authorization": "Bearer " + token}
+                        }
+                    }
+                }
+            ),
+        )
+        self._write(
+            home,
+            ".claude.json",
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "recallum": {
+                            "headers": {"Authorization": "Bearer " + token}
+                        }
+                    }
+                }
+            ),
+        )
+        self._write(
+            home,
+            ".claude/.credentials.json",
+            json.dumps({"pluginSecrets": {"recallum-memory@recallum-local": {"api_token": token}}}),
+        )
+        self._write(
+            home,
+            ".grok/config.toml",
+            "[mcp_servers.recallum]\nurl = \"https://recallum.example/mcp/\"\n"
+            "[mcp_servers.recallum.headers]\nAuthorization = \"Bearer ${RECALLUM_API_KEY}\"\n",
+        )
+        self._write(
+            home,
+            ".codex/config.toml",
+            "[mcp_servers.recallum]\nurl = \"https://recallum.example/mcp/\"\n"
+            "bearer_token_env_var = \"RECALLUM_API_KEY\"\n",
+        )
+        self._write(home, ".config/recallum/env", "export RECALLUM_API_KEY=" + token + "\n")
+        self._write(
+            home,
+            ".cursor/plugins/cache/recallum-local/recallum-memory/0.12.0/plugin.json",
+            json.dumps({"version": "0.12.0"}),
+        )
+        self._write(
+            home,
+            ".cursor/plugins/cache/recallum-local/recallum-memory/0.12.0/mcp.json",
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "recallum_memory": {
+                            "type": "http",
+                            "url": "https://recallum.example/mcp/",
+                            "headers": {"Authorization": "Bearer " + token},
+                        }
+                    }
+                }
+            ),
+        )
+        self._write_cli(
+            home,
+            "claude",
+            "import json, sys\n"
+            "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
+            "    print(json.dumps([{'id': 'recallum-memory@recallum-local',\n"
+            "                      'version': '0.12.0', 'scope': 'user',\n"
+            "                      'enabled': True}]))\n",
+        )
+        self._write_cli(
+            home,
+            "codex",
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['plugin', 'list', '--json']:\n"
+            "    print(json.dumps({'installed': [{'pluginId': "
+            "'recallum-memory@recallum-local', 'version': "
+            + repr(codex_version)
+            + "}]}))\n"
+            "elif args == ['mcp', 'get', 'recallum', '--json']:\n"
+            "    print(json.dumps({'transport': {\n"
+            "        'type': 'streamable_http',\n"
+            "        'url': 'https://recallum.example/mcp/',\n"
+            "        'bearer_token_env_var': 'RECALLUM_API_KEY'}}))\n",
+        )
+        self._write_cli(
+            home,
+            "grok",
+            "import json, sys\n"
+            "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
+            "    print(json.dumps([{'name': 'recallum-memory',\n"
+            "                      'version': '0.12.0', 'enabled': True}]))\n",
+        )
+
+    def _run_doctor(self, home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOME": str(home),
+                "PATH": str(home / "bin") + ":/usr/bin:/bin",
+                "RECALLUM_API_KEY": "rcl_doctor_secret_123",
+            }
+        )
+        return subprocess.run(
+            [str(DOCTOR), *args],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_doctor_fake_home_all_clients_planted_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Recallum doctor: healthy", result.stdout)
+
+    def test_doctor_redacts_literal_token_in_text_and_json(self) -> None:
+        token = "rcl_doctor_secret_456"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home, token)
+            text_result = self._run_doctor(home)
+            json_result = self._run_doctor(home, "--json")
+            outputs = (
+                text_result.stdout + text_result.stderr,
+                json_result.stdout + json_result.stderr,
+            )
+            for output in outputs:
+                self.assertNotIn(token, output)
+                self.assertNotIn(token[4:], output)
+            self.assertIn("Bearer *** (literal)", text_result.stdout)
+            self.assertEqual(json.loads(json_result.stdout)["status"], "healthy")
+
+    def test_doctor_flags_stale_version_with_client_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            manifest = home / (
+                ".cursor/plugins/cache/recallum-local/recallum-memory/0.12.0/plugin.json"
+            )
+            manifest.write_text('{"version": "0.11.0"}', encoding="utf-8")
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("VERSION DRIFT", result.stdout)
+            self.assertIn("Cursor", result.stdout)
+
+    def test_doctor_flags_stale_codex_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home, codex_version="0.11.0")
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("VERSION DRIFT", result.stdout)
+            self.assertIn("Codex", result.stdout)
+
+    def test_doctor_redacts_invalid_codex_transport_type_in_text_and_json(self) -> None:
+        token = "rcl_transport_secret_789"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write(
+                home,
+                ".claude.json",
+                json.dumps(
+                    {"mcpServers": {"recallum": {"type": token, "headers": {"Authorization": "Bearer x"}}}}
+                ),
+            )
+            self._write(
+                home,
+                ".cursor/mcp.json",
+                json.dumps(
+                    {"mcpServers": {"recallum": {"type": token, "headers": {"Authorization": "Bearer x"}}}}
+                ),
+            )
+            self._write_cli(
+                home,
+                "codex",
+                "import json, sys\n"
+                "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
+                "    print(json.dumps({'installed': [{'pluginId': "
+                "'recallum-memory@recallum-local', 'version': '0.12.0'}]}))\n"
+                "elif sys.argv[1:] == ['mcp', 'get', 'recallum', '--json']:\n"
+                "    print(json.dumps({'transport': {'type': "
+                + repr(token)
+                + ", 'url': 'https://recallum.example/mcp/', "
+                "'bearer_token_env_var': 'RECALLUM_API_KEY'}}))\n",
+            )
+            for args in ((), ("--json",)):
+                result = self._run_doctor(home, *args)
+                output = result.stdout + result.stderr
+                self.assertNotIn(token, output)
+                self.assertNotIn(token[4:], output)
+                self.assertIn('"type": "invalid"', output)
+            report = json.loads(self._run_doctor(home, "--json").stdout)
+            self.assertEqual(report["clients"]["Claude Code"]["native_mcp"]["type"], "invalid")
+            self.assertEqual(report["clients"]["Cursor"]["native_mcp"]["type"], "invalid")
+
+    def test_doctor_falls_back_to_codex_toml_and_reports_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            (home / "bin" / "codex").unlink()
+            self._write(
+                home,
+                ".codex/config.toml",
+                "[mcp_servers.recallum]\n"
+                "version = \"0.11.0\"\n"
+                "url = \"https://old.example/mcp/\"\n"
+                "bearer_token_env_var = \"RECALLUM_API_KEY\"\n",
+            )
+            result = self._run_doctor(home, "--json")
+            self.assertEqual(result.returncode, 1)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["clients"]["Codex"]["mcp"]["url"], "https://old.example/mcp/")
+            self.assertEqual(
+                report["clients"]["Codex"]["mcp"]["auth"], "Bearer ${RECALLUM_API_KEY}"
+            )
+            self.assertTrue(any("VERSION DRIFT: Codex" in item for item in report["problems"]))
+
+    def test_doctor_cli_less_codex_without_version_is_present_but_unversioned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            (home / "bin" / "codex").unlink()
+            result = self._run_doctor(home, "--json")
+            self.assertEqual(result.returncode, 1)
+            report = json.loads(result.stdout)
+            self.assertTrue(report["clients"]["Codex"]["plugin_present"])
+            self.assertTrue(any("VERSION UNKNOWN: Codex" in item for item in report["problems"]))
+
+    def test_doctor_adversarial_credentials_and_null_servers_are_safe(self) -> None:
+        # Underscores only, no hyphen: a hyphenated token is rejected by the
+        # environment-variable-name predicate for the wrong reason, so it cannot
+        # prove the token-name field is redacted. Real base64url keys often
+        # contain no hyphen at all.
+        token = "rcl_adversarial_secret_789"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home, token)
+            self._write(
+                home,
+                ".claude.json",
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "url": f"https://example.test/mcp?token={token}",
+                                "headers": {"Authorization": f"Bearer {token}"},
+                            }
+                        }
+                    }
+                ),
+            )
+            self._write(
+                home,
+                ".grok/config.toml",
+                "[mcp_servers.recallum]\n"
+                f'url = "https://{token}@example.test/mcp"\n'
+                "[mcp_servers.recallum.headers]\n"
+                'Authorization = "Bearer ${RECALLUM_API_KEY}"\n',
+            )
+            self._write(
+                home,
+                ".cursor/mcp.json",
+                json.dumps({"mcpServers": None}),
+            )
+            self._write(
+                home,
+                ".cursor/plugins/cache/recallum-local/recallum-memory/0.12.0/mcp.json",
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum_memory": {
+                                "url": f"https://example.test/mcp?token={token}",
+                                "headers": {"Authorization": f"Basic {token}"},
+                            }
+                        }
+                    }
+                ),
+            )
+            self._write_cli(
+                home,
+                "codex",
+                "import json, sys\n"
+                "args = sys.argv[1:]\n"
+                "if args == ['plugin', 'list', '--json']:\n"
+                "    print(json.dumps({'installed': [{'pluginId': "
+                "'recallum-memory@recallum-local', 'version': '0.12.0'}]}))\n"
+                "elif args == ['mcp', 'get', 'recallum', '--json']:\n"
+                "    print(json.dumps({'transport': {'type': 'http', "
+                f"'url': 'https://example.test/mcp?token={token}', "
+                f"'bearer_token_env_var': '{token}'"
+                "}}))\n",
+            )
+
+            for args in ((), ("--json",)):
+                result = self._run_doctor(home, *args)
+                output = result.stdout + result.stderr
+                self.assertNotIn("Traceback", output)
+                self.assertNotIn(token, output)
+                self.assertNotIn(token[4:], output)
+                self.assertIn("Cursor mcpServers must be an object", output)
+            report = json.loads(self._run_doctor(home, "--json").stdout)
+            claude = report["clients"]["Claude Code"]["native_mcp"]
+            self.assertEqual(claude["url"], "https://example.test/mcp")
+            self.assertTrue(claude["url_query_present"])
+            grok = report["clients"]["Grok Build"]["native_mcp"]
+            self.assertEqual(grok["url"], "https://example.test/mcp")
+            self.assertTrue(grok["url_userinfo_present"])
+            codex = report["clients"]["Codex"]["mcp"]
+            self.assertEqual(codex["bearer_token_env_var"], "invalid")
+            cursor = report["clients"]["Cursor"]["plugin_cache"][0]["mcp"]
+            self.assertEqual(cursor["auth"], "invalid")
+
+    def test_doctor_healthy_configuration_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self.assertEqual(self._run_doctor(home, "--json").returncode, 0)
+
+    def test_doctor_survives_null_plugin_secrets(self) -> None:
+        """A null ``pluginSecrets`` is the same shape as a null ``mcpServers``:
+        present, so the key check passes, but not a mapping. The doctor must
+        report it rather than traceback on the very file it exists to diagnose."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write(home, ".claude/.credentials.json", json.dumps({"pluginSecrets": None}))
+            for args in ((), ("--json",)):
+                output_result = self._run_doctor(home, *args)
+                combined = output_result.stdout + output_result.stderr
+                self.assertNotIn("Traceback", combined)
+
+    def test_doctor_rejects_credential_shaped_token_env_names(self) -> None:
+        """The env-var-name predicate is a redaction boundary. Every shape here
+        satisfies ``^[A-Z][A-Z0-9_]{0,63}$`` or its lower-case predecessor, so a
+        credential parked in that field would print verbatim if unguarded."""
+        for candidate in (
+            "rcl_adversarial_secret_789",
+            "RCL_LOOKS_LIKE_A_NAME",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ASIAIOSFODNN7EXAMPLE",
+            "sk_live_abcdefghijklmnop",
+            "lowercase_name",
+            "HAS-HYPHEN",
+            "X" * 65,
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(_load_doctor()._safe_token_env(candidate), "invalid")
+        self.assertEqual(_load_doctor()._safe_token_env("RECALLUM_API_KEY"), "RECALLUM_API_KEY")
+
+    def test_doctor_empty_home_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run_doctor(Path(directory))
+            self.assertEqual(result.returncode, 0)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_setup_skill_uses_doctor_for_secret_inspection(self) -> None:
+        skill = (PLUGIN_ROOT / "skills" / "recallum-setup" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("recallum_doctor.py", skill)
+        self.assertNotIn("json.load", skill)
+        self.assertNotIn("cat ~/.cursor/mcp.json", skill)
 
 
 if __name__ == "__main__":

@@ -466,8 +466,9 @@ store_env_key_files() {
   umask 077
   printf '%s' "$key" >"$key_path"
   chmod 600 "$key_path"
-  python3 - "$env_file" "$systemd_file" "$key_path" "${names[@]}" <<'PY'
+python3 - "$env_file" "$systemd_file" "$key_path" "${names[@]}" <<'PY'
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -477,17 +478,49 @@ key = Path(sys.argv[3]).read_text(encoding="utf-8")
 names = sys.argv[4:]
 if not key:
     raise SystemExit("error: refused to store an empty API key")
+if any(ch in key for ch in "\n\r"):
+    raise SystemExit("error: API key must be a single line")
 
 def shell_single_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
+def read_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+
+def merge_lines(existing: list[str], header: list[str], pattern, render) -> list[str]:
+    written = set(names)
+    merged = []
+    replaced = set()
+    for line in existing:
+        if line in header:
+            continue
+        match = pattern.match(line)
+        name = match.group(1) if match else None
+        if name in written:
+            if name not in replaced:
+                merged.append(render(name))
+                replaced.add(name)
+            continue
+        merged.append(line)
+    for name in names:
+        if name not in replaced:
+            merged.append(render(name))
+    return header + merged
+
 env_file.parent.mkdir(parents=True, exist_ok=True)
-lines = [
+env_header = [
     "# Managed by recallum install.sh — do not commit. chmod 600.",
     "# Source from your shell profile:  [ -f ~/.config/recallum/env ] && . ~/.config/recallum/env",
 ]
-for name in names:
-    lines.append(f"export {name}={shell_single_quote(key)}")
+lines = merge_lines(
+    read_lines(env_file),
+    env_header,
+    re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)="),
+    lambda name: f"export {name}={shell_single_quote(key)}",
+)
 tmp = env_file.with_suffix(".env.tmp")
 tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
 os.chmod(tmp, 0o600)
@@ -496,12 +529,13 @@ os.chmod(env_file, 0o600)
 
 # systemd user environment.d: KEY=value, no export, loaded at login.
 systemd_file.parent.mkdir(parents=True, exist_ok=True)
-sys_lines = ["# Managed by recallum install.sh — re-login for desktop apps to pick this up."]
-for name in names:
-    # Values with newlines are already rejected; escape nothing beyond that.
-    if any(ch in key for ch in "\n\r"):
-        raise SystemExit("error: API key must be a single line")
-    sys_lines.append(f"{name}={key}")
+systemd_header = ["# Managed by recallum install.sh — re-login for desktop apps to pick this up."]
+sys_lines = merge_lines(
+    read_lines(systemd_file),
+    systemd_header,
+    re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)="),
+    lambda name: f"{name}={key}",
+)
 tmp_s = systemd_file.with_suffix(".conf.tmp")
 tmp_s.write_text("\n".join(sys_lines) + "\n", encoding="utf-8")
 os.chmod(tmp_s, 0o600)

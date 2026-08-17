@@ -23,27 +23,32 @@ Cursor: `install.sh --target cursor` (or `auto` when `cursor-agent`/`agent` is o
 marketplace and writes a mode-600 `~/.cursor/mcp.json` entry. Plugin install is still done in the
 Cursor UI (`/plugins` or Settings → Plugins); the CLI cannot install plugins.
 
+## Diagnose
+
+ALL status inspection must go through `plugins/recallum-memory/scripts/recallum_doctor.py`. Reading
+`~/.cursor/mcp.json`, `~/.claude/.credentials.json`, `~/.config/recallum/env`,
+`~/.grok/config.toml`, or any plugin-cache `mcp.json` with `cat`, `head`, `grep`, `python`, or
+another raw-file recipe is forbidden: these files interleave ordinary configuration with a literal
+bearer token. The doctor is read-only and redacts bearer values in both text and JSON output.
+
+```bash
+plugins/recallum-memory/scripts/recallum_doctor.py
+plugins/recallum-memory/scripts/recallum_doctor.py --json
+```
+
+Use `--token-env-var NAME` for a custom token variable and `--repo-root PATH` for another checkout.
+Cursor and the Cursor plugin cache were previously undocumented for inspection, which is how the
+credential leak happened.
+
 ## Setup — Codex
 
 1. Confirm the plugin marketplace and installation:
    `codex plugin marketplace list --json` must contain `recallum-local` at this repository root,
    and `codex plugin list` must show `recallum-memory`.
-2. Inspect only safe MCP fields; discard static headers because an older definition may contain a
-   credential:
+2. Run the read-only doctor for safe MCP fields, environment status, permissions, and version drift:
 
    ```bash
-   codex mcp get recallum --json | python3 -c '
-   import json, sys
-   data = json.load(sys.stdin)
-   transport = data.get("transport", {})
-   safe = {
-       "name": data.get("name"),
-       "type": transport.get("type"),
-       "url": transport.get("url"),
-       "bearer_token_env_var": transport.get("bearer_token_env_var"),
-   }
-   print(json.dumps(safe, indent=2))
-   '
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
    ```
 
    It must be a streamable HTTP server whose URL ends in `/mcp` or `/mcp/` and whose
@@ -74,28 +79,14 @@ enabling the plugin prompts for it rather than pointing at someone else's.
 1. Confirm the plugin marketplace and installation:
    `claude plugin marketplace list --json` must contain `recallum-local` at this repository root,
    and `claude plugin list --json` must contain the id `recallum-memory@recallum-local`.
-2. Confirm the native Desktop entry (safe fields only):
+2. Confirm the native Desktop entry and plugin credential without opening credential-bearing JSON:
 
    ```bash
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
-   data = json.loads(Path.home().joinpath(".claude.json").read_text() or "{}")
-   s = (data.get("mcpServers") or {}).get("recallum") or {}
-   headers = s.get("headers") or {}
-   auth = headers.get("Authorization") or ""
-   print({
-       "url": s.get("url"),
-       "type": s.get("type"),
-       "authorization": "Bearer ***" if auth.startswith("Bearer ") and len(auth) > 7 else auth or None,
-   })
-   PY
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
    ```
 
-   Expect the install URL ending in `/mcp/` and a non-empty Bearer form.
-3. Check whether a plugin credential can resolve: `pluginSecrets["recallum-memory@recallum-local"].api_token`
-   in `~/.claude/.credentials.json` (written by `install.sh` or `/plugin configure`). Never pass
-   the key with `--config api_token=...`. Only `mcp_url` is safe on the CLI.
+   The doctor reports only redacted auth state, file permissions, and whether the plugin credential
+   can resolve. Never pass the key with `--config api_token=...`. Only `mcp_url` is safe on the CLI.
 
    **With neither pluginSecrets nor a native Bearer, tool calls fail auth.** A healthy
    `claude mcp list` line is not evidence of working Desktop ToolSearch.
@@ -142,22 +133,11 @@ native entry takes precedence over any broken plugin-bundled MCP definition with
 1. Confirm the marketplace and plugin:
    `grok plugin marketplace list --json` must contain `recallum-local`, and
    `grok plugin list --json` must show `recallum-memory` enabled.
-2. Inspect only safe MCP fields from config (never print expanded secrets from
+2. Inspect the MCP entry with the secret-safe, read-only doctor (never print expanded secrets from
    `grok mcp list --json`, which interpolates env vars for display):
 
    ```bash
-   python3 - <<'PY'
-   from pathlib import Path
-   import tomllib
-   cfg = tomllib.loads(Path.home().joinpath(".grok/config.toml").read_text())
-   server = cfg.get("mcp_servers", {}).get("recallum", {})
-   headers = server.get("headers") or {}
-   print({
-       "url": server.get("url"),
-       "enabled": server.get("enabled", True),
-       "authorization": headers.get("Authorization"),
-   })
-   PY
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
    ```
 
    `url` must end in `/mcp/`, and `authorization` must be exactly
@@ -174,8 +154,12 @@ native entry takes precedence over any broken plugin-bundled MCP definition with
 
 ## Shared Checks
 
-1. Check only whether the token environment variable or Claude Code fallback is present. Report set
-   or unset; never reveal its value.
+1. Check only whether the token environment variable or Claude Code fallback is present. The
+   read-only doctor reports set or unset and never reveals its value:
+
+   ```bash
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
+   ```
 2. Confirm the server is ready and that tool discovery exposes the Recallum tools — at least
    `context`, `recall`, `remember`, `list_memories`, and `forget` (current servers also expose
    `get_memory`, `remember_batch`, `update`, and `merge_memories`) — under the prefix for that
@@ -218,6 +202,10 @@ echo the key while doing so.
   tools never enter Desktop’s deferred catalog. Confirm `~/.claude.json` has `mcpServers.recallum`,
   re-run `install.sh --target claude --force-mcp`, fully quit Claude.app, and re-check with
   ToolSearch `+recallum` — not with nested `claude mcp list`.
+- **Cursor/cache leak:** never inspect or print Cursor `mcp.json` or cached `.mcp.json` with ad-hoc
+  JSON/TOML recipes. The Cursor cache can load Claude-only `${user_config.*}` entries and can expose
+  a literal bearer; run `python3 plugins/recallum-memory/scripts/recallum_doctor.py`
+  and treat any cache-leak or permission issue as a failure.
 - Authentication failure on Codex: verify the named environment variable is present in the
   environment that launches Codex and that the key is active; do not request the value in chat.
 - Authentication failure on Claude Code: re-run install (pluginSecrets + native Bearer) or
