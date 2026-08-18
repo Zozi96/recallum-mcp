@@ -2502,14 +2502,28 @@ class DoctorTests(unittest.TestCase):
                 home,
                 ".claude.json",
                 json.dumps(
-                    {"mcpServers": {"recallum": {"type": token, "headers": {"Authorization": "Bearer x"}}}}
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": token,
+                                "headers": {"Authorization": "Bearer x"},
+                            }
+                        }
+                    }
                 ),
             )
             self._write(
                 home,
                 ".cursor/mcp.json",
                 json.dumps(
-                    {"mcpServers": {"recallum": {"type": token, "headers": {"Authorization": "Bearer x"}}}}
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": token,
+                                "headers": {"Authorization": "Bearer x"},
+                            }
+                        }
+                    }
                 ),
             )
             self._write_cli(
