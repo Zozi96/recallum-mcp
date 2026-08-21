@@ -984,6 +984,7 @@ class MemoryRepositoryContract:
             other_user_id,
             **self._kwargs(content="usage foreign", content_hash=_hash("usage-foreign")),
         )
+        generation_before = await repo.get_memory_generation(user_id)
 
         await repo.mark_recalled(user_id, [mine.id, foreign.id])
         await repo.mark_recalled(user_id, [mine.id])
@@ -995,6 +996,59 @@ class MemoryRepositoryContract:
         untouched = await repo.get_active(other_user_id, foreign.id)
         assert untouched.recall_count == 0
         assert untouched.last_recalled_at is None
+        # Usage recording is not a corpus mutation: the materialized profile
+        # must not be invalidated by recalls.
+        assert await repo.get_memory_generation(user_id) == generation_before
+
+    async def test_context_snapshot_observes_one_visible_set(self, repo, user_id):
+        """Profile, tops, dynamic, count and focus share one visible snapshot."""
+        pref = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="prefer conventional commits",
+                category="preference",
+                content_hash=_hash("pref-snap"),
+                importance=8,
+            ),
+        )
+        fact = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="payment webhooks retry twice",
+                category="fact",
+                content_hash=_hash("fact-snap"),
+                importance=1,
+            ),
+        )
+        generation = await repo.get_memory_generation(user_id)
+        await repo.mark_recalled(user_id, [fact.id])
+        since = datetime.now(UTC) - timedelta(days=14)
+
+        snap = await repo.context_snapshot(
+            user_id,
+            project=None,
+            visibility=MemoryVisibility.global_only(),
+            category=None,
+            top_limit=10,
+            candidate_limit=10,
+            query="payment webhooks retry",
+            embedding=None,
+            embedding_model="contract-embedding-model",
+            trigram_min_word_similarity=None,
+            static_limit=12,
+            dynamic_limit=8,
+            dynamic_since=since,
+            static_min_importance=8,
+        )
+
+        assert snap.generation == generation
+        assert snap.total_available == 2
+        assert {memory.id for memory in snap.global_top} == {pref.id, fact.id}
+        assert [memory.id for memory in snap.dynamic_candidates] == [fact.id]
+        assert snap.project_top == []
+        text_ids = {scored.memory.id for scored in snap.focus.text}
+        assert fact.id in text_ids
+        assert list(snap.focus.vector) == []
 
     async def test_list_active_staleness_filters_use_last_confirmation(self, repo, user_id):
         """Pins the comparison direction and that the total honours the filter.

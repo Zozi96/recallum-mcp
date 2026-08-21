@@ -6,6 +6,7 @@ import uuid
 
 from recallum.db.repositories.memory_repo import ProfileGenerationConflict
 from recallum.memory.limits import MemoryLimits
+from recallum.memory.profile_select import items_from_stored, profile_content_hash
 from recallum.memory.service import MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository
 from tests.unit.test_service import make_service
@@ -23,9 +24,7 @@ async def test_remember_preference_lands_in_profile_and_context():
 
     ctx = await service.context(USER)
     assert ctx.profile.available is True
-    assert any(
-        item.content == "prefer conventional commits" for item in ctx.profile.static
-    )
+    assert any(item.content == "prefer conventional commits" for item in ctx.profile.static)
     # Preference is in profile, not duplicated in category groups.
     group_ids = {item.id for group in ctx.groups for item in group.items}
     assert remembered.memory.id not in group_ids
@@ -59,9 +58,7 @@ async def test_focus_does_not_evict_profile():
 
 async def test_forget_removes_from_profile():
     service, repo, _ = make_service()
-    remembered = await service.remember(
-        USER, content="temporary preference", category="preference"
-    )
+    remembered = await service.remember(USER, content="temporary preference", category="preference")
     mid = remembered.memory.id
     assert mid in repo.profiles[(USER, "")].source_memory_ids
 
@@ -83,6 +80,7 @@ async def test_rebuild_failure_does_not_roll_back_remember():
 async def test_context_degrades_when_profile_unavailable():
     service, repo, _ = make_service()
     await service.remember(USER, content="a fact about x", category="fact", importance=4)
+
     # Force profile path to fail by making upsert always fail after first rebuild.
     async def boom(*_a, **_k):
         raise RuntimeError("profile store down")
@@ -151,6 +149,54 @@ async def test_recent_static_overflow_can_fall_through_to_dynamic():
 
     assert [item.id for item in block.static] == [static.memory.id]
     assert [item.id for item in block.dynamic] == [overflow.memory.id]
+
+
+async def test_served_digest_covers_live_dynamic_and_built_at_stays_static():
+    service, repo, _ = make_service()
+    await service.remember(
+        USER, content="prefer conventional commits", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="the auth service uses Granian", category="fact", importance=1
+    )
+    stored = repo.profiles[(USER, "")]
+    static_hash = profile_content_hash(items_from_stored(stored.static_items), [])
+    assert stored.content_hash == static_hash
+    built_at = stored.built_at
+    generation = repo.generations[USER]
+
+    await repo.mark_recalled(USER, [fact.memory.id])
+    block = await service.get_profile(USER)
+
+    assert repo.generations[USER] == generation
+    assert block.built_at == built_at
+    assert [item.id for item in block.dynamic] == [fact.memory.id]
+    assert block.digest == profile_content_hash(block.static, block.dynamic)
+    assert block.digest != stored.content_hash
+
+
+async def test_context_after_recall_reuses_static_and_shows_dynamic():
+    service, repo, _ = make_service()
+    pref = await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="payment webhooks retry twice", category="fact", importance=1
+    )
+    first = await service.context(USER)
+    built_at = first.profile.built_at
+    generation = repo.generations[USER]
+    assert any(item.id == pref.memory.id for item in first.profile.static)
+    assert first.profile.dynamic == []
+
+    recalled = await service.recall(USER, query="payment webhooks retry")
+    assert any(item.id == fact.memory.id for item in recalled.results)
+
+    second = await service.context(USER)
+    assert repo.generations[USER] == generation
+    assert second.profile.built_at == built_at
+    assert any(item.id == pref.memory.id for item in second.profile.static)
+    assert [item.id for item in second.profile.dynamic] == [fact.memory.id]
 
 
 async def test_project_profile_is_combined_without_cross_project_memory():

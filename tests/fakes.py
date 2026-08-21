@@ -278,6 +278,71 @@ class FakeMemoryRepository:
             ),
         )
 
+    async def context_snapshot(
+        self,
+        user_id: uuid.UUID,
+        *,
+        project: str | None,
+        visibility: MemoryVisibility,
+        category: str | None,
+        top_limit: int,
+        candidate_limit: int,
+        query: str | None,
+        embedding: list[float] | None,
+        embedding_model: str | None,
+        trigram_min_word_similarity: float | None,
+        static_limit: int,
+        dynamic_limit: int,
+        dynamic_since: datetime,
+        static_min_importance: int,
+    ):
+        from types import SimpleNamespace
+
+        global_top = await self.most_important_active(
+            user_id, visibility=MemoryVisibility.global_only(), limit=top_limit
+        )
+        project_top = (
+            await self.most_important_active(
+                user_id, visibility=MemoryVisibility.project_only(project), limit=top_limit
+            )
+            if project is not None
+            else []
+        )
+        rows = self._filtered(user_id, visibility, None)
+        dynamic = [
+            m
+            for m in rows
+            if m.last_recalled_at is not None and m.last_recalled_at >= dynamic_since
+        ]
+        dynamic.sort(key=lambda m: str(m.id))
+        dynamic.sort(
+            key=lambda m: (m.last_recalled_at or datetime.min.replace(tzinfo=UTC), m.created_at),
+            reverse=True,
+        )
+        pools = (
+            await self.search_candidates(
+                user_id,
+                query=query,
+                embedding=embedding,
+                embedding_model=embedding_model,
+                visibility=visibility,
+                category=category,
+                limit=candidate_limit,
+                trigram_min_word_similarity=trigram_min_word_similarity,
+            )
+            if query is not None
+            else CandidatePools(vector=[], text=[], trigram=[])
+        )
+        return SimpleNamespace(
+            profile=await self.get_profile(user_id, project=project),
+            generation=await self.get_memory_generation(user_id),
+            global_top=global_top,
+            project_top=project_top,
+            dynamic_candidates=dynamic[: dynamic_limit + static_limit],
+            total_available=len(rows),
+            focus=pools,
+        )
+
     async def graph_snapshot(
         self,
         user_id: uuid.UUID,
@@ -535,7 +600,6 @@ class FakeMemoryRepository:
                 continue
             memory.recall_count = (memory.recall_count or 0) + 1
             memory.last_recalled_at = now
-            self._bump(user_id)
 
     async def mark_seen_in_context(
         self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]

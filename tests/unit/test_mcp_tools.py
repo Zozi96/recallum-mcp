@@ -961,6 +961,11 @@ async def test_profile_resource_is_registered_and_context_includes_profile(serve
                 "project": "alpha",
             },
         )
+        await client.call_tool(
+            "remember",
+            {"content": "payment webhooks retry twice", "category": "fact", "importance": 1},
+        )
+        await client.call_tool("recall", {"query": "payment webhooks retry"})
         global_profile = await _read_profile_resource(client, "recallum://profile")
         project_profile = await _read_profile_resource(client, "recallum://profile/alpha")
         assert global_profile["project"] is None
@@ -972,6 +977,9 @@ async def test_profile_resource_is_registered_and_context_includes_profile(serve
             "prefer English commit messages",
             "alpha deploys require a canary",
         }
+        assert [item["content"] for item in global_profile["dynamic"]] == [
+            "payment webhooks retry twice"
+        ]
         context = await client.call_tool("context", {})
         profile = context.structured_content.get("profile") or {}
         assert profile.get("available") is True

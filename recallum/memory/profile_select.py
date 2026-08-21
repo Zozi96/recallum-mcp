@@ -99,9 +99,7 @@ def select_profile_slices(
     static_candidates = [
         m
         for m in memories
-        if _is_static_eligible(
-            m, min_importance=limits.profile_static_min_importance
-        )
+        if _is_static_eligible(m, min_importance=limits.profile_static_min_importance)
     ]
     static_candidates.sort(key=lambda m: str(m.id))
     static_candidates.sort(key=_confirmed_at, reverse=True)
@@ -113,11 +111,33 @@ def select_profile_slices(
     )
     static_ids = {item.id for item in static_items}
 
+    dynamic_items = select_dynamic_slice(memories, limits=limits, now=now, exclude_ids=static_ids)
+    source_ids = [item.id for item in (*static_items, *dynamic_items)]
+    return SelectedProfile(
+        static=static_items,
+        dynamic=dynamic_items,
+        source_memory_ids=source_ids,
+        content_hash=profile_content_hash(static_items, dynamic_items),
+    )
+
+
+def select_dynamic_slice(
+    memories: Sequence[Memory],
+    *,
+    limits: MemoryLimits,
+    now: datetime,
+    exclude_ids: set[uuid.UUID] | frozenset[uuid.UUID],
+) -> list[ProfileItem]:
+    """Pick the dynamic slice from already-filtered active memories.
+
+    Used by the materialized profile rebuild and by read-time assembly: the
+    dynamic slice reflects live ``last_recalled_at`` activity without forcing
+    a rebuild, so ``recall`` usage reaches ``context`` without invalidating
+    the static materialization.
+    """
     since = now - timedelta(days=limits.profile_dynamic_window_days)
     dynamic_candidates = [
-        m
-        for m in memories
-        if m.id not in static_ids and _is_dynamic_eligible(m, since=since)
+        m for m in memories if m.id not in exclude_ids and _is_dynamic_eligible(m, since=since)
     ]
     # last_recalled_at desc nulls last, then created_at desc, then id
     dynamic_candidates.sort(key=lambda m: str(m.id))
@@ -130,23 +150,14 @@ def select_profile_slices(
         return memory.created_at.replace(year=1970)
 
     dynamic_candidates.sort(key=_recalled_key, reverse=True)
-    dynamic_items = _budget_items(
+    return _budget_items(
         dynamic_candidates,
         max_items=limits.profile_dynamic_max_items,
         max_chars=limits.profile_dynamic_max_chars,
     )
-    source_ids = [item.id for item in (*static_items, *dynamic_items)]
-    return SelectedProfile(
-        static=static_items,
-        dynamic=dynamic_items,
-        source_memory_ids=source_ids,
-        content_hash=profile_content_hash(static_items, dynamic_items),
-    )
 
 
-def profile_content_hash(
-    static: Sequence[ProfileItem], dynamic: Sequence[ProfileItem]
-) -> str:
+def profile_content_hash(static: Sequence[ProfileItem], dynamic: Sequence[ProfileItem]) -> str:
     """Stable SHA-256 over the canonical serialization of both slices."""
     payload = {
         "static": [item.as_dict() for item in static],
@@ -174,7 +185,7 @@ def items_from_stored(raw: Sequence[dict[str, Any]] | None) -> list[ProfileItem]
                     content_truncated=bool(entry.get("content_truncated", False)),
                 )
             )
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
     return items
 

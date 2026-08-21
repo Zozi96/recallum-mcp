@@ -44,6 +44,8 @@ from recallum.memory.limits import MemoryLimits
 from recallum.memory.profile_select import (
     apply_profile_budget,
     items_from_stored,
+    profile_content_hash,
+    select_dynamic_slice,
     select_profile_slices,
 )
 from recallum.memory.schemas import (
@@ -57,6 +59,7 @@ from recallum.memory.schemas import (
     MemoryOut,
     MergeResult,
     ProfileBlock,
+    ProfileItem,
     ReassignResult,
     RecalledMemory,
     RecallResult,
@@ -132,9 +135,7 @@ class MemoryService:
                 importance=(
                     validated_importance if validated_importance != existing.importance else None
                 ),
-                category=(
-                    validated_category if validated_category != existing.category else None
-                ),
+                category=(validated_category if validated_category != existing.category else None),
                 metadata=(
                     validated_metadata
                     if validated_metadata != dict(existing.metadata_ or {})
@@ -144,9 +145,7 @@ class MemoryService:
             # It IS a reconfirmation, though: the claim was just observed to
             # still hold, and readers use that stamp to judge freshness.
             reconfirmed = await self._repo.mark_reconfirmed(user_id, existing.id)
-            current = next(
-                row for row in (reconfirmed, refreshed, existing) if row is not None
-            )
+            current = next(row for row in (reconfirmed, refreshed, existing) if row is not None)
             await self._rebuild_profiles_for_memory(user_id, current)
             return RememberResult(memory=_to_memory_out(current), created=False)
 
@@ -263,9 +262,7 @@ class MemoryService:
         if not items:
             raise MemoryValidationError("batch must contain at least one item")
         if len(items) > self._limits.batch_max_items:
-            raise MemoryValidationError(
-                f"batch exceeds {self._limits.batch_max_items} items"
-            )
+            raise MemoryValidationError(f"batch exceeds {self._limits.batch_max_items} items")
         outcomes: list[RememberBatchItemOutcome] = []
         for item in items:
             try:
@@ -283,9 +280,7 @@ class MemoryService:
                 continue
             except EmbeddingError as exc:
                 record_sanitized_failure(logger, exc, message="Memory batch item failure")
-                outcomes.append(
-                    RememberBatchItemOutcome(error=EMBEDDING_UNAVAILABLE_MESSAGE)
-                )
+                outcomes.append(RememberBatchItemOutcome(error=EMBEDDING_UNAVAILABLE_MESSAGE))
                 continue
             outcomes.append(
                 RememberBatchItemOutcome(
@@ -297,9 +292,7 @@ class MemoryService:
         return RememberBatchResult(
             results=outcomes,
             stored=sum(1 for o in outcomes if o.memory is not None and o.created),
-            deduplicated=sum(
-                1 for o in outcomes if o.memory is not None and not o.created
-            ),
+            deduplicated=sum(1 for o in outcomes if o.memory is not None and not o.created),
             failed=sum(1 for o in outcomes if o.error is not None),
         )
 
@@ -413,9 +406,7 @@ class MemoryService:
         if len(unique_ids) < 2:
             raise MemoryValidationError("merging needs at least two source memories")
         if len(unique_ids) > self._limits.merge_max_sources:
-            raise MemoryValidationError(
-                f"merge exceeds {self._limits.merge_max_sources} sources"
-            )
+            raise MemoryValidationError(f"merge exceeds {self._limits.merge_max_sources} sources")
         normalized = self._normalize_content(content)
         validated_category = self._validate_category(category)
         validated_importance = (
@@ -502,9 +493,7 @@ class MemoryService:
                 "project; retry the migration"
             ) from exc
         if moved:
-            await self._rebuild_profiles_for_keys(
-                user_id, [normalized_from, normalized_to]
-            )
+            await self._rebuild_profiles_for_keys(user_id, [normalized_from, normalized_to])
         return ReassignResult(
             from_project=normalized_from,
             to_project=normalized_to,
@@ -516,9 +505,7 @@ class MemoryService:
     # reembed
     # ------------------------------------------------------------------
 
-    async def reembed_stale(
-        self, user_id: uuid.UUID, *, batch_size: int = 50
-    ) -> tuple[int, int]:
+    async def reembed_stale(self, user_id: uuid.UUID, *, batch_size: int = 50) -> tuple[int, int]:
         """Re-embed active memories whose vector provenance is stale.
 
         Covers rows embedded by another model and rows predating provenance
@@ -719,12 +706,16 @@ class MemoryService:
         ``focus`` biases the categorized snapshot toward the task at hand:
         hybrid matches are added to importance-ranked pools -- never
         displacing the profile block -- before the remaining budget is applied.
+
+        The read observes one database snapshot (``context_snapshot``):
+        profile row, generation, importance pools, dynamic candidates, the
+        visible total and the focus pools all come from the same RLS-pinned
+        transaction. The focus embedding (HTTP to Ollama) and the post-hoc
+        usage recording stay outside that transaction.
         """
         normalized_project = self._normalize_project(project)
         normalized_focus = (
-            self._normalize_content(focus)
-            if focus is not None and focus.strip()
-            else None
+            self._normalize_content(focus) if focus is not None and focus.strip() else None
         )
         effective_max_items = self._clamp_limit(
             max_items, self._limits.context_default_max_items, self._limits.context_max_items_cap
@@ -733,12 +724,65 @@ class MemoryService:
             max_chars, self._limits.context_default_max_chars, self._limits.context_max_chars_cap
         )
 
-        profile_block, exclude_ids = await self._assemble_context_profile(
+        # Embed before the snapshot: Ollama is HTTP and must not hold the
+        # database transaction open. Failure degrades the focus to textual.
+        embedding: list[float] | None = None
+        if normalized_focus is not None:
+            try:
+                embedding = await self._embeddings.embed(normalized_focus)
+            except EmbeddingError:
+                logger.warning("embedding unavailable for context focus; using textual fallback")
+
+        visibility = (
+            MemoryVisibility.global_only()
+            if normalized_project is None
+            else MemoryVisibility.from_filters(scope=None, project=normalized_project)
+        )
+        snapshot = await self._repo.context_snapshot(
             user_id,
             project=normalized_project,
-            max_items=min(effective_max_items, self._limits.profile_context_max_items),
-            max_chars=min(effective_max_chars, self._limits.profile_context_max_chars),
+            visibility=visibility,
+            category=None,
+            top_limit=self._limits.context_max_items_cap + 1,
+            candidate_limit=min(MAX_CANDIDATES, max(self._limits.context_focus_limit * 3, 10)),
+            query=normalized_focus,
+            embedding=embedding,
+            embedding_model=self._embeddings.model,
+            trigram_min_word_similarity=self._trigram_min_similarity(),
+            static_limit=self._limits.profile_static_max_items,
+            dynamic_limit=self._limits.profile_dynamic_max_items,
+            dynamic_since=datetime.now(UTC)
+            - timedelta(days=self._limits.profile_dynamic_window_days),
+            static_min_importance=self._limits.profile_static_min_importance,
         )
+
+        try:
+            if snapshot.profile is None or snapshot.profile.generation != snapshot.generation:
+                # Cold path: no materialized static row, or a corpus mutation
+                # made it stale. The rebuild CAS runs outside the snapshot
+                # transaction; the returned block carries its own live dynamic.
+                profile_block = await self.rebuild_profile(user_id, project=normalized_project)
+            else:
+                static = items_from_stored(snapshot.profile.static_items)
+                static_ids = {item.id for item in static}
+                dynamic = select_dynamic_slice(
+                    snapshot.dynamic_candidates,
+                    limits=self._limits,
+                    now=datetime.now(UTC),
+                    exclude_ids=static_ids,
+                )
+                profile_block = self._profile_block_from_row(
+                    snapshot.profile, project=normalized_project, dynamic=dynamic
+                )
+            profile_block = self._cap_profile_block(
+                profile_block,
+                max_items=min(effective_max_items, self._limits.profile_context_max_items),
+                max_chars=min(effective_max_chars, self._limits.profile_context_max_chars),
+            )
+        except Exception:
+            logger.warning("profile assembly failed; context continues", exc_info=True)
+            profile_block = ProfileBlock(available=False, project=normalized_project)
+
         profile_count = len(profile_block.static) + len(profile_block.dynamic)
         remaining_items = max(0, effective_max_items - profile_count)
         remaining_chars = max(
@@ -747,49 +791,31 @@ class MemoryService:
             - sum(len(item.content) for item in (*profile_block.static, *profile_block.dynamic)),
         )
 
-        # Fetch one row beyond the largest snapshot the caller could ask for.
-        fetch_limit = self._limits.context_max_items_cap + 1
-        global_memories = await self._repo.most_important_active(
-            user_id, visibility=MemoryVisibility.global_only(), limit=fetch_limit
-        )
-        project_memories = (
-            await self._repo.most_important_active(
-                user_id,
-                visibility=MemoryVisibility.project_only(normalized_project),
-                limit=fetch_limit,
+        focus_memories: list[Memory] = []
+        if normalized_focus is not None:
+            fused = self._reciprocal_rank_fusion(
+                list(snapshot.focus.vector),
+                list(snapshot.focus.text),
+                list(snapshot.focus.trigram),
             )
-            if normalized_project is not None
-            else []
-        )
-        visibility = (
-            MemoryVisibility.global_only()
-            if normalized_project is None
-            else MemoryVisibility.from_filters(scope=None, project=normalized_project)
-        )
-        focus_memories = (
-            await self._focus_matches(
-                user_id, query=normalized_focus, visibility=visibility
-            )
-            if normalized_focus is not None
-            else []
-        )
-        total_available = await self._repo.count_active_visible(
-            user_id, visibility=visibility
-        )
+            focus_memories = [
+                scored.memory for scored, _ in fused[: self._limits.context_focus_limit]
+            ]
+
         budget = SessionContextBudget(
             max_items=remaining_items,
             max_chars=remaining_chars,
             truncate_floor=self._limits.context_truncate_floor,
         )
         result = budget.assemble(
-            global_memories,
-            project_memories,
+            list(snapshot.global_top),
+            list(snapshot.project_top),
             focus_memories,
             project=normalized_project,
-            total_available=total_available,
+            total_available=snapshot.total_available,
             focus=normalized_focus,
             stale_before=self._stale_cutoff(),
-            exclude_ids=exclude_ids,
+            exclude_ids=set(profile_block.source_memory_ids),
             profile_item_count=profile_count,
         )
         result = result.model_copy(update={"profile": profile_block})
@@ -801,75 +827,26 @@ class MemoryService:
         await self._record_context_served(user_id, served)
         return result
 
-    async def _assemble_context_profile(
-        self,
-        user_id: uuid.UUID,
-        *,
-        project: str | None,
-        max_items: int,
-        max_chars: int,
-    ) -> tuple[ProfileBlock, set[uuid.UUID]]:
-        """Build the reserved block from one global or combined project row."""
-        if max_items <= 0 or max_chars <= 0:
-            return ProfileBlock(available=False, project=project), set()
-        try:
-            profile = await self._ensure_profile(user_id, project=project)
-        except Exception:
-            logger.warning("profile assembly failed; context continues", exc_info=True)
-            return ProfileBlock(available=False, project=project), set()
-        if not profile.available:
-            return profile, set()
-        out_static, out_dynamic, ids = apply_profile_budget(
-            profile.static,
-            profile.dynamic,
-            max_items=max_items,
-            max_chars=max_chars,
-        )
-        return (
-            ProfileBlock(
-                available=True,
-                project=project,
-                static=out_static,
-                dynamic=out_dynamic,
-                source_memory_ids=ids,
-                digest=profile.digest,
-                built_at=profile.built_at,
-            ),
-            set(ids),
-        )
+    def _cap_profile_block(
+        self, block: ProfileBlock, *, max_items: int, max_chars: int
+    ) -> ProfileBlock:
+        """Apply the caller's reserved profile budget to an assembled block.
 
-    async def _focus_matches(
-        self,
-        user_id: uuid.UUID,
-        *,
-        query: str,
-        visibility: MemoryVisibility,
-    ) -> list[Memory]:
-        """Focus-relevant memories via the same hybrid retrieval as ``recall``.
-
-        Returns at most ``context_focus_limit`` rows. Degrades to textual
-        matching when the embedding service is down instead of failing.
+        The digest is recomputed over the capped slices so the served
+        integrity fingerprint matches exactly what the caller received.
         """
-        embedding: list[float] | None = None
-        try:
-            embedding = await self._embeddings.embed(query)
-        except EmbeddingError:
-            logger.warning("embedding unavailable for context focus; using textual fallback")
-        limit = self._limits.context_focus_limit
-        pools = await self._repo.search_candidates(
-            user_id,
-            query=query,
-            embedding=embedding,
-            embedding_model=self._embeddings.model,
-            visibility=visibility,
-            category=None,
-            limit=min(MAX_CANDIDATES, max(limit * 3, 10)),
-            trigram_min_word_similarity=self._trigram_min_similarity(),
+        static, dynamic, ids = apply_profile_budget(
+            block.static, block.dynamic, max_items=max_items, max_chars=max_chars
         )
-        fused = self._reciprocal_rank_fusion(
-            list(pools.vector), list(pools.text), list(pools.trigram)
+        return ProfileBlock(
+            available=block.available,
+            project=block.project,
+            static=static,
+            dynamic=dynamic,
+            source_memory_ids=ids,
+            digest=profile_content_hash(static, dynamic),
+            built_at=block.built_at,
         )
-        return [scored.memory for scored, _ in fused[:limit]]
 
     def _trigram_min_similarity(self) -> float | None:
         """The trigram leg's threshold, or None when its weight disables it."""
@@ -877,9 +854,7 @@ class MemoryService:
             return None
         return self._limits.trigram_min_word_similarity
 
-    async def _record_recalled(
-        self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]
-    ) -> None:
+    async def _record_recalled(self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]) -> None:
         """Count recall hits; a failure here never fails the read."""
         if not memory_ids:
             return
@@ -888,9 +863,7 @@ class MemoryService:
         except Exception:
             logger.warning("usage recording failed; the result is unaffected", exc_info=True)
 
-    async def _record_context_served(
-        self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]
-    ) -> None:
+    async def _record_context_served(self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]) -> None:
         """Count snapshot serves, apart from recall hits.
 
         Snapshots select mostly by importance, so folding their serves into
@@ -1079,9 +1052,7 @@ class MemoryService:
     # forget
     # ------------------------------------------------------------------
 
-    async def reconfirm(
-        self, user_id: uuid.UUID, memory_id: uuid.UUID
-    ) -> ReconfirmResult:
+    async def reconfirm(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> ReconfirmResult:
         """Stamp freshness on an active memory without rewriting its content."""
         stamped = await self._repo.mark_reconfirmed(user_id, memory_id)
         if stamped is None:
@@ -1101,9 +1072,7 @@ class MemoryService:
     # profiles
     # ------------------------------------------------------------------
 
-    async def get_profile(
-        self, user_id: uuid.UUID, *, project: str | None = None
-    ) -> ProfileBlock:
+    async def get_profile(self, user_id: uuid.UUID, *, project: str | None = None) -> ProfileBlock:
         """Load or lazily rebuild the materialized profile for a key."""
         normalized = self._normalize_project(project)
         try:
@@ -1133,49 +1102,86 @@ class MemoryService:
                 - timedelta(days=self._limits.profile_dynamic_window_days),
                 static_min_importance=self._limits.profile_static_min_importance,
             )
-            selected = select_profile_slices(
-                memories, limits=self._limits, now=datetime.now(UTC)
-            )
+            selected = select_profile_slices(memories, limits=self._limits, now=datetime.now(UTC))
             try:
                 row = await self._repo.upsert_profile(
                     user_id,
                     project=normalized,
                     static_items=[item.as_dict() for item in selected.static],
-                    dynamic_items=[item.as_dict() for item in selected.dynamic],
-                    source_memory_ids=selected.source_memory_ids,
-                    content_hash=selected.content_hash,
+                    # The dynamic slice is assembled live at read time from
+                    # recall usage; persisting it would freeze a snapshot that
+                    # every subsequent recall invalidates.
+                    dynamic_items=[],
+                    source_memory_ids=[item.id for item in selected.static],
+                    content_hash=profile_content_hash(selected.static, []),
                     expected_generation=generation,
                 )
             except ProfileGenerationConflict:
                 continue
-            return self._profile_block_from_row(row, project=normalized)
+            return self._profile_block_from_row(row, project=normalized, dynamic=selected.dynamic)
         raise ProfileGenerationConflict
 
-    async def _ensure_profile(
-        self, user_id: uuid.UUID, *, project: str | None
-    ) -> ProfileBlock:
+    async def _ensure_profile(self, user_id: uuid.UUID, *, project: str | None) -> ProfileBlock:
         row = await self._repo.get_profile(user_id, project=project)
         generation = await self._repo.get_memory_generation(user_id)
         if row is None or row.generation != generation:
             return await self.rebuild_profile(user_id, project=project)
-        return self._profile_block_from_row(row, project=project)
+        dynamic = await self._live_dynamic_items(user_id, project=project, static_row=row)
+        return self._profile_block_from_row(row, project=project, dynamic=dynamic)
 
-    def _profile_block_from_row(self, row: Any, *, project: str | None) -> ProfileBlock:
+    async def _live_dynamic_items(
+        self,
+        user_id: uuid.UUID,
+        *,
+        project: str | None,
+        static_row: Any,
+    ) -> list[ProfileItem]:
+        """Assemble the dynamic slice from live recall usage at read time.
+
+        The materialized row holds only static items; recent ``recall`` hits
+        must reach the profile without forcing a rebuild, so the dynamic
+        candidates are selected here against the live ``last_recalled_at``.
+        """
+        visibility = (
+            MemoryVisibility.global_only()
+            if project is None
+            else MemoryVisibility.from_filters(scope=None, project=project)
+        )
+        candidates = await self._repo.list_active_for_profile(
+            user_id,
+            visibility=visibility,
+            static_limit=0,
+            dynamic_limit=self._limits.profile_dynamic_max_items,
+            dynamic_since=datetime.now(UTC)
+            - timedelta(days=self._limits.profile_dynamic_window_days),
+            static_min_importance=self._limits.profile_static_min_importance,
+        )
+        static_ids = {item.id for item in items_from_stored(static_row.static_items)}
+        return select_dynamic_slice(
+            candidates,
+            limits=self._limits,
+            now=datetime.now(UTC),
+            exclude_ids=static_ids,
+        )
+
+    def _profile_block_from_row(
+        self, row: Any, *, project: str | None, dynamic: Sequence[ProfileItem]
+    ) -> ProfileBlock:
         static = items_from_stored(row.static_items)
-        dynamic = items_from_stored(row.dynamic_items)
+        # Integrity covers the slices actually served, not just the persisted
+        # static row; ``built_at`` stays the static materialization instant.
+        digest = profile_content_hash(static, dynamic)
         return ProfileBlock(
             available=True,
             project=project,
             static=static,
-            dynamic=dynamic,
-            source_memory_ids=list(row.source_memory_ids or []),
-            digest=row.content_hash,
+            dynamic=list(dynamic),
+            source_memory_ids=[item.id for item in (*static, *dynamic)],
+            digest=digest,
             built_at=row.built_at,
         )
 
-    async def _rebuild_profiles_for_memory(
-        self, user_id: uuid.UUID, memory: Memory
-    ) -> None:
+    async def _rebuild_profiles_for_memory(self, user_id: uuid.UUID, memory: Memory) -> None:
         """Best-effort eager rebuild of keys this memory can affect."""
         if memory.scope == "project" and memory.project:
             keys: list[str | None] = [memory.project]
@@ -1255,21 +1261,15 @@ class MemoryService:
         if not isinstance(metadata, dict):
             raise MemoryValidationError("metadata must be a JSON object")
         if len(metadata) > self._limits.max_metadata_keys:
-            raise MemoryValidationError(
-                f"metadata exceeds {self._limits.max_metadata_keys} keys"
-            )
+            raise MemoryValidationError(f"metadata exceeds {self._limits.max_metadata_keys} keys")
         for key, value in metadata.items():
             if not isinstance(key, str) or not key:
                 raise MemoryValidationError("metadata keys must be non-empty strings")
             if not isinstance(value, (str, int, float, bool)) and value is not None:
-                raise MemoryValidationError(
-                    f"metadata value for '{key}' must be a JSON primitive"
-                )
+                raise MemoryValidationError(f"metadata value for '{key}' must be a JSON primitive")
         serialized = json.dumps(metadata, ensure_ascii=True, sort_keys=True)
         if len(serialized.encode("utf-8")) > self._limits.max_metadata_bytes:
-            raise MemoryValidationError(
-                f"metadata exceeds {self._limits.max_metadata_bytes} bytes"
-            )
+            raise MemoryValidationError(f"metadata exceeds {self._limits.max_metadata_bytes} bytes")
         return dict(metadata)
 
 

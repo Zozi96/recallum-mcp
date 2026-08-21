@@ -119,6 +119,27 @@ class GraphSnapshot:
     edge_total: int
 
 
+@dataclass(frozen=True, slots=True)
+class ContextSnapshot:
+    """Everything ``context`` reads, from one RLS-pinned transaction.
+
+    ``profile`` is the materialized static row (None when never built);
+    ``generation`` is the user's current generation, so the caller can decide
+    whether the static row is still valid. ``dynamic_candidates`` are bounded
+    recently-recalled rows for read-time dynamic assembly. ``focus`` holds the
+    hybrid candidate pools for the task focus, empty when no focus was given
+    or the embedding service was down.
+    """
+
+    profile: MemoryProfile | None
+    generation: int
+    global_top: Sequence[Memory]
+    project_top: Sequence[Memory]
+    dynamic_candidates: Sequence[Memory]
+    total_available: int
+    focus: CandidatePools
+
+
 def _scalable_edges_enabled(scalable_enabled: bool, total: int, scalable_min_nodes: int) -> bool:
     """Route edge computation to the bounded per-node path when either the
     explicit operator flag is set or the active node count strictly exceeds
@@ -848,6 +869,138 @@ class MemoryRepository:
             for row in (await session.execute(stmt)).all()
         ]
 
+    async def context_snapshot(
+        self,
+        user_id: uuid.UUID,
+        *,
+        project: str | None,
+        visibility: MemoryVisibility,
+        category: str | None,
+        top_limit: int,
+        candidate_limit: int,
+        query: str | None,
+        embedding: list[float] | None,
+        embedding_model: str | None,
+        trigram_min_word_similarity: float | None,
+        static_limit: int,
+        dynamic_limit: int,
+        dynamic_since: datetime,
+        static_min_importance: int,
+    ) -> ContextSnapshot:
+        """Read everything ``context`` needs in one RLS-pinned transaction.
+
+        Profile row, generation, importance tops, dynamic candidates, the
+        visible total and (when ``query`` is set) the hybrid focus pools all
+        observe the same snapshot, so a concurrent write cannot land between
+        them. ``embedding`` is None when the embedding service failed before
+        the call; the vector leg is skipped and the textual legs still run
+        inside the same transaction.
+        """
+        global_visibility = MemoryVisibility.global_only()
+        project_visibility = MemoryVisibility.project_only(project) if project is not None else None
+        key = self._profile_key(project)
+        capped = min(candidate_limit, MAX_CANDIDATES)
+        async with self._sessions.for_user(user_id) as session:
+            profile = (
+                await session.execute(
+                    select(MemoryProfile).where(
+                        MemoryProfile.user_id == user_id,
+                        MemoryProfile.project == key,
+                    )
+                )
+            ).scalar_one_or_none()
+            generation = int(
+                (
+                    await session.execute(select(User.memory_generation).where(User.id == user_id))
+                ).scalar_one()
+            )
+            global_top = (
+                (
+                    await session.execute(
+                        select(Memory)
+                        .options(*_light())
+                        .where(*self._filters(user_id, visibility=global_visibility, category=None))
+                        .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
+                        .limit(top_limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            project_top: Sequence[Memory] = []
+            if project_visibility is not None:
+                project_top = (
+                    (
+                        await session.execute(
+                            select(Memory)
+                            .options(*_light())
+                            .where(
+                                *self._filters(
+                                    user_id, visibility=project_visibility, category=None
+                                )
+                            )
+                            .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
+                            .limit(top_limit)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            # Up to ``static_limit`` recent rows may also win the static slice;
+            # fetch that bounded overlap so read-time assembly can still fill
+            # dynamic from lower-ranked recent rows.
+            dynamic_candidates = (
+                (
+                    await session.execute(
+                        select(Memory)
+                        .options(*_light())
+                        .where(
+                            *self._filters(user_id, visibility=visibility, category=None),
+                            Memory.last_recalled_at.is_not(None),
+                            Memory.last_recalled_at >= dynamic_since,
+                        )
+                        .order_by(
+                            Memory.last_recalled_at.desc(), Memory.created_at.desc(), Memory.id
+                        )
+                        .limit(dynamic_limit + static_limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            total_available = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(Memory)
+                        .where(*self._filters(user_id, visibility=visibility, category=None))
+                    )
+                ).scalar_one()
+            )
+            vector: list[ScoredMemory] = []
+            text: list[ScoredMemory] = []
+            trigram: list[ScoredMemory] = []
+            if query is not None:
+                focus_filters = self._filters(user_id, visibility=visibility, category=category)
+                if embedding is not None:
+                    vector = await self._vector_candidates(
+                        session, embedding, embedding_model, focus_filters, capped
+                    )
+                text = await self._text_candidates(session, query, focus_filters, capped)
+                if trigram_min_word_similarity is not None:
+                    trigram = await self._trigram_candidates(
+                        session, query, trigram_min_word_similarity, focus_filters, capped
+                    )
+            return ContextSnapshot(
+                profile=profile,
+                generation=generation,
+                global_top=global_top,
+                project_top=project_top,
+                dynamic_candidates=dynamic_candidates,
+                total_available=total_available,
+                focus=CandidatePools(vector=vector, text=text, trigram=trigram),
+            )
+
     async def most_important_active(
         self,
         user_id: uuid.UUID,
@@ -1164,11 +1317,15 @@ class MemoryRepository:
         echo. One bounded UPDATE, outside the read that produced the ids.
         Callers treat failure as loggable noise: usage is a signal, never a
         dependency of the read path.
+
+        Deliberately does NOT bump ``memory_generation``: usage is not a
+        corpus or static-eligibility mutation, so a recall must never force
+        the next ``context`` to rebuild the materialized profile.
         """
         if not memory_ids:
             return
         async with self._sessions.for_user(user_id) as session:
-            result = await session.execute(
+            await session.execute(
                 update(Memory)
                 .where(
                     Memory.user_id == user_id,
@@ -1180,8 +1337,6 @@ class MemoryRepository:
                     last_recalled_at=func.now(),
                 )
             )
-            if result.rowcount:
-                await self._increment_generation(session, user_id)
 
     async def mark_seen_in_context(
         self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]

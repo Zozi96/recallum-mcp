@@ -10,6 +10,7 @@ from recallum.memory.limits import MemoryLimits
 from recallum.memory.profile_select import (
     apply_profile_budget,
     profile_content_hash,
+    select_dynamic_slice,
     select_profile_slices,
 )
 from recallum.memory.schemas import ProfileItem
@@ -48,9 +49,7 @@ def test_static_prefers_preference_and_high_importance():
     pref = _mem(content="prefer tabs", category="preference", importance=3)
     high = _mem(content="critical fact", category="fact", importance=9)
     low = _mem(content="noise", category="fact", importance=2)
-    selected = select_profile_slices(
-        [pref, high, low], limits=MemoryLimits(), now=now
-    )
+    selected = select_profile_slices([pref, high, low], limits=MemoryLimits(), now=now)
     contents = {item.content for item in selected.static}
     assert "prefer tabs" in contents
     assert "critical fact" in contents
@@ -79,9 +78,7 @@ def test_dynamic_recent_recall_not_in_static():
         importance=3,
         created_at=now - timedelta(hours=1),
     )
-    selected = select_profile_slices(
-        [old, recent, mere_create], limits=MemoryLimits(), now=now
-    )
+    selected = select_profile_slices([old, recent, mere_create], limits=MemoryLimits(), now=now)
     assert [item.content for item in selected.static] == []
     assert [item.content for item in selected.dynamic] == ["recent fact"]
 
@@ -93,6 +90,24 @@ def test_content_hash_stable():
     b = select_profile_slices([pref], limits=MemoryLimits(), now=now)
     assert a.content_hash == b.content_hash
     assert a.content_hash == profile_content_hash(a.static, a.dynamic)
+
+
+def test_served_hash_covers_static_and_live_dynamic():
+    now = datetime.now(UTC)
+    pref = _mem(content="prefer tabs", category="preference")
+    recalled = _mem(content="recent work", last_recalled_at=now)
+    selected = select_profile_slices([pref, recalled], limits=MemoryLimits(), now=now)
+    assert [item.content for item in selected.static] == ["prefer tabs"]
+    assert [item.content for item in selected.dynamic] == ["recent work"]
+    assert selected.content_hash == profile_content_hash(selected.static, selected.dynamic)
+    assert selected.content_hash != profile_content_hash(selected.static, [])
+    live = select_dynamic_slice(
+        [pref, recalled],
+        limits=MemoryLimits(),
+        now=now,
+        exclude_ids={item.id for item in selected.static},
+    )
+    assert [item.content for item in live] == ["recent work"]
 
 
 def test_apply_profile_budget_static_first():
@@ -116,9 +131,7 @@ def test_apply_profile_budget_static_first():
             importance=5,
         )
     ]
-    out_s, out_d, ids = apply_profile_budget(
-        static, dynamic, max_items=1, max_chars=100
-    )
+    out_s, out_d, ids = apply_profile_budget(static, dynamic, max_items=1, max_chars=100)
     assert len(out_s) == 1
     assert out_d == []
     assert ids == [static[0].id]
