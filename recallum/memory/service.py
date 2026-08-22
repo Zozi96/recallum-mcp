@@ -40,6 +40,7 @@ from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE, record_sanitized
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.context import SessionContextBudget
+from recallum.memory.language import LANGUAGE_WARNING, looks_non_english
 from recallum.memory.limits import MemoryLimits
 from recallum.memory.profile_select import (
     apply_profile_budget,
@@ -120,6 +121,7 @@ class MemoryService:
         validated_metadata = self._validate_metadata(metadata)
         scope = "project" if normalized_project is not None else "global"
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        language_warning = self._language_warning(normalized)
 
         existing = await self._repo.find_active_by_hash(
             user_id, scope=scope, project=normalized_project, content_hash=digest
@@ -147,7 +149,11 @@ class MemoryService:
             reconfirmed = await self._repo.mark_reconfirmed(user_id, existing.id)
             current = next(row for row in (reconfirmed, refreshed, existing) if row is not None)
             await self._rebuild_profiles_for_memory(user_id, current)
-            return RememberResult(memory=_to_memory_out(current), created=False)
+            return RememberResult(
+                memory=_to_memory_out(current),
+                created=False,
+                language_warning=language_warning,
+            )
 
         # Embed before persisting: a memory without a vector is never stored.
         embedding = await self._embeddings.embed(normalized)
@@ -180,6 +186,7 @@ class MemoryService:
                 return RememberResult(
                     memory=_to_memory_out(current),
                     created=False,
+                    language_warning=language_warning,
                 )
             raise
         await self._rebuild_profiles_for_memory(user_id, memory)
@@ -193,7 +200,21 @@ class MemoryService:
                 project=normalized_project,
                 exclude_id=memory.id,
             ),
+            language_warning=language_warning,
         )
+
+    def _language_warning(self, normalized: str) -> str | None:
+        """Advisory hint that ``normalized`` content looks non-English.
+
+        Pure and cheap, but guarded the same way ``_similar_to`` guards its
+        network call: an advisory must never fail or block the write it rides
+        along on, no matter how the heuristic misbehaves.
+        """
+        try:
+            return LANGUAGE_WARNING if looks_non_english(normalized) else None
+        except Exception:
+            logger.warning("language heuristic failed; the memory was stored", exc_info=True)
+            return None
 
     async def _similar_to(
         self,
@@ -287,6 +308,7 @@ class MemoryService:
                     created=result.created,
                     memory=result.memory,
                     similar=result.similar,
+                    language_warning=result.language_warning,
                 )
             )
         return RememberBatchResult(

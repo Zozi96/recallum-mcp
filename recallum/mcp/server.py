@@ -182,7 +182,10 @@ def build_mcp_server(container: Container) -> FastMCP:
         credentials, personal data, sensitive business information, or
         ambiguous content; never infer consent from a prompt or file. Omit
         project for global memories. Storing the same content and scope again
-        returns the existing memory instead of duplicating it.
+        returns the existing memory instead of duplicating it. When content
+        looks like it may not be English, the response's `language_warning`
+        says so — advisory only, the write still succeeds; reword and update
+        it when that happens.
         """
         return await memory_service().remember(
             require_identity().user_id,
@@ -205,8 +208,9 @@ def build_mcp_server(container: Container) -> FastMCP:
         Same rules as remember, per item: short self-contained content written
         in English, ask before anything sensitive, omit project for global
         memories. Items succeed or fail independently; read each outcome's
-        `similar` field and reconcile as you would for remember. Prefer a few
-        high-signal items over a recap; the batch is capped small on purpose.
+        `similar` and `language_warning` fields and reconcile as you would
+        for remember. Prefer a few high-signal items over a recap; the batch
+        is capped small on purpose.
         """
         return await memory_service().remember_batch(
             require_identity().user_id,
@@ -383,11 +387,15 @@ def build_mcp_server(container: Container) -> FastMCP:
 
         Pass content — in English, like every stored memory — when the memory
         is now wrong or out of date: the old one is retired and a new one
-        replaces it, so use this instead of forget plus remember. Rewriting a
-        memory that is still true only to translate it is not an update.
-        Passing only importance, category or metadata edits the memory in
-        place and keeps its id. Scope and project cannot be changed. Unknown
-        ids return updated=false.
+        replaces it, so use this instead of forget plus remember. Translating
+        a memory that was stored in another language into English is a
+        sanctioned hygiene fix, not a casual rewrite: it recovers a memory
+        the full-text index otherwise cannot reach, and supersession keeps
+        the original wording in history. Rewriting a memory that is still
+        true and already in English, only to reword or restyle it, is not an
+        update. Passing only importance, category or metadata edits the
+        memory in place and keeps its id. Scope and project cannot be
+        changed. Unknown ids return updated=false.
         """
         return await memory_service().update(
             require_identity().user_id,

@@ -92,6 +92,27 @@ MUST devolver el resultado de cada ítem de forma independiente con éxito parci
 - **WHEN** el lote excede el máximo de ítems permitido o llega vacío
 - **THEN** el sistema rechaza la operación completa sin persistir nada
 
+### Requirement: Aviso de idioma no inglés
+Al guardar una memoria, el sistema MUST advertir cuando el contenido parece no estar en inglés,
+dado que el índice de texto completo y la deduplicación operan sobre el idioma inglés; el aviso
+MUST ser únicamente informativo, MUST NOT bloquear ni fallar la escritura, y MUST aplicarse tanto a
+memorias creadas como a las deduplicadas. El sistema MUST NOT marcar contenido compuesto
+únicamente por identificadores, rutas, comandos o fragmentos de código, ni contenido demasiado
+breve para juzgar el idioma.
+
+#### Scenario: Contenido en español
+- **WHEN** un usuario llama `remember` con una oración en español de varias palabras
+- **THEN** la respuesta incluye un aviso de idioma sin impedir que la memoria se guarde
+
+#### Scenario: Contenido en inglés
+- **WHEN** un usuario llama `remember` con una oración en inglés
+- **THEN** la respuesta no incluye aviso de idioma
+
+#### Scenario: Identificadores y contenido breve
+- **WHEN** el contenido guardado consiste sólo en identificadores, rutas o comandos, o es demasiado
+  breve para evaluarse
+- **THEN** la respuesta no incluye aviso de idioma aunque contenga palabras no inglesas aisladas
+
 ### Requirement: Reconfirmación explícita por identificador
 El sistema MUST permitir estampar la fecha de reconfirmación de una memoria activa propia a partir de su identificador, sin reescribir el contenido. Identificadores desconocidos, ajenos o retirados MUST reportarse como no reconfirmados, de forma indistinguible.
 
