@@ -315,6 +315,39 @@ technical vocabulary share Latin roots and the trigram leg is character-based,
 so cognates hand those queries a partial lexical freebie that real mixed-language
 traffic will not always get.
 
+## Corpus hygiene report
+
+`recallum-admin hygiene` is a read-only report over one user's active
+memories: it never mutates, merges, or forgets anything. Write-time `similar`
+warnings from `remember` are advisory — an agent that ignores one leaves a
+near-duplicate active forever, and nothing else revisits it. This closes that
+loop from the outside by reusing the same bounded semantic-pair projection
+`memory_graph` renders, then reporting two things:
+
+- **Merge candidates (same-bucket):** clusters of >=2 active memories in one
+  scope+project bucket, mutually linked by pairwise similarity at or above the
+  threshold. A merge is only ever valid within one bucket, so clusters never
+  cross scope or project even when the underlying pairs would otherwise chain
+  across one.
+- **Contradiction candidates:** pairs (within the same bucket) where a
+  negation/reversal cue — English or Spanish (`not`, `no longer`, `never`,
+  `instead of`, `deprecated`, `ya no`, `en lugar de`, `nunca`, `obsoleto`) —
+  appears in one memory's content but not the other's. This is a heuristic for
+  human or agent review, not a verdict; act on it with `update`,
+  `merge_memories`, or `forget`.
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin hygiene \
+  --email user@example.com
+```
+
+`--min-similarity` overrides the floor (default: `similar_min_similarity`,
+0.85); `--limit` caps how many active memories one run scans (default 500,
+matching the quadratic cost of the underlying pairwise comparison). When the
+cap trims the corpus, the report says so explicitly instead of truncating
+silently — rerun with a higher `--limit` for a complete sweep of a larger
+corpus.
+
 ## Graph edge strategy (scalable path)
 
 `memory_graph` computes edges with a pairwise O(n²) self-join by default, which

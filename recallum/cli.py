@@ -24,6 +24,7 @@ from recallum.container import (
 )
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.evaluation import read_dataset, render_report, run_eval
+from recallum.hygiene import DEFAULT_MAX_MEMORIES, build_hygiene_report, render_hygiene_report
 from recallum.memory.service import MemoryService
 
 
@@ -91,6 +92,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Override recall_usage_weight for this run",
+    )
+
+    hygiene_cmd = subparsers.add_parser(
+        "hygiene",
+        help=(
+            "Read-only corpus-hygiene report: near-duplicate clusters "
+            "and contradiction candidates for one user"
+        ),
+    )
+    hygiene_cmd.add_argument("--email", required=True)
+    hygiene_cmd.add_argument(
+        "--min-similarity",
+        type=float,
+        default=None,
+        help="Cosine similarity floor for candidate pairs (default: limits.similar_min_similarity)",
+    )
+    hygiene_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_MAX_MEMORIES,
+        help=f"Cap on active memories scanned (default {DEFAULT_MAX_MEMORIES})",
     )
 
     reembed = subparsers.add_parser(
@@ -211,6 +233,23 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
             return 1
         report.tunables = overrides
         print(render_report(report))
+        return 0
+
+    if args.command == "hygiene":
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        min_similarity = args.min_similarity
+        if min_similarity is None:
+            min_similarity = get_settings().limits.similar_min_similarity
+        report = await build_hygiene_report(
+            container.memory_repository(),
+            user.id,
+            min_similarity=min_similarity,
+            limit=args.limit,
+        )
+        print(render_hygiene_report(report))
         return 0
 
     if args.command == "reembed":
