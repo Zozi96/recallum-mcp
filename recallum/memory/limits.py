@@ -100,6 +100,13 @@ class MemoryLimits(BaseModel):
     # rich-get-richer loop and must be a deliberate, measured choice.
     recall_usage_weight: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # Freshness's vote in recall fusion, same competition-ranking mechanism as
+    # importance and usage. Ships at 0.0 (no effect): a stale-but-correct
+    # constraint must not be buried under recently reconfirmed rows just
+    # because they were touched more recently -- a non-zero weight is a
+    # deliberate, measured choice, same as the other voters.
+    recall_freshness_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+
     # Days after which a memory that was never reconfirmed or re-stored counts
     # as stale: context items carry ``stale: true`` past this age, and
     # ``list_memories(stale=true)`` is the verification queue. Re-storing

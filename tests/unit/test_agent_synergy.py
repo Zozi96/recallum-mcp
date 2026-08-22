@@ -287,6 +287,145 @@ def test_recall_usage_weight_defaults_off_and_is_capped():
 
 
 # ---------------------------------------------------------------------------
+# recall: freshness vote
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_freshness_weight_breaks_retrieval_ties():
+    def build(limits: MemoryLimits | None) -> tuple[MemoryService, FakeMemoryRepository]:
+        embedder = ScriptedEmbeddingClient(
+            vectors={
+                # "older" wins the vector signal, "newer" wins the text signal
+                # (two shared query tokens against one), so RRF ties exactly.
+                "alpha pipeline notes": [1.0] + [0.0] * 7,
+                "alpha beta pipeline": [0.6, 0.8] + [0.0] * 6,
+                "alpha beta": [1.0] + [0.0] * 7,
+            }
+        )
+        service, repo, _ = make_service(limits=limits, embedder=embedder)
+        return service, repo
+
+    async def seed(service: MemoryService, repo: FakeMemoryRepository) -> uuid.UUID:
+        older = await service.remember(
+            USER, content="alpha pipeline notes", category="fact", importance=5
+        )
+        await service.remember(USER, content="alpha beta pipeline", category="fact", importance=5)
+        # The older memory was just reconfirmed, so it is the most recently
+        # confirmed row despite being the older creation.
+        repo.rows[older.memory.id].reconfirmed_at = datetime.now(UTC) + timedelta(days=1)
+        return older.memory.id
+
+    # The fixture engineers an exact two-signal tie, so the trigram leg is
+    # pinned off in both builds: with it voting, lexical closeness would
+    # break the tie before freshness or recency ever got a say.
+    # Freshness weight 0.0 (the default): the tie falls to the recency tie-break.
+    service, repo = build(MemoryLimits(recall_trigram_weight=0.0))
+    older_id = await seed(service, repo)
+    baseline = await service.recall(USER, query="alpha beta")
+    assert [r.content for r in baseline.results][0] == "alpha beta pipeline"
+
+    # A positive weight lets the recent reconfirmation break the same tie
+    # instead, without evicting the other, clearly-matched candidate.
+    service, repo = build(
+        MemoryLimits(recall_freshness_weight=0.5, recall_trigram_weight=0.0)
+    )
+    older_id = await seed(service, repo)
+    weighted = await service.recall(USER, query="alpha beta")
+    assert weighted.results[0].id == older_id
+    # The other, clearly-matched candidate is not evicted -- both still appear.
+    assert len(weighted.results) == len(baseline.results) == 2
+
+
+async def test_recall_freshness_weight_zero_never_reorders():
+    """Weight 0.0: even a huge reconfirmation gap leaves scores and order
+    identical to the relevance-only ranking (freshness causes no reordering)."""
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "alpha pipeline notes": [1.0] + [0.0] * 7,
+            "alpha beta pipeline": [0.6, 0.8] + [0.0] * 6,
+            "alpha beta": [1.0] + [0.0] * 7,
+        }
+    )
+    service, repo, _ = make_service(
+        limits=MemoryLimits(recall_trigram_weight=0.0),  # freshness weight = 0.0 default
+        embedder=embedder,
+    )
+    older = await service.remember(
+        USER, content="alpha pipeline notes", category="fact", importance=5
+    )
+    newer = await service.remember(
+        USER, content="alpha beta pipeline", category="fact", importance=5
+    )
+
+    repo.rows[older.memory.id].reconfirmed_at = datetime.now(UTC) + timedelta(days=30)
+    first = await service.recall(USER, query="alpha beta")
+    first_ids = [r.id for r in first.results]
+    first_scores = [r.score for r in first.results]
+
+    repo.rows[older.memory.id].reconfirmed_at = None
+    repo.rows[newer.memory.id].reconfirmed_at = datetime.now(UTC) + timedelta(days=30)
+    second = await service.recall(USER, query="alpha beta")
+
+    assert [r.id for r in second.results] == first_ids
+    assert [r.score for r in second.results] == first_scores
+    # The tie still falls to the recency tie-break: freshness carried no vote.
+    assert first_ids[0] == newer.memory.id
+
+
+async def test_recall_freshness_weight_uniform_timestamps_contribute_nothing():
+    """All candidates confirmed at the same instant tie for rank 1 on the
+    freshness voter, so its (uniform) additive score never reorders anything."""
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "alpha pipeline notes": [1.0] + [0.0] * 7,
+            "alpha beta pipeline": [0.6, 0.8] + [0.0] * 6,
+            "alpha beta": [1.0] + [0.0] * 7,
+        }
+    )
+    # Seed once, then read the same rows through two services that share the
+    # repo but differ only in freshness weight -- so both reads see identical
+    # memory ids and only the voter itself can move the order or the score.
+    service, repo, _ = make_service(
+        limits=MemoryLimits(recall_trigram_weight=0.0),
+        embedder=embedder,
+    )
+    older = await service.remember(
+        USER, content="alpha pipeline notes", category="fact", importance=5
+    )
+    newer = await service.remember(
+        USER, content="alpha beta pipeline", category="fact", importance=5
+    )
+    same_instant = datetime.now(UTC)
+    repo.rows[older.memory.id].reconfirmed_at = same_instant
+    repo.rows[newer.memory.id].reconfirmed_at = same_instant
+
+    no_freshness = await service.recall(USER, query="alpha beta")
+
+    weighted_service = MemoryService(
+        repository=repo,
+        embeddings=embedder,
+        limits=MemoryLimits(recall_freshness_weight=0.5, recall_trigram_weight=0.0),
+    )
+    with_freshness = await weighted_service.recall(USER, query="alpha beta")
+
+    assert [r.id for r in with_freshness.results] == [r.id for r in no_freshness.results]
+    assert [round(r.score, 12) for r in with_freshness.results] != [
+        round(r.score, 12) for r in no_freshness.results
+    ]
+    # The uniform freshness score still lands as a positive additive constant.
+    assert with_freshness.results[0].score > no_freshness.results[0].score
+
+
+def test_recall_freshness_weight_defaults_off_and_is_capped():
+    assert MemoryLimits().recall_freshness_weight == 0.0
+    assert MemoryLimits(recall_freshness_weight=1.0).recall_freshness_weight == 1.0
+    with pytest.raises(ValidationError):
+        MemoryLimits(recall_freshness_weight=-0.1)
+    with pytest.raises(ValidationError):
+        MemoryLimits(recall_freshness_weight=1.1)
+
+
+# ---------------------------------------------------------------------------
 # reconfirmation
 # ---------------------------------------------------------------------------
 

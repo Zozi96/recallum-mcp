@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override recall_usage_weight for this run",
     )
+    eval_cmd.add_argument(
+        "--freshness-weight",
+        type=float,
+        default=None,
+        help="Override recall_freshness_weight for this run",
+    )
 
     reembed = subparsers.add_parser(
         "reembed",
@@ -194,6 +200,8 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
             overrides["recall_importance_weight"] = args.importance_weight
         if args.usage_weight is not None:
             overrides["recall_usage_weight"] = args.usage_weight
+        if args.freshness_weight is not None:
+            overrides["recall_freshness_weight"] = args.freshness_weight
         if overrides:
             # Same graph, one knob turned: the configured limits with the
             # overrides applied, so an A/B differs only in what was asked.

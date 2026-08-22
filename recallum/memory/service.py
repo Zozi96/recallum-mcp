@@ -630,6 +630,14 @@ class MemoryService:
         competition-ranking rules, but ships with ``recall_usage_weight`` at
         0.0: being served often is a feedback loop (rich get richer), so it
         may only influence ranking after real usage data justifies a weight.
+
+        Freshness (``reconfirmed_at`` or, absent that, ``created_at``) is a
+        fourth competition-rank voter, capped the same way and shipping at
+        ``recall_freshness_weight`` 0.0. It is deliberately bounded rather than
+        a free-standing recency sort: a memory can be old and still be the
+        correct answer -- a stale-but-correct constraint must not be buried
+        under rows that merely got reconfirmed more recently. Only a measured
+        weight, like the other voters, may raise it above 0.
         """
         weighted_pools: list[tuple[list[ScoredMemory], float]] = [
             (vector_candidates, 1.0),
@@ -659,6 +667,14 @@ class MemoryService:
             scores,
             key=lambda scored: scored.memory.recall_count or 0,
             weight=self._limits.recall_usage_weight,
+        )
+        self._add_competition_vote(
+            entries,
+            scores,
+            key=lambda scored: int(
+                (scored.memory.reconfirmed_at or scored.memory.created_at).timestamp()
+            ),
+            weight=self._limits.recall_freshness_weight,
         )
 
         ranked = sorted(

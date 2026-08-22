@@ -290,6 +290,34 @@ the eval user's memories start with `recall_count = 0`; run the baseline first
 so its ordinary recalls accumulate usage, then read the candidate report for
 what a positive weight actually changes.
 
+### Comparing the freshness vote
+
+`recall_freshness_weight` (the vote `reconfirmed_at`, or `created_at` when a
+memory was never reconfirmed, gets in fusion) ships at `0.0` for the same
+reason as the usage vote: it must not affect production ranking until a
+measured decision raises it. Compare a candidate weight against the baseline
+the same way, on the identical dataset and configuration:
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin eval \
+  --email eval@example.com --dataset scripts/eval_dataset.json                     # baseline: freshness weight 0.0
+docker compose exec recallum uv run --no-sync recallum-admin eval \
+  --email eval@example.com --dataset scripts/eval_dataset.json --freshness-weight 0.3  # candidate
+```
+
+The applied override is recorded in the report's `tunables:` line, same as
+the usage vote.
+
+**Known limitation:** the current golden dataset seeds its entire corpus in
+one pass, so every row's `reconfirmed_at`/`created_at` lands within the same
+narrow window — freshness has almost nothing to discriminate on in this
+dataset, and a candidate-weight run against it will look like a no-op
+regardless of whether the vote is doing anything useful. A measured
+activation decision needs a dataset revision with time-spread fixtures
+(seeded across days or weeks, with a subset explicitly reconfirmed later)
+before its numbers mean anything. Until that revision exists, the default
+stays at `0.0`.
+
 ### Reading the language tags
 
 Memories are written in English on purpose: dedup is an exact content hash and
