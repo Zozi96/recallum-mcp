@@ -186,7 +186,12 @@ el aviso de similares, `related_memories`, `memory_graph`, ni la búsqueda de du
 `remember`), pero MUST conservar la fila sin borrarla físicamente -- el filtro es perezoso, en
 tiempo de lectura, sin trabajo en segundo plano. Una memoria activa duplicada que ya expiró MUST
 NOT bloquear que se vuelva a guardar el mismo contenido; el sistema recrea una memoria nueva en
-vez de revivir la expirada.
+vez de revivir la expirada. Cuando `remember` deduplica sobre una memoria activa existente (mismo
+contenido normalizado), la expiración sigue la misma regla que el resto de sus atributos -- la
+llamada es autoritativa: si se vuelve a guardar sin `ttl_seconds`, el sistema MUST limpiar
+cualquier expiración previa (la reafirmación reafirma también su durabilidad, igual que
+`reconfirm`); si se vuelve a guardar con `ttl_seconds`, el sistema MUST reemplazar la expiración
+por una nueva calculada desde ese momento, incluso si la memoria existente era duradera.
 
 #### Scenario: Memoria de trabajo de corta duración
 - **WHEN** un usuario llama `remember` con `ttl_seconds` y ese plazo transcurre
@@ -199,3 +204,11 @@ vez de revivir la expirada.
 #### Scenario: Sin expiración por defecto
 - **WHEN** `remember` se llama sin `ttl_seconds`
 - **THEN** la memoria queda duradera, sin expiración, igual que antes de esta capacidad
+
+#### Scenario: Reafirmar sin TTL limpia la expiración previa
+- **WHEN** una memoria activa con expiración declarada se vuelve a guardar con `remember` y el mismo contenido normalizado, sin `ttl_seconds`
+- **THEN** el sistema limpia su expiración y la memoria queda duradera desde ese momento
+
+#### Scenario: Reafirmar con TTL renueva la expiración
+- **WHEN** una memoria activa (con o sin expiración previa) se vuelve a guardar con `remember`, el mismo contenido normalizado y un nuevo `ttl_seconds`
+- **THEN** el sistema reemplaza cualquier expiración previa por una nueva calculada desde ese momento

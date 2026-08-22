@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import cast, func, literal, or_, select, text, true, update
@@ -285,13 +285,15 @@ class MemoryRepository:
         )
 
     async def count_active(self, user_id: uuid.UUID) -> int:
-        """Count active rows inside exactly one user's forced-RLS context."""
+        """Count active, non-expired rows inside exactly one user's forced-RLS context."""
         async with self._sessions.for_user(user_id) as session:
             return (
                 await session.execute(
                     select(func.count())
                     .select_from(Memory)
-                    .where(Memory.user_id == user_id, Memory.deleted_at.is_(None))
+                    .where(
+                        Memory.user_id == user_id, Memory.deleted_at.is_(None), _not_expired()
+                    )
                 )
             ).scalar_one()
 
@@ -353,10 +355,21 @@ class MemoryRepository:
                         Memory.content,
                         Memory.deleted_at,
                         Memory.superseded_by,
+                        Memory.expires_at,
                     ).where(Memory.user_id == user_id)
                 )
             ).all()
-        active = [row for row in rows if row.deleted_at is None]
+        # ``rows`` intentionally keeps every row (active, retired, superseded,
+        # expired) so the counts below can account for all of them; only the
+        # "active" bucket additionally excludes rows that have expired -- an
+        # expired-but-undeleted row is exactly as invisible here as it is on
+        # every other read surface.
+        now = datetime.now(UTC)
+        active = [
+            row
+            for row in rows
+            if row.deleted_at is None and (row.expires_at is None or row.expires_at > now)
+        ]
 
         def counts(values: Sequence[Any]) -> dict[str, int]:
             result: dict[str, int] = {}
@@ -442,17 +455,20 @@ class MemoryRepository:
         after: uuid.UUID | None,
         limit: int,
     ) -> Sequence[Memory]:
-        """A page of active rows whose vector provenance is NULL or another model.
+        """A page of active, non-expired rows whose vector provenance is NULL or another model.
 
         These are the rows the vector search leg cannot trust; re-embedding
         them under ``model`` restores their vector reach. Keyset-paginated by
         id so a caller that cannot fix a row (its embedding keeps failing)
-        still advances past it instead of refetching it forever.
+        still advances past it instead of refetching it forever. Expired rows
+        are skipped: they are already invisible to every read, so re-embedding
+        them would burn embedding-service work for nothing.
         """
         async with self._sessions.for_user(user_id) as session:
             filters: list[Any] = [
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
+                _not_expired(),
                 or_(
                     Memory.embedding_model.is_(None),
                     Memory.embedding_model != model,

@@ -141,6 +141,14 @@ class MemoryService:
             # metadata, so raising the importance of something already stored
             # did nothing at all. The content is identical by construction
             # here, so this is bookkeeping, not a new claim: no supersession.
+            #
+            # Expiry follows the same "this call is authoritative" rule as
+            # every other attribute: omitting ttl_seconds on a restatement
+            # reasserts durability (consistent with reconfirm semantics --
+            # the claim was just observed to still hold, so it must not
+            # silently vanish on an expiry nobody renewed), and passing
+            # ttl_seconds always refreshes the expiry from now, even when the
+            # existing row was durable.
             refreshed = await self._repo.update_attributes(
                 user_id,
                 existing.id,
@@ -154,6 +162,7 @@ class MemoryService:
                     else None
                 ),
                 expires_at=expires_at,
+                clear_expires_at=ttl_seconds is None and existing.expires_at is not None,
             )
             # It IS a reconfirmation, though: the claim was just observed to
             # still hold, and readers use that stamp to judge freshness.
@@ -1338,6 +1347,15 @@ class MemoryService:
         durable-by-default behaviour. Capped at ``ttl_max_seconds`` so a TTL
         can never become a de facto permanent expiry set far out enough to
         never matter.
+
+        The resulting timestamp is computed from this process' clock
+        (``datetime.now(UTC)``), while every enforcement predicate compares
+        the stored value against the database's own clock (``func.now()``).
+        The two can differ by ordinary clock skew between the app host and
+        the database, on the order of milliseconds in practice -- acceptable
+        here because this value only sets the bound at write time; it is
+        never used to decide expiry itself, which is always judged by the
+        database's clock at read time.
         """
         if ttl_seconds is None:
             return None

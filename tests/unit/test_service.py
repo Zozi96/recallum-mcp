@@ -1447,6 +1447,36 @@ async def test_expired_duplicate_does_not_block_re_remembering():
     assert fresh.memory.expires_at is None
 
 
+async def test_remember_dedup_restatement_without_ttl_clears_existing_expiry():
+    """A restatement without ttl_seconds reasserts durability, like reconfirm."""
+    service, _, _ = make_service()
+    first = await service.remember(
+        USER, content="branch is blocked", category="fact", ttl_seconds=60
+    )
+    assert first.memory.expires_at is not None
+
+    again = await service.remember(USER, content="branch is blocked", category="fact")
+
+    assert again.created is False
+    assert again.memory.id == first.memory.id
+    assert again.memory.expires_at is None
+
+
+async def test_remember_dedup_restatement_with_ttl_refreshes_even_a_durable_duplicate():
+    service, _, _ = make_service()
+    first = await service.remember(USER, content="durable fact restated", category="fact")
+    assert first.memory.expires_at is None
+
+    again = await service.remember(
+        USER, content="durable fact restated", category="fact", ttl_seconds=120
+    )
+
+    assert again.created is False
+    assert again.memory.id == first.memory.id
+    assert again.memory.expires_at is not None
+    assert again.memory.expires_at > datetime.now(UTC)
+
+
 async def test_update_sets_and_clears_expiry():
     service, _, _ = make_service()
     stored = await service.remember(USER, content="working note", category="fact")

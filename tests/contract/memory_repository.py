@@ -277,6 +277,27 @@ class MemoryRepositoryContract:
         assert stats["by_category"] == {"fact": 1}
         assert stats["volume_bytes"] > 0
 
+    async def test_count_active_and_statistics_exclude_expired(self, repo, user_id):
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(content="durable", content_hash=_hash("stats-durable")),
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="expired", content_hash=_hash("stats-expired"), expires_at=past
+            ),
+        )
+
+        assert await repo.count_active(user_id) == 1
+        stats = await repo.statistics(user_id)
+        assert stats["active"] == 1
+        # Expired rows are retained, not superseded or forgotten: they must
+        # not be misreported as either bucket, just excluded from "active".
+        assert stats["superseded"] == 0
+        assert stats["retired"] == 0
+
     # -- list_active ---------------------------------------------------
 
     async def test_list_active_orders_newest_first(self, repo, user_id):
@@ -1204,11 +1225,20 @@ class MemoryRepositoryContract:
             user_id,
             **self._kwargs(content="old model row", embedding_model="another-model"),
         )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="expired stale-model row",
+                embedding_model="another-model",
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            ),
+        )
 
         first = await repo.stale_embeddings_batch(user_id, model=model, after=None, limit=1)
         assert len(first) == 1
         rest = await repo.stale_embeddings_batch(user_id, model=model, after=first[0].id, limit=10)
-        # Keyset pagination: no overlap, nothing skipped, current-model row absent.
+        # Keyset pagination: no overlap, nothing skipped, current-model row
+        # absent, expired row skipped (already invisible everywhere else).
         assert len(rest) == 1
         assert {r.id for r in [*first, *rest]} == {legacy.id, foreign.id}
 

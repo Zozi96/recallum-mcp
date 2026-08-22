@@ -918,7 +918,7 @@ class FakeMemoryRepository:
         from recallum.config import EMBEDDING_DIMENSIONS
 
         rows = [row for row in self.rows.values() if row.user_id == user_id]
-        active = [row for row in rows if not row.is_deleted]
+        active = [row for row in rows if not row.is_deleted and not row.is_expired]
 
         def counts(values):
             result = {}
