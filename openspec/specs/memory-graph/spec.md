@@ -77,7 +77,7 @@ El grafo MUST admitir nodos y componentes desconectados. Una memoria persistida 
 - **THEN** el grafo no cambia por el contenido transitorio de esa conversación
 
 ### Requirement: Grafo acotado y honesto
-El sistema MUST limitar el número de nodos y de relaciones para mantener una respuesta y visualización manejables, MUST priorizar las relaciones temáticas más fuertes y MUST indicar el total disponible y si la lectura fue truncada. Los límites MUST NOT provocar conexiones artificiales.
+El sistema MUST limitar el número de nodos y de relaciones para mantener una respuesta y visualización manejables, MUST priorizar las relaciones temáticas más fuertes y MUST indicar el total disponible y si la lectura fue truncada. Los límites MUST NOT provocar conexiones artificiales. Cuando el volumen de candidatos o la configuración lo requieran, el sistema MAY calcular vecinos por búsqueda acotada por nodo (kNN/ANN) en lugar de una comparación pairwise completa, siempre que preserve el umbral mínimo de similitud, la comparabilidad sólo entre embeddings del mismo modelo, y la ausencia de aristas decorativas.
 
 #### Scenario: Memoria dentro del límite
 - **WHEN** todas las memorias candidatas caben en el límite efectivo
@@ -94,6 +94,10 @@ El sistema MUST limitar el número de nodos y de relaciones para mantener una re
 #### Scenario: Nodo sin relación suficiente
 - **WHEN** ninguna relación de un nodo supera la evidencia mínima
 - **THEN** el nodo permanece visible sin que el sistema le asigne un vecino artificial
+
+#### Scenario: Vecinos por búsqueda acotada
+- **WHEN** la proyección usa kNN/ANN por nodo bajo el techo de vecinos
+- **THEN** cada arista cumple el umbral mínimo de similitud y el mismo modelo de embedding, y el truncado global sigue comunicándose
 
 ### Requirement: Representación coherente con Recallum
 La UI MUST ofrecer una ruta autenticada y una entrada de navegación para el mapa de memoria. La vista MUST conservar el lenguaje visual “Papel Cálido” en modos claro y oscuro, MUST representar la categoría mediante las formas geométricas existentes, MUST representar la importancia mediante tamaño y MUST reservar el acento de tierra quemada para estados destacados.

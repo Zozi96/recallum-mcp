@@ -66,7 +66,7 @@ El sistema MUST publicar las capacidades de guardado individual y por lotes, rec
 - **THEN** la respuesta indica `reconfirmed=false` sin revelar si pertenece a otro usuario
 
 ### Requirement: Prompts MCP del ciclo de memoria
-El sistema MUST publicar exactamente los prompts `session-start`, `capture-scan` y `stale-review`. El sistema MUST NOT publicar ningún otro prompt. Ningún prompt MUST aceptar un selector de usuario.
+El servidor MCP MUST publicar exactamente tres prompts allowlisteados: `session-start`, `capture-scan` y `stale-review`. `session-start` MUST orientar bootstrap con `context` (proyecto y foco cuando la tarea se conoce). `capture-scan` MUST orientar captura final atómica en inglés vía `remember_batch`, sin secretos ni recaps, y MUST recordar leer `similar` y reconciliar (merge vs update) antes de dar por cerrada la captura. `stale-review` MUST orientar enumerar `list_memories(stale=true)` y resolver cada ítem verificado con `get_memory` más exactamente uno de `reconfirm`, `update`, `forget` o `merge_memories`.
 
 #### Scenario: Descubrimiento de prompts
 - **WHEN** un cliente autenticado lista los prompts MCP
@@ -82,11 +82,11 @@ El sistema MUST publicar exactamente los prompts `session-start`, `capture-scan`
 
 #### Scenario: capture-scan
 - **WHEN** un cliente obtiene el prompt `capture-scan`
-- **THEN** la guía indica una captura final atómica en inglés vía `remember_batch`, sin secretos ni recapitulaciones
+- **THEN** la guía indica captura atómica en inglés vía `remember_batch` y reconciliar `similar` sin auto-resolver contradicciones
 
 #### Scenario: stale-review
 - **WHEN** un cliente obtiene el prompt `stale-review`
-- **THEN** la guía indica enumerar la cola `list_memories(stale=true)` y resolver con `get_memory`, `reconfirm`, `update`, `forget` o `merge_memories`
+- **THEN** la guía indica enumerar la cola stale y cerrar cada ítem verificado con `reconfirm`, `update`, `forget` o `merge_memories`
 
 ### Requirement: Identidad no controlable por el agente
 Las herramientas MCP MUST NOT aceptar `user_id`, owner o tenant como argumentos controlables por el cliente.
@@ -198,3 +198,14 @@ El sistema MUST rechazar cuerpos MCP mayores al límite configurado antes de mat
 #### Scenario: Presupuesto de autenticación agotado
 - **WHEN** un origen supera el presupuesto configurado de credenciales MCP inválidas
 - **THEN** el sistema responde `429` con `Retry-After` sin consultar repetidamente la base de datos durante la ventana indicada
+
+### Requirement: Documentación pública alineada con la superficie MCP
+La documentación de entrada del repositorio (como mínimo el README principal y cualquier guía de clientes que enumere herramientas MCP) MUST listar exactamente las mismas herramientas que el servidor anuncia: `remember`, `remember_batch`, `recall`, `context`, `get_memory`, `list_memories`, `update`, `merge_memories`, `related_memories`, `reconfirm` y `forget`. MUST NOT afirmar un conteo u omisión que contradiga ese conjunto.
+
+#### Scenario: README enumera la superficie
+- **WHEN** un operador lee el README del servicio MCP
+- **THEN** aparecen las once herramientas por nombre, sin afirmar que son nueve ni omitir `related_memories` o `reconfirm`
+
+#### Scenario: Guía de clientes coherente
+- **WHEN** una guía de cliente documentada enumera herramientas MCP
+- **THEN** usa el mismo conjunto de once nombres que el anuncio del servidor

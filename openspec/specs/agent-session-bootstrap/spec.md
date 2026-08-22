@@ -91,7 +91,7 @@ Cada salida de `SessionStart` MUST exponer al agente un ciclo breve y accionable
 - **THEN** el ciclo breve nombra las herramientas según el prefijo y mecanismo de descubrimiento del cliente correspondiente
 
 ### Requirement: Guía de vecinos, reconfirmación y prompts
-La skill y el recordatorio de `SessionStart` MUST enseñar el ciclo ampliado: tras un acierto útil de `recall` o `context`, la guía MUST presentar `related_memories` como paso opcional sólo cuando haga falta el entorno temático de una semilla, no en cada recuperación; ante la cola de memorias obsoletas MUST preferir `reconfirm` frente a volver a guardar el mismo contenido; y, si el cliente soporta prompts MCP, MUST nombrar `session-start`, `capture-scan` y `stale-review` como atajos del ciclo ya documentado.
+La skill y el recordatorio de `SessionStart` MUST enseñar el ciclo ampliado: tras un acierto útil de `recall` o `context`, la guía MUST presentar `related_memories` como paso opcional sólo cuando haga falta el entorno temático de una semilla, no en cada recuperación; ante la cola de memorias obsoletas MUST exigir un desenlace explícito (`reconfirm` / `update` / `forget` / `merge_memories`) y preferir `reconfirm` frente a volver a guardar el mismo contenido; ante `similar` MUST distinguir merge (reexpresión) de update/forget (contradicción o hecho incorrecto); y, si el cliente soporta prompts MCP, MUST nombrar `session-start`, `capture-scan` y `stale-review` como atajos del ciclo ya documentado.
 
 #### Scenario: Vecindario opcional
 - **WHEN** un `recall` o `context` devuelve una memoria útil y el agente necesita explorar el tema
@@ -101,6 +101,25 @@ La skill y el recordatorio de `SessionStart` MUST enseñar el ciclo ampliado: tr
 - **WHEN** el agente verifica una memoria marcada como stale que sigue siendo cierta
 - **THEN** la guía vigente indica `reconfirm` en lugar de un `remember` idéntico
 
+#### Scenario: Cola obsoleta con desenlace
+- **WHEN** el agente completa la verificación de un ítem stale
+- **THEN** la guía vigente exige elegir `reconfirm`, `update`, `forget` o `merge_memories` según el resultado
+
+#### Scenario: Similares en captura
+- **WHEN** `remember` o `remember_batch` reportan similares
+- **THEN** la guía vigente indica merge para reexpresiones y update/forget para contradicciones, sin auto-resolver
+
 #### Scenario: Prompts como atajo
 - **WHEN** el cliente expone prompts MCP
 - **THEN** la guía vigente nombra `session-start`, `capture-scan` y `stale-review` como atajos del ciclo start → captura → revisión stale
+
+### Requirement: Equivalencia contractual del ciclo con el benchmark
+La guía de ciclo de memoria en `SessionStart` MUST permanecer alineada con los nombres de herramienta y el comportamiento fail-open que el benchmark observado asume por cliente, de modo que una mejora del runbook o de la matriz no contradiga el recordatorio inyectado.
+
+#### Scenario: Nombre de herramienta coherente
+- **WHEN** el benchmark observa un cliente concreto
+- **THEN** la guía de `SessionStart` de ese cliente nombra las mismas herramientas de context/recall/captura que el escenario espera descubrir
+
+#### Scenario: Fail-open intacto
+- **WHEN** el servidor de memoria no está disponible al iniciar
+- **THEN** la guía de ciclo sigue siendo emitida sin bloquear la sesión, igual que el benchmark trata omisiones sin fabricar éxito
