@@ -28,6 +28,20 @@ from recallum.hygiene import DEFAULT_MAX_MEMORIES, build_hygiene_report, render_
 from recallum.memory.service import MemoryService
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {parsed}")
+    return parsed
+
+
+def _unit_float(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError(f"must be between 0.0 and 1.0, got {parsed}")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recallum-admin",
@@ -104,15 +118,18 @@ def build_parser() -> argparse.ArgumentParser:
     hygiene_cmd.add_argument("--email", required=True)
     hygiene_cmd.add_argument(
         "--min-similarity",
-        type=float,
+        type=_unit_float,
         default=None,
-        help="Cosine similarity floor for candidate pairs (default: limits.similar_min_similarity)",
+        help=(
+            "Cosine similarity floor for candidate pairs, in [0.0, 1.0] "
+            "(default: limits.similar_min_similarity)"
+        ),
     )
     hygiene_cmd.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_MAX_MEMORIES,
-        help=f"Cap on active memories scanned (default {DEFAULT_MAX_MEMORIES})",
+        help=f"Cap on active memories scanned, >= 1 (default {DEFAULT_MAX_MEMORIES})",
     )
 
     reembed = subparsers.add_parser(

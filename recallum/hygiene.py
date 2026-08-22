@@ -29,11 +29,17 @@ from recallum.memory import MemoryVisibility
 # narrower slice (rerun scoped by a future filter) rather than a silent cap.
 DEFAULT_MAX_MEMORIES = 500
 
-# Per-node neighbour cap passed through to graph_snapshot. Irrelevant to the
-# result whenever the pairwise self-join path is used (true for any corpus
-# under graph_scalable_min_nodes, which DEFAULT_MAX_MEMORIES sits well under)
-# since that path returns every qualifying pair uncapped; kept generous so a
-# report stays complete even if the scalable path ever activates here.
+# Per-node neighbour cap passed through to graph_snapshot. Irrelevant when the
+# pairwise self-join path is used (every qualifying pair comes back uncapped).
+# But routing to the bounded per-node kNN path is decided by the user's
+# UNCAPPED active-memory total against graph_scalable_min_nodes (see
+# _scalable_edges_enabled in memory_repo.py) -- not by the capped selection
+# this module requests. A user with more than graph_scalable_min_nodes active
+# memories (default 2000) silently gets the kNN path even though this module
+# only ever asks for DEFAULT_MAX_MEMORIES (500) of them, and that path keeps
+# only each node's strongest DEFAULT_MAX_NEIGHBOURS matches, so a weak edge
+# of a busy node past its top-20 can be missed. The report stays bounded and
+# read-only either way; it just may under-report clusters for such users.
 DEFAULT_MAX_NEIGHBOURS = 20
 
 CONTENT_PREVIEW_CHARS = 100
@@ -99,6 +105,12 @@ class HygieneReport:
     scanned: int = 0
     capped: bool = False
     cap: int = DEFAULT_MAX_MEMORIES
+    # True when the scanned memories mix embedding models (or include rows
+    # with no recorded provenance). Pairs only ever compare same-model
+    # vectors, so a mismatch silently shrinks the comparable pool -- worth
+    # surfacing, since "0 clusters" otherwise reads as a clean corpus rather
+    # than as a corpus mid-migration that ``recallum-admin reembed`` would fix.
+    model_mismatch: bool = False
 
 
 def _cluster_by_bucket(
@@ -222,6 +234,7 @@ async def build_hygiene_report(
         scanned=len(memories),
         capped=snapshot.total > len(memories),
         cap=limit,
+        model_mismatch=snapshot.model_mismatch,
     )
 
 
@@ -242,6 +255,13 @@ def render_hygiene_report(report: HygieneReport) -> str:
     if report.capped:
         scan_line += f" (capped at {report.cap}; more active memories exist and were not scanned)"
     lines.append(scan_line)
+    if report.model_mismatch:
+        lines.append(
+            "warning: scanned memories mix embedding models (or lack provenance) -- "
+            "pairs only compare same-model vectors, so mismatched rows are silently "
+            "excluded from every cluster and contradiction candidate below; "
+            "run `recallum-admin reembed` to restore full coverage"
+        )
     lines.append(
         f"clusters: {len(report.clusters)}  contradiction candidates: {len(report.contradictions)}"
     )
