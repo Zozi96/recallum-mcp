@@ -63,31 +63,49 @@ _NON_ENGLISH_STOPWORDS = frozenset(
 _DIACRITIC_CHARS = re.compile(r"[áéíóúñüàèìòùâêîôûçãõ]", re.IGNORECASE)
 
 # A "word" inside a token that survived the code-ish filter: letters (incl.
-# accented) and internal apostrophes/hyphens, so contractions count as one.
-_WORD_RE = re.compile(r"[A-Za-zÀ-ÿ]+(?:['’-][A-Za-zÀ-ÿ]+)*")
+# accented, but not the × / ÷ symbols that fall inside the naive À-ÿ range)
+# and internal apostrophes/hyphens, so contractions count as one.
+_WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’-][A-Za-zÀ-ÖØ-öø-ÿ]+)*")
 
 # Raw (punctuation-attached) tokens that look identifier-, path-, command- or
 # code-like rather than prose. These are dropped whole -- not just stripped of
 # punctuation -- so a path or flag never contributes a "word" at all: keeping
 # it would let code-heavy content masquerade as short prose, or (in
 # principle) let a path component collide with a stopword.
+#
+# The path alternative keeps its separator class (``./\:``) and body class
+# disjoint on purpose: if a character (``.``) could belong to either class, a
+# run of dots is ambiguously partitionable between "separator" and "body"
+# across every ``+`` repetition, and the alternation backtracks through all
+# of those partitions -- classic nested-quantifier ReDoS. With the classes
+# disjoint there is exactly one way to partition any input, so matching (or
+# failing) stays linear regardless of how many separators are chained.
 _CODE_ISH_RE = re.compile(
     r"""^(
-        [A-Za-z0-9_]+([./\\:][A-Za-z0-9_.-]+)+   # paths, module.paths, a:b
-        | [a-z0-9]+(_[a-z0-9]+)+                  # snake_case
-        | [a-zA-Z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*   # camelCase / PascalCase
-        | --?[A-Za-z][\w-]*                       # --flag / -f
-        | [A-Za-z0-9_]+\(\)                       # func()
-        | [\w.+-]+@[\w-]+                         # user@host-ish
+        [A-Za-z0-9_]+([./\\:][A-Za-z0-9_-]+)+   # paths, module.paths, a:b
+        | [a-z0-9]+(_[a-z0-9]+)+                 # snake_case
+        | [a-zA-Z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*  # camelCase / PascalCase
+        | --?[A-Za-z][\w-]*                      # --flag / -f
+        | [A-Za-z0-9_]+\(\)                      # func()
+        | [\w+-]+@[\w-]+                         # user@host-ish
     )$""",
     re.VERBOSE,
 )
 
 _MIN_WORDS = 4
 
+# Belt-and-braces alongside the disjoint-class fix above: a token this long
+# is not a realistic identifier/path/flag, and skipping the regex entirely
+# for it costs nothing while ruling out any future pattern from ever running
+# on unbounded input.
+_MAX_CODE_ISH_TOKEN_LEN = 256
+
 
 def _is_code_ish(raw_token: str) -> bool:
-    return bool(_CODE_ISH_RE.match(raw_token.strip(".,;:!?()[]{}\"'")))
+    stripped = raw_token.strip(".,;:!?()[]{}\"'")
+    if len(stripped) > _MAX_CODE_ISH_TOKEN_LEN:
+        return False
+    return bool(_CODE_ISH_RE.match(stripped))
 
 
 def looks_non_english(content: str) -> bool:
