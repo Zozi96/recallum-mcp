@@ -124,6 +124,27 @@ El sistema MUST permitir estampar la fecha de reconfirmación de una memoria act
 - **WHEN** un usuario reconfirma un identificador que no corresponde a una memoria activa propia
 - **THEN** el sistema responde como no reconfirmado sin revelar si pertenece a otro usuario
 
+### Requirement: Contador de reconfirmaciones como señal de utilidad
+Cada vez que el sistema estampa la fecha de reconfirmación de una memoria activa (por
+reconfirmación explícita o por deduplicación exacta al guardar contenido idéntico) MUST acumular
+un contador de reconfirmaciones en esa memoria, expuesto en las respuestas como señal de utilidad
+explícita, distinta de los contadores de uso por servido (`recall_count`, `context_count`). Este
+contador MUST NOT influir en el ranking por defecto. Una memoria de reemplazo creada al corregir o
+fusionar memorias MUST comenzar con el contador en cero, ya que una nueva afirmación aún no ha sido
+reverificada.
+
+#### Scenario: Reconfirmaciones sucesivas acumulan
+- **WHEN** una memoria activa se reconfirma explícitamente o se deduplica por contenido idéntico varias veces
+- **THEN** el contador de reconfirmaciones de esa memoria aumenta en cada evento y las lecturas posteriores lo incluyen
+
+#### Scenario: El contador no afecta el ranking por defecto
+- **WHEN** una memoria con reconfirmaciones acumuladas participa en `recall`
+- **THEN** el sistema no usa el contador de reconfirmaciones para alterar el orden de los resultados salvo que una decisión medida futura active explícitamente su peso
+
+#### Scenario: Una memoria de reemplazo comienza en cero
+- **WHEN** una memoria se corrige con nuevo contenido o se fusiona con otras, generando una memoria de reemplazo
+- **THEN** la memoria de reemplazo se crea con el contador de reconfirmaciones en cero, sin heredar el de las memorias que reemplaza
+
 
 ### Requirement: Reconciliación guiada ante similares
 Cuando `remember` o `remember_batch` reportan similares, la guía del sistema (skill, prompts o documentación de agente) MUST distinguir: reexpresiones o refinamientos del mismo claim → `merge_memories`; hecho incorrecto u obsoleto → `update` del incorrecto; contradicción entre claims vigentes → `update` o `forget` del incorrecto tras verificación humana/agente, NEVER un merge que “resuelva” la contradicción. El servidor MUST NOT auto-merge ni auto-olvidar por el aviso de similares.

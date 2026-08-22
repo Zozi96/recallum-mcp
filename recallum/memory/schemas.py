@@ -24,7 +24,9 @@ class MemoryOut(BaseModel):
     freshness signal that the claim still held then. ``last_recalled_at`` and
     ``recall_count`` say when and how often this memory matched a ``recall``
     query; ``context_count`` says how often it rode along in a ``context``
-    snapshot, which tracks importance more than relevance. Counters are as of
+    snapshot, which tracks importance more than relevance. ``reconfirm_count``
+    is the cumulative number of explicit reconfirmations -- an agent verifying
+    the claim against reality, distinct from serve counts. Counters are as of
     before the response carrying them was produced. NULL / 0 mean "no signal
     yet".
     """
@@ -42,6 +44,7 @@ class MemoryOut(BaseModel):
     last_recalled_at: datetime | None = None
     recall_count: int = 0
     context_count: int = 0
+    reconfirm_count: int = 0
 
 
 class SimilarMemory(BaseModel):

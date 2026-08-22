@@ -1289,8 +1289,10 @@ class MemoryRepository:
         """Stamp ``reconfirmed_at`` on an active memory and return the fresh row.
 
         Called when identical content is re-stored: the claim was just observed
-        to still hold, which is a freshness signal, not a new claim. Returns
-        ``None`` for unknown, foreign or retired ids.
+        to still hold, which is a freshness signal, not a new claim. Also
+        increments ``reconfirm_count``, the cumulative explicit-utility signal
+        kept separate from serve counts. Returns ``None`` for unknown, foreign
+        or retired ids.
         """
         async with self._sessions.for_user(user_id) as session:
             result = await session.execute(
@@ -1300,7 +1302,10 @@ class MemoryRepository:
                     Memory.user_id == user_id,
                     Memory.deleted_at.is_(None),
                 )
-                .values(reconfirmed_at=func.now())
+                .values(
+                    reconfirmed_at=func.now(),
+                    reconfirm_count=Memory.reconfirm_count + 1,
+                )
             )
             if result.rowcount != 1:
                 return None

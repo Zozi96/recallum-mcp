@@ -1333,4 +1333,5 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         last_recalled_at=memory.last_recalled_at,
         recall_count=memory.recall_count,
         context_count=memory.context_count,
+        reconfirm_count=memory.reconfirm_count,
     )

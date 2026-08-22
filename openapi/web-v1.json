@@ -856,7 +856,7 @@
         "type": "object"
       },
       "MemoryOut": {
-        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory matched a ``recall``\nquery; ``context_count`` says how often it rode along in a ``context``\nsnapshot, which tracks importance more than relevance. Counters are as of\nbefore the response carrying them was produced. NULL / 0 mean \"no signal\nyet\".",
+        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory matched a ``recall``\nquery; ``context_count`` says how often it rode along in a ``context``\nsnapshot, which tracks importance more than relevance. ``reconfirm_count``\nis the cumulative number of explicit reconfirmations -- an agent verifying\nthe claim against reality, distinct from serve counts. Counters are as of\nbefore the response carrying them was produced. NULL / 0 mean \"no signal\nyet\".",
         "properties": {
           "category": {
             "enum": [
@@ -922,6 +922,11 @@
           "recall_count": {
             "default": 0,
             "title": "Recall Count",
+            "type": "integer"
+          },
+          "reconfirm_count": {
+            "default": 0,
+            "title": "Reconfirm Count",
             "type": "integer"
           },
           "reconfirmed_at": {
@@ -1393,6 +1398,11 @@
           "recall_count": {
             "default": 0,
             "title": "Recall Count",
+            "type": "integer"
+          },
+          "reconfirm_count": {
+            "default": 0,
+            "title": "Reconfirm Count",
             "type": "integer"
           },
           "reconfirmed_at": {

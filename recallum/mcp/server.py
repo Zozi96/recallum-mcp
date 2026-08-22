@@ -343,7 +343,9 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def reconfirm(memory_id: uuid.UUID) -> ReconfirmResult:
         """Stamp an active memory as freshly verified without rewriting it.
 
-        Unknown, foreign, and retired ids return reconfirmed=false.
+        Also increments ``reconfirm_count``, a cumulative explicit-utility
+        signal kept separate from serve-count usage signals. Unknown,
+        foreign, and retired ids return reconfirmed=false.
         """
         return await memory_service().reconfirm(require_identity().user_id, memory_id)
 

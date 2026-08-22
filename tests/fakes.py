@@ -201,6 +201,7 @@ class FakeMemoryRepository:
             last_recalled_at=None,
             recall_count=0,
             context_count=0,
+            reconfirm_count=0,
             **kwargs,
         )
         self.rows[memory.id] = memory
@@ -578,6 +579,7 @@ class FakeMemoryRepository:
             last_recalled_at=None,
             recall_count=0,
             context_count=0,
+            reconfirm_count=0,
         )
         self.rows[replacement.id] = replacement
         now = datetime.now(UTC)
@@ -592,6 +594,7 @@ class FakeMemoryRepository:
         if memory is None or memory.user_id != user_id or memory.is_deleted:
             return None
         memory.reconfirmed_at = datetime.now(UTC)
+        memory.reconfirm_count = (memory.reconfirm_count or 0) + 1
         self._bump(user_id)
         return memory
 
@@ -828,6 +831,7 @@ class FakeMemoryRepository:
             last_recalled_at=None,
             recall_count=0,
             context_count=0,
+            reconfirm_count=0,
         )
         self.rows[replacement.id] = replacement
         original.deleted_at = datetime.now(UTC)

@@ -65,6 +65,22 @@ async def test_remember_exact_duplicate_returns_existing():
     assert len(repo.rows) == 1
 
 
+async def test_remember_dedup_path_accumulates_reconfirm_count():
+    """Re-storing identical content is an explicit-utility signal too, and it
+
+    accumulates independently of serve counts (recall_count/context_count).
+    """
+    service, _, _ = make_service()
+    first = await service.remember(USER, content="stable fact", category="fact")
+    assert first.memory.reconfirm_count == 0
+
+    second = await service.remember(USER, content="stable fact", category="fact")
+    assert second.memory.reconfirm_count == 1
+
+    third = await service.remember(USER, content="stable fact", category="fact")
+    assert third.memory.reconfirm_count == 2
+
+
 async def test_remember_duplicate_scoped_per_project():
     service, repo, _ = make_service()
     await service.remember(USER, content="misma nota", category="fact", project="a")
@@ -602,6 +618,19 @@ async def test_update_content_supersedes_and_returns_a_new_memory():
     assert [m.id for m in listed.items] == [result.memory.id]
 
 
+async def test_update_content_resets_reconfirm_count_on_the_replacement():
+    """A replacement memory is a new claim, not yet re-verified: it starts at 0."""
+    service, _, _ = make_service()
+    original = await service.remember(USER, content="I deploy on fridays", category="decision")
+    await service.reconfirm(USER, original.memory.id)
+    await service.reconfirm(USER, original.memory.id)
+
+    result = await service.update(USER, original.memory.id, content="I deploy on tuesdays")
+
+    assert result.memory is not None
+    assert result.memory.reconfirm_count == 0
+
+
 async def test_update_without_content_edits_in_place_and_keeps_the_id():
     service, _, _ = make_service()
     original = await service.remember(USER, content="stable fact", category="fact")
@@ -1068,6 +1097,7 @@ async def test_related_memories_and_reconfirm_hide_unknown_foreign_and_retired_i
     assert stamped.memory.id == before.id
     assert stamped.memory.content == before.content
     assert stamped.memory.reconfirmed_at is not None
+    assert stamped.memory.reconfirm_count == 1
     assert (await service.reconfirm(USER, foreign.memory.id)).reconfirmed is False
     assert (await service.reconfirm(USER, uuid.uuid4())).reconfirmed is False
 
@@ -1075,6 +1105,21 @@ async def test_related_memories_and_reconfirm_hide_unknown_foreign_and_retired_i
     assert (await service.reconfirm(USER, own.memory.id)).reconfirmed is False
     assert (await service.related_memories(USER, own.memory.id)).related == []
     assert (await service.related_memories(USER, foreign.memory.id)).related == []
+
+
+async def test_reconfirm_accumulates_across_calls_independently_of_serve_counts():
+    service, repo, _ = make_service()
+    own = await service.remember(USER, content="verified periodically", category="fact")
+
+    await service.reconfirm(USER, own.memory.id)
+    second = await service.reconfirm(USER, own.memory.id)
+
+    assert second.memory is not None
+    assert second.memory.reconfirm_count == 2
+    # Serve counts (recall_count/context_count) are untouched by reconfirm.
+    assert second.memory.recall_count == 0
+    assert second.memory.context_count == 0
+    assert repo.rows[own.memory.id].reconfirm_count == 2
 
 
 async def test_memory_graph_representative_default_bound_stays_capped():

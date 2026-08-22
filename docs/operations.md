@@ -301,6 +301,15 @@ designed to contain. Do not raise `RECALLUM__LIMITS__RECALL_USAGE_WEIGHT`
 above 0 unless a future dataset revision (with usage patterns that correlate
 with relevance rather than with prior rankings) reverses this result.
 
+`reconfirm_count` (stamped by `reconfirm`, and by `remember`'s exact-dedup
+and race paths) accumulates independently of the serve counts above: it is
+an agent explicitly verifying a memory against reality, not a passive serve,
+so it is not implicated by the measured decision against `recall_count`. It
+is the candidate cleaner utility signal for any future ranking experiment —
+a weight for it would go through the same measured-activation contract
+(ships at `0.0`, raised only after a comparison run like the ones above). No
+ranking change now.
+
 ### Comparing the freshness vote
 
 `recall_freshness_weight` (the vote `reconfirmed_at`, or `created_at` when a
