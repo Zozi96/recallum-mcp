@@ -159,3 +159,17 @@ La fusión de `recall` MUST poder incorporar un voto derivado del uso registrado
 #### Scenario: Aislamiento intacto
 - **WHEN** la fusión aplica el voto de uso
 - **THEN** sólo participan memorias activas del usuario autenticado
+### Requirement: Voto de frescura en la fusión de recall
+La fusión de `recall` MAY incorporar un voto derivado de la última confirmación de una memoria (`reconfirmed_at`, o `created_at` cuando nunca fue reconfirmada) mediante un peso configurable. El valor por defecto MUST ser 0.0 (sin efecto). Un peso mayor que cero MUST NOT activarse como default de producción sin un experimento documentado que compare el baseline (peso 0) usando el evaluador de ranking. El voto de frescura MUST NOT superar la fuerza de una señal de recuperación primaria, y el modo degradado MUST seguir aplicando sólo sobre candidatos textuales válidos.
+
+#### Scenario: Default sin efecto
+- **WHEN** `recall_freshness_weight` está en 0.0
+- **THEN** el orden de `recall` coincide con la fusión de relevancia/importancia/uso vigente sin reordenar por frescura
+
+#### Scenario: Peso positivo medido
+- **WHEN** un operador configura un peso de frescura > 0 tras comparar el dataset de ranking
+- **THEN** memorias confirmadas más recientemente pueden desempatar o reordenar candidatos ya cercanos en relevancia, sin desalojar un match claramente mejor
+
+#### Scenario: Frescura uniforme no aporta señal
+- **WHEN** todas las memorias candidatas comparten el mismo instante de confirmación
+- **THEN** el voto de frescura no altera el orden resultante de la fusión
