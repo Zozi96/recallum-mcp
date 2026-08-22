@@ -82,6 +82,7 @@ class CreateMemoryRequest(BaseModel):
     importance: StrictImportanceInput = 5
     metadata: Metadata | None = None
     source_client: str | None = None
+    ttl_seconds: int | None = None
 
     @model_validator(mode="after")
     def validate_scope(self):
@@ -123,6 +124,8 @@ class CorrectMemoryRequest(MemoryLocationImmutableRequest):
     category: Category | None = None
     importance: StrictImportanceInput | None = None
     metadata: Metadata | None = None
+    ttl_seconds: int | None = None
+    clear_expiry: bool = False
 
 
 class SupersedeMemoryRequest(MemoryLocationImmutableRequest):
@@ -214,6 +217,7 @@ def _memory(row: Memory) -> MemoryOut:
         source_client=row.source_client,
         metadata=dict(row.metadata_ or {}),
         created_at=row.created_at,
+        expires_at=row.expires_at,
         reconfirmed_at=row.reconfirmed_at,
         last_recalled_at=row.last_recalled_at,
         recall_count=row.recall_count,

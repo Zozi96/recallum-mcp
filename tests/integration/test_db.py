@@ -283,7 +283,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0014_reconfirm_count"
+        assert version == "0015_memory_expiry"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")

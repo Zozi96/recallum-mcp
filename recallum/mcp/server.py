@@ -171,6 +171,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         importance: StrictImportanceInput = 5,
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
+        ttl_seconds: int | None = None,
     ) -> RememberResult:
         """Store one atomic memory, including verified reusable project context.
 
@@ -185,7 +186,9 @@ def build_mcp_server(container: Container) -> FastMCP:
         returns the existing memory instead of duplicating it. When content
         looks like it may not be English, the response's `language_warning`
         says so — advisory only, the write still succeeds; reword and update
-        it when that happens.
+        it when that happens. `ttl_seconds` is for short-lived working memory
+        that should silently stop being served after it expires; omit it for
+        durable context.
         """
         return await memory_service().remember(
             require_identity().user_id,
@@ -195,6 +198,7 @@ def build_mcp_server(container: Container) -> FastMCP:
             importance=importance,
             metadata=metadata,
             source_client=source_client,
+            ttl_seconds=ttl_seconds,
         )
 
     @mcp.tool
@@ -386,6 +390,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         importance: StrictImportanceInput | None = None,
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
+        ttl_seconds: int | None = None,
+        clear_expiry: bool = False,
     ) -> UpdateResult:
         """Correct a memory, or replace one whose fact has changed.
 
@@ -397,9 +403,12 @@ def build_mcp_server(container: Container) -> FastMCP:
         the full-text index otherwise cannot reach, and supersession keeps
         the original wording in history. Rewriting a memory that is still
         true and already in English, only to reword or restyle it, is not an
-        update. Passing only importance, category or metadata edits the
-        memory in place and keeps its id. Scope and project cannot be
-        changed. Unknown ids return updated=false.
+        update. Passing only importance, category, metadata, ttl_seconds or
+        clear_expiry edits the memory in place and keeps its id; ttl_seconds
+        and clear_expiry only apply then (not alongside content) and manage a
+        short-lived working memory's expiry — set a fresh one, or clear it
+        back to durable. Scope and project cannot be changed. Unknown ids
+        return updated=false.
         """
         return await memory_service().update(
             require_identity().user_id,
@@ -409,6 +418,8 @@ def build_mcp_server(container: Container) -> FastMCP:
             importance=importance,
             metadata=metadata,
             source_client=source_client,
+            ttl_seconds=ttl_seconds,
+            clear_expiry=clear_expiry,
         )
 
     @mcp.tool

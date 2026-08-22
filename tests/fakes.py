@@ -164,7 +164,11 @@ class FakeMemoryRepository:
         self.generations[user_id] = self.generations.get(user_id, 0) + 1
 
     def _active(self, user_id: uuid.UUID) -> list[Memory]:
-        return [m for m in self.rows.values() if m.user_id == user_id and not m.is_deleted]
+        return [
+            m
+            for m in self.rows.values()
+            if m.user_id == user_id and not m.is_deleted and not m.is_expired
+        ]
 
     def _filtered(
         self,
@@ -181,6 +185,22 @@ class FakeMemoryRepository:
         scope = kwargs["scope"]
         project = kwargs["project"]
         digest = kwargs["content_hash"]
+        # Mirror the adapter: the dedup uniqueness check only honours
+        # ``deleted_at``, not expiry (a Postgres partial index predicate must
+        # be immutable, so it cannot reference now()). An expired-but-
+        # undeleted row sharing this dedup key would otherwise still block
+        # this insert, so it is retired first -- same transaction, same as
+        # the SQL adapter.
+        for row in self.rows.values():
+            if (
+                row.user_id == user_id
+                and not row.is_deleted
+                and row.is_expired
+                and row.scope == scope
+                and (row.project or "") == (project or "")
+                and row.content_hash == digest
+            ):
+                row.deleted_at = datetime.now(UTC)
         for existing in self._active(user_id):
             if (
                 existing.scope == scope
@@ -222,7 +242,7 @@ class FakeMemoryRepository:
 
     async def get_active(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
         memory = self.rows.get(memory_id)
-        if memory is None or memory.user_id != user_id or memory.is_deleted:
+        if memory is None or memory.user_id != user_id or memory.is_deleted or memory.is_expired:
             return None
         return memory
 
@@ -421,6 +441,7 @@ class FakeMemoryRepository:
             seed is None
             or seed.user_id != user_id
             or seed.is_deleted
+            or seed.is_expired
             or seed.embedding_model is None
         ):
             return []
@@ -773,7 +794,12 @@ class FakeMemoryRepository:
         importance: int | None,
         category: str | None,
         metadata: dict[str, Any] | None,
+        expires_at: datetime | None = None,
+        clear_expires_at: bool = False,
     ) -> Memory | None:
+        # Deliberately not gated on ``is_expired``: this is a keyed edit by
+        # id, matching the adapter, so an expired row can still be reached to
+        # extend or clear its TTL.
         memory = self.rows.get(memory_id)
         if memory is None or memory.user_id != user_id or memory.is_deleted:
             return None
@@ -783,7 +809,14 @@ class FakeMemoryRepository:
             memory.category = category
         if metadata is not None:
             memory.metadata_ = metadata
-        if any(value is not None for value in (importance, category, metadata)):
+        if clear_expires_at:
+            memory.expires_at = None
+        elif expires_at is not None:
+            memory.expires_at = expires_at
+        if (
+            any(value is not None for value in (importance, category, metadata, expires_at))
+            or clear_expires_at
+        ):
             self._bump(user_id)
         return memory
 

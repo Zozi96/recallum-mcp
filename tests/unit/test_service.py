@@ -1355,3 +1355,123 @@ def test_memory_limits_scalable_graph_defaults_and_bounds():
         MemoryLimits(graph_max_nodes=0)
     with pytest.raises(ValidationError):
         MemoryLimits(graph_max_neighbours=0)
+
+
+# -- working memory (TTL / expiry) ----------------------------------------
+
+
+async def test_remember_with_ttl_sets_expires_at_and_defaults_to_none():
+    service, _, _ = make_service()
+    durable = await service.remember(USER, content="durable fact", category="fact")
+    assert durable.memory.expires_at is None
+
+    working = await service.remember(
+        USER, content="branch is blocked this week", category="fact", ttl_seconds=3600
+    )
+    assert working.memory.expires_at is not None
+    assert working.memory.expires_at > datetime.now(UTC)
+    assert working.memory.expires_at <= datetime.now(UTC) + timedelta(seconds=3600, minutes=1)
+
+
+@pytest.mark.parametrize("ttl_seconds", [0, -1, True, 1.5, 366 * 24 * 3600])
+async def test_remember_rejects_invalid_ttl_seconds(ttl_seconds):
+    service, _, _ = make_service()
+    with pytest.raises(MemoryValidationError):
+        await service.remember(USER, content="ok", category="fact", ttl_seconds=ttl_seconds)
+
+
+async def test_remember_batch_item_carries_ttl_seconds():
+    service, _, _ = make_service()
+    result = await service.remember_batch(
+        USER,
+        items=[
+            RememberBatchItem(content="short lived", category="fact", ttl_seconds=60),
+            RememberBatchItem(content="durable", category="fact"),
+        ],
+    )
+    assert result.results[0].memory is not None
+    assert result.results[0].memory.expires_at is not None
+    assert result.results[1].memory is not None
+    assert result.results[1].memory.expires_at is None
+
+
+async def test_expired_memory_excluded_from_list_get_recall_and_similar():
+    service, repo, _ = make_service()
+    working = await service.remember(USER, content="expiring soon fact", category="fact")
+    repo.rows[working.memory.id].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    other = await service.remember(USER, content="other durable fact", category="fact")
+
+    listed = await service.list_memories(USER)
+    assert working.memory.id not in {item.id for item in listed.items}
+    assert other.memory.id in {item.id for item in listed.items}
+
+    got = await service.get(USER, working.memory.id)
+    assert got.found is False
+
+    recalled = await service.recall(USER, query="expiring soon fact")
+    assert working.memory.id not in {item.id for item in recalled.results}
+
+
+async def test_expired_near_duplicate_is_not_reported_as_similar():
+    """similar_active feeds remember's advisory; an expired row must not surface."""
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo, embeddings=ScriptedEmbeddingClient(vectors={}), limits=MemoryLimits()
+    )
+    shared = [1.0] + [0.0] * 7
+    service._embeddings.vectors = {
+        "expiring near-duplicate": shared,
+        "fresh new content": shared,
+    }
+
+    expiring = await service.remember(
+        USER, content="expiring near-duplicate", category="fact"
+    )
+    repo.rows[expiring.memory.id].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    result = await service.remember(USER, content="fresh new content", category="fact")
+
+    assert result.similar == []
+
+
+async def test_expired_duplicate_does_not_block_re_remembering():
+    """An expired duplicate MUST NOT block re-remembering the same content."""
+    service, repo, _ = make_service()
+    stale = await service.remember(USER, content="stable fact", category="fact")
+    repo.rows[stale.memory.id].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    fresh = await service.remember(USER, content="stable fact", category="fact")
+
+    assert fresh.created is True
+    assert fresh.memory.id != stale.memory.id
+    assert fresh.memory.expires_at is None
+
+
+async def test_update_sets_and_clears_expiry():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="working note", category="fact")
+    assert stored.memory.expires_at is None
+
+    ttl_set = await service.update(USER, stored.memory.id, ttl_seconds=120)
+    assert ttl_set.memory is not None
+    assert ttl_set.memory.expires_at is not None
+
+    cleared = await service.update(USER, stored.memory.id, clear_expiry=True)
+    assert cleared.memory is not None
+    assert cleared.memory.expires_at is None
+
+
+async def test_update_rejects_ttl_seconds_and_clear_expiry_together():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="working note", category="fact")
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, stored.memory.id, ttl_seconds=60, clear_expiry=True)
+
+
+async def test_update_rejects_ttl_seconds_alongside_content():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="working note", category="fact")
+    with pytest.raises(MemoryValidationError):
+        await service.update(
+            USER, stored.memory.id, content="new content", ttl_seconds=60
+        )

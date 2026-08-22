@@ -39,6 +39,16 @@ def _light() -> tuple[Any, ...]:
     )
 
 
+def _not_expired() -> Any:
+    """Predicate matching rows with no declared expiry, or one still in the future.
+
+    Shared by every place that gates on active rows: an expired memory is
+    retained (never physically deleted) but MUST NOT be served -- the same
+    lazy, read-time treatment as ``deleted_at``, just orthogonal to it.
+    """
+    return or_(Memory.expires_at.is_(None), Memory.expires_at > func.now())
+
+
 def _or_tsquery(query: str) -> Any:
     """Build an OR tsquery whose lexemes are normalised exactly like the column.
 
@@ -496,9 +506,37 @@ class MemoryRepository:
         source_client: str | None,
         metadata: dict[str, Any],
         memory_id: uuid.UUID | None = None,
+        expires_at: datetime | None = None,
     ) -> Memory:
-        """Insert a memory. Raises IntegrityError on exact active duplicate."""
+        """Insert a memory. Raises IntegrityError on exact active duplicate.
+
+        ``expires_at`` is None by default -- durable, no expiry -- and only
+        set when the caller declared a TTL for short-lived working memory.
+
+        The partial unique dedup index is keyed on ``deleted_at IS NULL``
+        only -- a Postgres index predicate must be immutable, so it cannot
+        itself be conditioned on ``expires_at > now()``. An expired-but-
+        undeleted row would otherwise still occupy that index slot and block
+        this insert, contradicting the rule that an expired duplicate MUST
+        NOT block re-remembering the same content. So any row sharing this
+        exact dedup key that has already expired is retired first, in the
+        same transaction: it was already invisible to every read, and this
+        just makes that permanent for the one row about to be replaced.
+        """
         async with self._sessions.for_user(user_id) as session:
+            await session.execute(
+                update(Memory)
+                .where(
+                    Memory.user_id == user_id,
+                    Memory.scope == scope,
+                    func.coalesce(Memory.project, "") == (project or ""),
+                    Memory.content_hash == content_hash,
+                    Memory.deleted_at.is_(None),
+                    Memory.expires_at.is_not(None),
+                    Memory.expires_at <= func.now(),
+                )
+                .values(deleted_at=func.now())
+            )
             memory = Memory(
                 user_id=user_id,
                 scope=scope,
@@ -511,6 +549,7 @@ class MemoryRepository:
                 importance=importance,
                 source_client=source_client,
                 metadata_=metadata,
+                expires_at=expires_at,
             )
             if memory_id is not None:
                 memory.id = memory_id
@@ -531,7 +570,12 @@ class MemoryRepository:
         project: str | None,
         content_hash: str,
     ) -> Memory | None:
-        """Return the active memory matching the dedup key, if any."""
+        """Return the active, non-expired memory matching the dedup key, if any.
+
+        An expired duplicate is deliberately invisible here: it MUST NOT block
+        re-remembering the same content, so a repeat of expired working memory
+        creates a fresh row instead of silently reviving the stale one.
+        """
         async with self._sessions.for_user(user_id) as session:
             stmt = (
                 select(Memory)
@@ -542,6 +586,7 @@ class MemoryRepository:
                     func.coalesce(Memory.project, "") == (project or ""),
                     Memory.content_hash == content_hash,
                     Memory.deleted_at.is_(None),
+                    _not_expired(),
                 )
                 .limit(1)
             )
@@ -556,6 +601,7 @@ class MemoryRepository:
                     Memory.id == memory_id,
                     Memory.user_id == user_id,
                     Memory.deleted_at.is_(None),
+                    _not_expired(),
                 )
             )
             return (await session.execute(stmt)).scalar_one_or_none()
@@ -699,9 +745,11 @@ class MemoryRepository:
                     seed.id == memory_id,
                     seed.user_id == user_id,
                     seed.deleted_at.is_(None),
+                    or_(seed.expires_at.is_(None), seed.expires_at > func.now()),
                     seed.embedding_model.is_not(None),
                     neighbour.user_id == user_id,
                     neighbour.deleted_at.is_(None),
+                    or_(neighbour.expires_at.is_(None), neighbour.expires_at > func.now()),
                     neighbour.id != seed.id,
                     neighbour.embedding_model.is_not(None),
                     seed.embedding_model == neighbour.embedding_model,
@@ -1058,6 +1106,7 @@ class MemoryRepository:
             filters = [
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
+                _not_expired(),
                 Memory.scope == scope,
                 func.coalesce(Memory.project, "") == (project or ""),
                 or_(
@@ -1088,12 +1137,20 @@ class MemoryRepository:
         importance: int | None,
         category: str | None,
         metadata: dict[str, Any] | None,
+        expires_at: datetime | None = None,
+        clear_expires_at: bool = False,
     ) -> Memory | None:
         """Change what a memory is filed under, not what it claims.
 
         Importance, category and metadata are bookkeeping about a fact, so they
         are edited in place and no history is kept. Content is different: it is
         the fact, and changing it goes through ``supersede``.
+
+        Row selection deliberately checks only ``deleted_at``, not expiry: this
+        is a keyed edit by id, not a read surface, so it is the one place an
+        already-expired memory can still be reached -- to extend or clear its
+        TTL. ``expires_at`` sets a new expiry (ignored when ``clear_expires_at``
+        is set); ``clear_expires_at`` removes any expiry, reverting to durable.
         """
         async with self._sessions.for_user(user_id) as session:
             stmt = (
@@ -1115,7 +1172,13 @@ class MemoryRepository:
                 memory.category = category
             if metadata is not None:
                 memory.metadata_ = metadata
-            if any(value is not None for value in (importance, category, metadata)):
+            if clear_expires_at:
+                memory.expires_at = None
+            elif expires_at is not None:
+                memory.expires_at = expires_at
+            if any(
+                value is not None for value in (importance, category, metadata, expires_at)
+            ) or clear_expires_at:
                 await self._increment_generation(session, user_id)
             await session.flush()
             return memory
@@ -1581,6 +1644,7 @@ class MemoryRepository:
         filters: list[Any] = [Memory.user_id == user_id]
         if active_only:
             filters.append(Memory.deleted_at.is_(None))
+            filters.append(_not_expired())
         if visibility.mode == "global":
             filters.append(Memory.scope == "global")
         elif visibility.mode == "project":

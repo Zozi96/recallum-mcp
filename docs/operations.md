@@ -396,6 +396,23 @@ cap trims the corpus, the report says so explicitly instead of truncating
 silently — rerun with a higher `--limit` for a complete sweep of a larger
 corpus.
 
+## Working memory (TTL)
+
+`remember`, `remember_batch` items, and `update` accept an optional
+`ttl_seconds` (positive, capped at `ttl_max_seconds`, default 365 days) that
+stores `expires_at = now() + ttl_seconds`. `update` also accepts
+`clear_expiry: true` to revert a memory to durable (no expiry). No memory
+expires by default -- `expires_at` is NULL unless a TTL was declared.
+
+Once past its expiry, a memory is excluded from every read surface (`recall`,
+`context`, `list_memories`, `get_memory`, the `similar` advisory,
+`related_memories`, `memory_graph`) without any background job -- the check
+is a lazy, read-time predicate, same shape as the existing soft-delete
+filter. The row is retained, never physically deleted, and an expired
+duplicate never blocks re-remembering the same content: a repeat comes back
+as a fresh row rather than reviving the stale one. Use TTL for short-lived
+facts ("branch X is blocked this week"); omit it for durable context.
+
 ## Graph edge strategy (scalable path)
 
 `memory_graph` computes edges with a pairwise O(n²) self-join by default, which

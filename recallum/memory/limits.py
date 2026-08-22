@@ -89,6 +89,12 @@ class MemoryLimits(BaseModel):
     # should be a few high-signal atoms, not a session recap.
     batch_max_items: int = Field(default=10, gt=0, le=20)
 
+    # Upper bound on a declared TTL for short-lived "working memory" (e.g.
+    # "branch X is blocked this week"). 365 days keeps the feature usable for
+    # genuinely long-lived-but-bounded facts while ruling out a de facto
+    # permanent expiry set so far out it never matters.
+    ttl_max_seconds: int = Field(default=365 * 24 * 3600, gt=0)
+
     # Upper bound on memories one ``merge`` may consolidate. Small on purpose:
     # a merge is a considered editorial act over memories the agent has read,
     # not a bulk compaction pass.

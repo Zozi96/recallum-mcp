@@ -7,7 +7,7 @@ and must stay in sync with the migrations.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pgvector.sqlalchemy import Vector
@@ -191,6 +191,13 @@ class Memory(Base):
     # has not itself been re-verified. Does not feed ranking by default.
     reconfirm_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional declared expiry for short-lived "working memory" (e.g. "branch X
+    # is blocked this week"). NULL means no expiry -- the historical default,
+    # unaffected. Once past, the row is excluded from every active-selection
+    # predicate but never physically deleted: no background purge job, this is
+    # a lazy read-time filter only, same shape as ``deleted_at`` but distinct
+    # from it -- an expired row is not "forgotten", it is just not served.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The memory that replaced this one. Superseding also sets ``deleted_at``,
     # so a replaced row leaves every active query through the filter that
     # already exists; this column only records *why* it left, distinguishing
@@ -210,6 +217,10 @@ class Memory(Base):
     @property
     def is_deleted(self) -> bool:
         return self.deleted_at is not None
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at is not None and self.expires_at <= datetime.now(UTC)
 
 
 class MemoryProfile(Base):

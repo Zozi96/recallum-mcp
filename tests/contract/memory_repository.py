@@ -72,6 +72,7 @@ class MemoryRepositoryContract:
         importance: int = 5,
         source_client: str | None = None,
         metadata: dict[str, Any] | None = None,
+        expires_at: datetime | None = None,
     ) -> dict[str, Any]:
         return {
             "scope": scope,
@@ -84,6 +85,7 @@ class MemoryRepositoryContract:
             "importance": importance,
             "source_client": source_client,
             "metadata": metadata or {},
+            "expires_at": expires_at,
         }
 
     async def _text_pool(self, repo, user_id, query, *, visibility, category=None, limit):
@@ -172,6 +174,40 @@ class MemoryRepositoryContract:
         with pytest.raises(IntegrityError):
             await repo.create_memory(user_id, **kwargs)
 
+    async def test_find_active_by_hash_ignores_expired_rows(self, repo, user_id):
+        digest = _hash("working memory")
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(content="working memory", content_hash=digest, expires_at=past),
+        )
+        found = await repo.find_active_by_hash(
+            user_id, scope="global", project=None, content_hash=digest
+        )
+        assert found is None
+
+    async def test_create_memory_expired_duplicate_does_not_block_recreation(self, repo, user_id):
+        """An expired duplicate MUST NOT block re-remembering the same content.
+
+        Retained (never physically deleted), but a fresh insert of the exact
+        same dedup key succeeds and comes back as a new, non-expired row.
+        """
+        digest = _hash("branch is blocked")
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        stale = await repo.create_memory(
+            user_id,
+            **self._kwargs(content="branch is blocked", content_hash=digest, expires_at=past),
+        )
+        fresh = await repo.create_memory(
+            user_id, **self._kwargs(content="branch is blocked", content_hash=digest)
+        )
+        assert fresh.id != stale.id
+        found = await repo.find_active_by_hash(
+            user_id, scope="global", project=None, content_hash=digest
+        )
+        assert found is not None
+        assert found.id == fresh.id
+
     # -- get_active --------------------------------------------------------
 
     async def test_get_active_none_for_unknown_other_user_and_deleted(
@@ -190,6 +226,23 @@ class MemoryRepositoryContract:
 
         assert await repo.soft_delete(user_id, created.id) is True
         assert await repo.get_active(user_id, created.id) is None
+
+    async def test_get_active_none_for_expired(self, repo, user_id):
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        created = await repo.create_memory(
+            user_id, **self._kwargs(content="ttl'd", content_hash=_hash("ttl'd"), expires_at=past)
+        )
+        assert await repo.get_active(user_id, created.id) is None
+
+    async def test_get_active_future_expiry_still_active(self, repo, user_id):
+        future = datetime.now(UTC) + timedelta(days=1)
+        created = await repo.create_memory(
+            user_id,
+            **self._kwargs(content="not yet", content_hash=_hash("not yet"), expires_at=future),
+        )
+        found = await repo.get_active(user_id, created.id)
+        assert found is not None
+        assert found.id == created.id
 
     async def test_history_and_statistics_are_user_scoped(self, repo, user_id, other_user_id):
         first = await repo.create_memory(
@@ -304,6 +357,25 @@ class MemoryRepositoryContract:
         assert total == 1
         assert [m.id for m in items] == [fact.id]
 
+    async def test_list_active_excludes_expired_but_keeps_the_row(self, repo, user_id):
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        expired = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="expired one", content_hash=_hash("expired one"), expires_at=past
+            ),
+        )
+        kept = await repo.create_memory(
+            user_id, **self._kwargs(content="durable one", content_hash=_hash("durable one"))
+        )
+
+        items, total = await repo.list_active(
+            user_id, visibility=MemoryVisibility("all"), limit=10
+        )
+        assert total == 1
+        assert [m.id for m in items] == [kept.id]
+        assert await repo.get_active(user_id, expired.id) is None
+
     # -- search_vector ---------------------------------------------------
 
     async def test_search_vector_returns_only_visible_active_rows(
@@ -341,6 +413,16 @@ class MemoryRepositoryContract:
             ),
         )
         await repo.soft_delete(user_id, deleted.id)
+        expired = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                scope="global",
+                project=None,
+                content_hash=_hash("sv-expired"),
+                embedding=query_vec,
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            ),
+        )
 
         results = await self._vector_pool(
             repo, user_id, query_vec, visibility=MemoryVisibility("global"), limit=10
@@ -350,6 +432,7 @@ class MemoryRepositoryContract:
         assert wrong_scope.id not in ids
         assert other_users.id not in ids
         assert deleted.id not in ids
+        assert expired.id not in ids
 
     async def test_search_vector_never_exceeds_max_candidates(self, repo, user_id):
         for i in range(MAX_CANDIDATES + 10):
@@ -912,6 +995,15 @@ class MemoryRepositoryContract:
             ),
         )
         await repo.soft_delete(user_id, deleted.id)
+        expired = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="same vector expired",
+                content_hash=_hash("sim-exp"),
+                embedding=target,
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            ),
+        )
 
         results = await repo.similar_active(
             user_id,
@@ -927,7 +1019,7 @@ class MemoryRepositoryContract:
         # Category is a filing label, not a namespace: a near-duplicate stored
         # under another category is exactly what must surface.
         assert other_category.id in ids
-        assert ids.isdisjoint({itself.id, other_project.id, deleted.id})
+        assert ids.isdisjoint({itself.id, other_project.id, deleted.id, expired.id})
 
     async def test_similar_active_skips_vectors_from_other_models(self, repo, user_id):
         target = _embedding(4242)
@@ -1652,7 +1744,59 @@ class MemoryRepositoryContract:
         assert foreign.id not in {item.memory.id for item in results}
         assert await repo.related_to(user_id, uuid.uuid4(), limit=10, min_similarity=0.9) == []
 
+    async def test_related_to_excludes_expired_seed_and_neighbour(self, repo, user_id):
+        target = _embedding(3131)
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        seed = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="expiring seed", content_hash=_hash("exp-seed"), embedding=target
+            ),
+        )
+        neighbour = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="durable neighbour", content_hash=_hash("exp-neighbour"), embedding=target
+            ),
+        )
+        expired_neighbour = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="expired neighbour",
+                content_hash=_hash("exp-expired-neighbour"),
+                embedding=target,
+                expires_at=past,
+            ),
+        )
+
+        results = await repo.related_to(user_id, seed.id, limit=10, min_similarity=0.9)
+        ids = {item.memory.id for item in results}
+        assert neighbour.id in ids
+        assert expired_neighbour.id not in ids
+
+        # An expired seed is itself invisible: unknown/foreign/retired ids all
+        # return an empty related list, and expiry joins that group.
+        await repo.update_attributes(
+            user_id, seed.id, importance=None, category=None, metadata=None, expires_at=past
+        )
+        assert await repo.related_to(user_id, seed.id, limit=10, min_similarity=0.9) == []
+
     # -- most_important_active ------------------------------------------
+
+    async def test_most_important_active_excludes_expired(self, repo, user_id):
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        kept = await repo.create_memory(
+            user_id, **self._kwargs(importance=9, content_hash=_hash("mi-kept"))
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(importance=10, content_hash=_hash("mi-expired"), expires_at=past),
+        )
+
+        results = await repo.most_important_active(
+            user_id, visibility=MemoryVisibility("all"), limit=10
+        )
+        assert [m.id for m in results] == [kept.id]
 
     async def test_most_important_active_orders_by_importance_then_recency(self, repo, user_id):
         high_old = await repo.create_memory(

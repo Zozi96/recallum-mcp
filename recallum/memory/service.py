@@ -112,17 +112,27 @@ class MemoryService:
         importance: StrictImportance = 5,
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
+        ttl_seconds: int | None = None,
     ) -> RememberResult:
-        """Store an atomic memory, deduplicating exact active repeats."""
+        """Store an atomic memory, deduplicating exact active repeats.
+
+        ``ttl_seconds`` declares short-lived working memory: the memory stops
+        being served everywhere once it expires. Omit it for durable context.
+        """
         normalized = self._normalize_content(content)
         normalized_project = self._normalize_project(project)
         validated_category = self._validate_category(category)
         validated_importance = self._validate_importance(importance)
         validated_metadata = self._validate_metadata(metadata)
+        expires_at = self._validate_ttl(ttl_seconds)
         scope = "project" if normalized_project is not None else "global"
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         language_warning = self._language_warning(normalized)
 
+        # An expired duplicate MUST NOT block re-remembering the same content:
+        # this lookup already ignores expired rows, so a repeat of expired
+        # working memory falls through to the create path below and comes
+        # back fresh, not revived.
         existing = await self._repo.find_active_by_hash(
             user_id, scope=scope, project=normalized_project, content_hash=digest
         )
@@ -143,6 +153,7 @@ class MemoryService:
                     if validated_metadata != dict(existing.metadata_ or {})
                     else None
                 ),
+                expires_at=expires_at,
             )
             # It IS a reconfirmation, though: the claim was just observed to
             # still hold, and readers use that stamp to judge freshness.
@@ -171,6 +182,7 @@ class MemoryService:
                 importance=validated_importance,
                 source_client=source_client,
                 metadata=validated_metadata,
+                expires_at=expires_at,
             )
         except IntegrityError:
             # Concurrent insert won the race on the partial unique index.
@@ -295,6 +307,7 @@ class MemoryService:
                     importance=item.importance,
                     metadata=item.metadata,
                     source_client=source_client,
+                    ttl_seconds=item.ttl_seconds,
                 )
             except MemoryValidationError as exc:
                 outcomes.append(RememberBatchItemOutcome(error=str(exc)))
@@ -332,6 +345,8 @@ class MemoryService:
         importance: StrictImportance | None = None,
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
+        ttl_seconds: int | None = None,
+        clear_expiry: bool = False,
     ) -> UpdateResult:
         """Correct a memory, superseding it when the claim itself changed.
 
@@ -341,15 +356,29 @@ class MemoryService:
         old one, so the original is retired and a new memory takes its place
         with a new id and a fresh embedding, linked back to what it replaced.
 
+        ``ttl_seconds`` and ``clear_expiry`` only apply to the attribute-edit
+        path (``content`` omitted): ``ttl_seconds`` sets a fresh expiry from
+        now, ``clear_expiry`` reverts to durable (no expiry). They are
+        mutually exclusive, and neither applies when content changes -- the
+        replacement row from a correction starts durable, matching a brand
+        new ``remember``.
+
         Scope and project are deliberately not editable: moving a memory
         between projects changes its deduplication key, which is a migration
         rather than a correction. Unknown and foreign ids are indistinguishable.
         """
+        if content is not None and (ttl_seconds is not None or clear_expiry):
+            raise MemoryValidationError(
+                "ttl_seconds and clear_expiry only apply when content is unchanged"
+            )
+        if ttl_seconds is not None and clear_expiry:
+            raise MemoryValidationError("ttl_seconds and clear_expiry are mutually exclusive")
         validated_category = self._validate_category(category) if category is not None else None
         validated_importance = (
             self._validate_importance(importance) if importance is not None else None
         )
         validated_metadata = self._validate_metadata(metadata) if metadata is not None else None
+        expires_at = self._validate_ttl(ttl_seconds)
 
         if content is None:
             updated = await self._repo.update_attributes(
@@ -358,6 +387,8 @@ class MemoryService:
                 importance=validated_importance,
                 category=validated_category,
                 metadata=validated_metadata,
+                expires_at=expires_at,
+                clear_expires_at=clear_expiry,
             )
             if updated is None:
                 return UpdateResult(updated=False)
@@ -1300,6 +1331,24 @@ class MemoryService:
             raise MemoryValidationError("importance must be between 0 and 10")
         return importance
 
+    def _validate_ttl(self, ttl_seconds: int | None) -> datetime | None:
+        """Turn a declared TTL into an absolute expiry, or None for durable.
+
+        ``None`` (the default) means no expiry, unchanged from today's
+        durable-by-default behaviour. Capped at ``ttl_max_seconds`` so a TTL
+        can never become a de facto permanent expiry set far out enough to
+        never matter.
+        """
+        if ttl_seconds is None:
+            return None
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):
+            raise MemoryValidationError("ttl_seconds must be an integer")
+        if ttl_seconds <= 0:
+            raise MemoryValidationError("ttl_seconds must be positive")
+        if ttl_seconds > self._limits.ttl_max_seconds:
+            raise MemoryValidationError(f"ttl_seconds exceeds {self._limits.ttl_max_seconds}")
+        return datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+
     def _validate_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
         if metadata is None:
             return {}
@@ -1329,6 +1378,7 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         source_client=memory.source_client,
         metadata=dict(memory.metadata_ or {}),
         created_at=memory.created_at,
+        expires_at=memory.expires_at,
         reconfirmed_at=memory.reconfirmed_at,
         last_recalled_at=memory.last_recalled_at,
         recall_count=memory.recall_count,

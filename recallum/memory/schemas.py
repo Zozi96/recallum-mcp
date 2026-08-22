@@ -28,7 +28,8 @@ class MemoryOut(BaseModel):
     is the cumulative number of explicit reconfirmations -- an agent verifying
     the claim against reality, distinct from serve counts. Counters are as of
     before the response carrying them was produced. NULL / 0 mean "no signal
-    yet".
+    yet". ``expires_at`` is set only for short-lived working memory that
+    declared a TTL; NULL means durable, no expiry (the default).
     """
 
     id: uuid.UUID
@@ -40,6 +41,7 @@ class MemoryOut(BaseModel):
     source_client: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    expires_at: datetime | None = None
     reconfirmed_at: datetime | None = None
     last_recalled_at: datetime | None = None
     recall_count: int = 0
@@ -120,6 +122,7 @@ class RememberBatchItem(BaseModel):
     project: str | None = None
     importance: StrictImportance = 5
     metadata: dict[str, Any] | None = None
+    ttl_seconds: int | None = None
 
 
 class RememberBatchItemOutcome(BaseModel):

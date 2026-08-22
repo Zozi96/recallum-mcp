@@ -175,3 +175,27 @@ La guía de higiene MUST exigir que cada memoria stale revisada termine en un de
 #### Scenario: Stale duplicada
 - **WHEN** varias stale o activas restatan el mismo claim
 - **THEN** la guía exige `merge_memories` hacia una sola formulación en inglés
+
+### Requirement: Memorias con expiración declarada
+El sistema MAY permitir que una memoria declare una expiración opcional al guardarse o al
+actualizarse (`ttl_seconds` en `remember`/`remember_batch`/`update`, o `clear_expiry` en `update`
+para revertir a duradera). Ninguna memoria expira por defecto: la ausencia de expiración es el
+comportamiento actual, sin cambios. Una vez pasada su expiración, el sistema MUST NOT servir esa
+memoria desde ninguna superficie de lectura (`recall`, `context`, `list_memories`, `get_memory`,
+el aviso de similares, `related_memories`, `memory_graph`, ni la búsqueda de duplicado exacto de
+`remember`), pero MUST conservar la fila sin borrarla físicamente -- el filtro es perezoso, en
+tiempo de lectura, sin trabajo en segundo plano. Una memoria activa duplicada que ya expiró MUST
+NOT bloquear que se vuelva a guardar el mismo contenido; el sistema recrea una memoria nueva en
+vez de revivir la expirada.
+
+#### Scenario: Memoria de trabajo de corta duración
+- **WHEN** un usuario llama `remember` con `ttl_seconds` y ese plazo transcurre
+- **THEN** la memoria deja de aparecer en `recall`, `context`, `list_memories` y `get_memory`, pero la fila sigue existiendo internamente
+
+#### Scenario: Reintentar el mismo hecho tras expirar
+- **WHEN** el contenido normalizado de una memoria ya expirada se vuelve a guardar con `remember`
+- **THEN** el sistema crea una memoria nueva en lugar de negarse o revivir la expirada
+
+#### Scenario: Sin expiración por defecto
+- **WHEN** `remember` se llama sin `ttl_seconds`
+- **THEN** la memoria queda duradera, sin expiración, igual que antes de esta capacidad
