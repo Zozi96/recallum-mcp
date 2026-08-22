@@ -184,6 +184,12 @@ class Memory(Base):
     )
     recall_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     context_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Cumulative count of explicit reconfirmations, distinct from the serve
+    # counts above: an agent verifying a claim against reality is a different
+    # (and, unlike serve counts, not yet ranking-poisoned) utility signal.
+    # A replacement row from ``update``/``merge`` starts at 0 -- a new claim
+    # has not itself been re-verified. Does not feed ranking by default.
+    reconfirm_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The memory that replaced this one. Superseding also sets ``deleted_at``,
     # so a replaced row leaves every active query through the filter that
