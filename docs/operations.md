@@ -290,6 +290,17 @@ the eval user's memories start with `recall_count = 0`; run the baseline first
 so its ordinary recalls accumulate usage, then read the candidate report for
 what a positive weight actually changes.
 
+**Measured decision (2026-08-22, `embeddinggemma:300m`, dataset with 18
+corpus rows / 28 queries, k=10):** the default stays at `0.0`. After a seeding
+pass accumulated organic usage, weights 0.1 / 0.3 / 0.5 / 1.0 degraded overall
+MRR monotonically (0.82 baseline → 0.80 → 0.79 → 0.78 → 0.75) and at 1.0 also
+lost recall@10 (1.00 → 0.96, first hard miss). The damage concentrated in the
+weakest tags (`es-en` MRR 0.49 → 0.19): high-usage rows displace correct but
+weakly-matched candidates — exactly the rich-get-richer failure the cap was
+designed to contain. Do not raise `RECALLUM__LIMITS__RECALL_USAGE_WEIGHT`
+above 0 unless a future dataset revision (with usage patterns that correlate
+with relevance rather than with prior rankings) reverses this result.
+
 ### Reading the language tags
 
 Memories are written in English on purpose: dedup is an exact content hash and
