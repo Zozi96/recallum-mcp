@@ -95,11 +95,18 @@ class RememberResult(BaseModel):
     this is the only point where they are otherwise invisible: the caller sees
     its own new memory and nothing else. Nothing is resolved automatically --
     superseding one memory with another is always an explicit ``update``.
+
+    ``language_warning`` is set when the content looks like it may not be in
+    English -- the corpus policy is English-only, since the full-text index
+    and dedup hash both operate on the stored text. It is advisory only: the
+    write always succeeds regardless, and the field is set on both created
+    and deduplicated outcomes.
     """
 
     memory: MemoryOut
     created: bool
     similar: list[SimilarMemory] = Field(default_factory=list)
+    language_warning: str | None = None
 
 
 class RememberBatchItem(BaseModel):
@@ -115,13 +122,14 @@ class RememberBatchItem(BaseModel):
 class RememberBatchItemOutcome(BaseModel):
     """Per-item outcome of ``remember_batch``; items succeed or fail alone.
 
-    Exactly one of ``memory`` or ``error`` is set. ``created`` and ``similar``
-    mean the same as in ``RememberResult``.
+    Exactly one of ``memory`` or ``error`` is set. ``created``, ``similar``
+    and ``language_warning`` mean the same as in ``RememberResult``.
     """
 
     created: bool = False
     memory: MemoryOut | None = None
     similar: list[SimilarMemory] = Field(default_factory=list)
+    language_warning: str | None = None
     error: str | None = None
 
 

@@ -14,6 +14,7 @@ from recallum.db.repositories.memory_repo import ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
 from recallum.memory.limits import MemoryLimits
+from recallum.memory.schemas import RememberBatchItem
 from recallum.memory.service import MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
 
@@ -498,6 +499,86 @@ async def test_remember_again_now_applies_the_new_importance_and_metadata():
     assert second.memory.id == first.memory.id
     assert second.memory.importance == 9
     assert second.memory.metadata == {"why": "escalated"}
+
+
+async def test_remember_flags_spanish_content_as_likely_non_english():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="El equipo decidió usar FastAPI en vez de Flask para el backend.",
+        category="decision",
+    )
+    assert result.created is True
+    assert result.language_warning is not None
+    assert "English" in result.language_warning
+
+
+async def test_remember_does_not_flag_english_content():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="We decided to use FastAPI instead of Flask for the backend.",
+        category="decision",
+    )
+    assert result.created is True
+    assert result.language_warning is None
+
+
+async def test_remember_does_not_flag_identifier_heavy_or_short_content():
+    service, _, _ = make_service()
+
+    short = await service.remember(USER, content="prefiero tabs", category="preference")
+    assert short.language_warning is None
+
+    identifiers = await service.remember(
+        USER,
+        content="Run docker-compose up --build then check logs/app.log for errors.",
+        category="fact",
+    )
+    assert identifiers.language_warning is None
+
+
+async def test_remember_dedup_path_still_carries_language_warning():
+    service, _, _ = make_service()
+    content = "El equipo decidió usar FastAPI en vez de Flask para el backend."
+    first = await service.remember(USER, content=content, category="decision")
+    second = await service.remember(USER, content=content, category="decision")
+
+    assert first.language_warning is not None
+    assert second.created is False
+    assert second.language_warning == first.language_warning
+
+
+async def test_remember_language_warning_never_raises_even_if_heuristic_breaks(monkeypatch):
+    """Advisory only: a broken heuristic must not fail the write."""
+    import recallum.memory.service as service_module
+
+    def boom(_content: str) -> bool:
+        raise RuntimeError("heuristic exploded")
+
+    monkeypatch.setattr(service_module, "looks_non_english", boom)
+    service, _, _ = make_service()
+
+    result = await service.remember(USER, content="totalmente en español aquí", category="fact")
+
+    assert result.created is True
+    assert result.language_warning is None
+
+
+async def test_remember_batch_outcomes_carry_language_warning():
+    service, _, _ = make_service()
+    items = [
+        RememberBatchItem(
+            content="El backend usa FastAPI y Postgres para todo.",
+            category="fact",
+        ),
+        RememberBatchItem(content="The backend uses FastAPI and Postgres.", category="fact"),
+    ]
+    result = await service.remember_batch(USER, items=items)
+
+    assert result.failed == 0
+    assert result.results[0].language_warning is not None
+    assert result.results[1].language_warning is None
 
 
 async def test_update_content_supersedes_and_returns_a_new_memory():
