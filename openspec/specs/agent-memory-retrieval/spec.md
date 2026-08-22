@@ -77,6 +77,21 @@ cuando el perfil está disponible).
 - **WHEN** el perfil materializado no puede obtenerse ni reconstruirse
 - **THEN** `context` devuelve el snapshot categorizado como hasta ahora e indica perfil no disponible sin fallar la llamada
 
+### Requirement: Omisiones de contexto accionables
+El sistema MUST informar, cuando el presupuesto deja memorias fuera del resultado de `context`, un desglose por categoría de cuántas memorias activas visibles de esa categoría quedaron omitidas (sólo aparecen las categorías con al menos una omisión), MUST NOT incluir en ese desglose el contenido de las memorias omitidas, y el bloque de perfil MUST NOT contar como omitido en ninguna categoría.
+
+#### Scenario: Desglose por categoría al truncar
+- **WHEN** el presupuesto de `context` deja memorias de una o más categorías fuera del resultado
+- **THEN** la respuesta incluye, por cada categoría con omisiones, cuántas memorias activas visibles de esa categoría no llegaron al resultado, sin listar su contenido
+
+#### Scenario: Sin omisiones
+- **WHEN** todas las memorias activas visibles caben dentro del presupuesto de `context`
+- **THEN** el desglose por categoría de omisiones está ausente o vacío
+
+#### Scenario: El perfil no cuenta como omitido
+- **WHEN** una memoria queda incluida en el bloque de perfil materializado en lugar de en los grupos por categoría
+- **THEN** esa memoria no incrementa el conteo de omitidas de su categoría
+
 ### Requirement: Snapshot único de context
 Al armar `context`, el sistema MUST observar un único snapshot de base de datos para el perfil servido (static materializado más dynamic en lectura), los pools de importancia global y de proyecto, los candidatos de foco cuando hay `focus`, y el total de memorias activas visibles usado para `omitted`. Ese snapshot MUST respetar el aislamiento RLS del propietario. El registro de uso de las memorias servidas MUST ocurrir fuera de esa lectura y MUST NOT hacerla fallar.
 

@@ -6,6 +6,7 @@ import math
 import random
 import re
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -333,6 +334,7 @@ class FakeMemoryRepository:
             if query is not None
             else CandidatePools(vector=[], text=[], trigram=[])
         )
+        total_by_category = dict(Counter(m.category for m in rows))
         return SimpleNamespace(
             profile=await self.get_profile(user_id, project=project),
             generation=await self.get_memory_generation(user_id),
@@ -340,6 +342,7 @@ class FakeMemoryRepository:
             project_top=project_top,
             dynamic_candidates=dynamic[: dynamic_limit + static_limit],
             total_available=len(rows),
+            total_by_category=total_by_category,
             focus=pools,
         )
 

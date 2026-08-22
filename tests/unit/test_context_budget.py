@@ -252,3 +252,118 @@ def test_empty_input_produces_an_untruncated_empty_snapshot():
     assert result.total_items == 0
     assert result.truncated is False
     assert result.omitted == 0
+
+
+def test_omitted_by_category_reports_per_category_gaps():
+    """Two constraints fit, three facts do not: the gap is reported per
+    category, and a category with no gap is absent."""
+    constraints = [memory(f"c{i}", category="constraint") for i in range(2)]
+    facts = [memory(f"f{i}", category="fact") for i in range(3)]
+    budget = SessionContextBudget(max_items=2, max_chars=1000)
+
+    result = budget.assemble(
+        [*constraints, *facts],
+        [],
+        project=None,
+        total_available=5,
+        total_available_by_category={"constraint": 2, "fact": 3},
+    )
+
+    assert result.omitted_by_category == {"fact": 3}
+
+
+def test_omitted_by_category_absent_when_nothing_omitted():
+    items = [memory("a", category="fact"), memory("b", category="constraint")]
+    budget = SessionContextBudget(max_items=10, max_chars=1000)
+
+    result = budget.assemble(
+        items,
+        [],
+        project=None,
+        total_available=2,
+        total_available_by_category={"fact": 1, "constraint": 1},
+    )
+
+    assert result.omitted_by_category == {}
+
+
+def test_omitted_by_category_stays_empty_without_per_category_totals():
+    """Backward compatible: omitting the mapping produces no breakdown,
+    even though the aggregate ``omitted`` still reports the gap."""
+    budget = SessionContextBudget(max_items=1, max_chars=1000)
+
+    result = budget.assemble(
+        [memory("kept", category="fact"), memory("cut", category="fact")],
+        [],
+        project=None,
+        total_available=2,
+    )
+
+    assert result.omitted == 1
+    assert result.omitted_by_category == {}
+
+
+def test_omitted_by_category_excludes_profile_items():
+    """A memory served through the profile block (excluded from the pools
+    via ``exclude_ids`` and credited back via ``profile_items_by_category``)
+    must not inflate its category's omitted count."""
+    profile_item = memory("profile constraint")
+    remaining = [memory(f"c{i}", category="constraint") for i in range(2)]
+    budget = SessionContextBudget(max_items=10, max_chars=1000)
+
+    result = budget.assemble(
+        [profile_item, *remaining],
+        [],
+        project=None,
+        total_available=3,
+        total_available_by_category={"constraint": 3},
+        exclude_ids={profile_item.id},
+        profile_item_count=1,
+        profile_items_by_category={"constraint": 1},
+    )
+
+    # All three constraints are accounted for (1 profile + 2 group items),
+    # so nothing is reported as omitted for the category.
+    assert flatten(result) == ["c0", "c1"]
+    assert result.omitted_by_category == {}
+
+
+def test_omitted_by_category_without_profile_credit_would_overcount():
+    """Same setup as above but without ``profile_items_by_category``: the
+    profile item is still excluded from the pools, so the category looks
+    like it lost one item it actually did not."""
+    profile_item = memory("profile constraint")
+    remaining = [memory(f"c{i}", category="constraint") for i in range(2)]
+    budget = SessionContextBudget(max_items=10, max_chars=1000)
+
+    result = budget.assemble(
+        [profile_item, *remaining],
+        [],
+        project=None,
+        total_available=3,
+        total_available_by_category={"constraint": 3},
+        exclude_ids={profile_item.id},
+    )
+
+    assert result.omitted_by_category == {"constraint": 1}
+
+
+def test_omitted_by_category_counts_focus_hits_as_served():
+    """Focus hits lead their category group, so they count toward what was
+    served just like an importance-ranked item would."""
+    focused = memory("the focused fact", importance=1)
+    generic = memory("a generic fact", importance=9)
+    budget = SessionContextBudget(max_items=1, max_chars=1000)
+
+    result = budget.assemble(
+        [generic],
+        [],
+        [focused],
+        project=None,
+        total_available=2,
+        total_available_by_category={"fact": 2},
+        focus="the task",
+    )
+
+    assert flatten(result) == ["the focused fact"]
+    assert result.omitted_by_category == {"fact": 1}

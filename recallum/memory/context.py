@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -42,10 +42,12 @@ class SessionContextBudget:
         *,
         project: str | None,
         total_available: int,
+        total_available_by_category: Mapping[str, int] | None = None,
         focus: str | None = None,
         stale_before: datetime | None = None,
         exclude_ids: set[uuid.UUID] | None = None,
         profile_item_count: int = 0,
+        profile_items_by_category: Mapping[str, int] | None = None,
     ) -> ContextResult:
         """Dedup, group by category and apply the budget to produce a snapshot.
 
@@ -59,11 +61,17 @@ class SessionContextBudget:
         would go unseen precisely when it mattered. ``total_available`` is the
         caller-supplied count of every active memory visible to the request;
         the difference against what the budget kept is reported as ``omitted``
-        so the agent knows there is more to ``recall``. ``stale_before``
-        annotates (never reorders) items whose last confirmation --
-        ``reconfirmed_at``, else ``created_at`` -- is older than the cutoff:
-        the snapshot is where an agent meets old claims, so it is where the
-        verification nudge belongs.
+        so the agent knows there is more to ``recall``. ``total_available_by_category``
+        is that same count broken down per category; when given, the same gap
+        is reported per category as ``omitted_by_category`` (only categories
+        with a positive gap appear) so a follow-up ``recall`` can target
+        exactly what was left out. ``profile_items_by_category`` credits
+        profile-served items back to their category, matching how
+        ``profile_item_count`` credits the aggregate total -- the profile
+        block never counts as omitted. ``stale_before`` annotates (never
+        reorders) items whose last confirmation -- ``reconfirmed_at``, else
+        ``created_at`` -- is older than the cutoff: the snapshot is where an
+        agent meets old claims, so it is where the verification nudge belongs.
         """
         # Focus hits first (dedup keeps the first occurrence, so a focused
         # memory takes its relevance position). The importance pools then
@@ -141,6 +149,18 @@ class SessionContextBudget:
         # caller assembles the profile block separately and passes the count.
         combined_items = total_items + profile_item_count
         omitted = max(total_available - combined_items, 0)
+
+        omitted_by_category: dict[str, int] = {}
+        if total_available_by_category:
+            served_by_category = {group.category: len(group.items) for group in groups}
+            for category, available in total_available_by_category.items():
+                served = served_by_category.get(category, 0) + (
+                    profile_items_by_category.get(category, 0) if profile_items_by_category else 0
+                )
+                gap = available - served
+                if gap > 0:
+                    omitted_by_category[category] = gap
+
         return ContextResult(
             project=project,
             focus=focus,
@@ -148,5 +168,6 @@ class SessionContextBudget:
             total_items=combined_items,
             total_available=total_available,
             omitted=omitted,
+            omitted_by_category=omitted_by_category,
             truncated=exhausted or omitted > 0,
         )

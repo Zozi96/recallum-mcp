@@ -259,9 +259,11 @@ def build_mcp_server(container: Container) -> FastMCP:
         focus and importance ranking cannot evict, then category groups for
         the remaining budget. Pass `focus` to also pull task-relevant
         memories into those groups. When `omitted` > 0, use recall for the
-        rest. Items marked `content_truncated` were clipped; fetch the full
-        text with get_memory. Profile-only reads can use the
-        recallum://profile resource instead.
+        rest; `omitted_by_category` names which categories still have more,
+        so recall with a focused query (and that category) reaches them.
+        Items marked `content_truncated` were clipped; fetch the full text
+        with get_memory. Profile-only reads can use the recallum://profile
+        resource instead.
         """
         return await memory_service().context(
             require_identity().user_id,
