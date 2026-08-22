@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -128,7 +128,10 @@ class ContextSnapshot:
     whether the static row is still valid. ``dynamic_candidates`` are bounded
     recently-recalled rows for read-time dynamic assembly. ``focus`` holds the
     hybrid candidate pools for the task focus, empty when no focus was given
-    or the embedding service was down.
+    or the embedding service was down. ``total_by_category`` is the same
+    visible-active count as ``total_available``, broken down per category, so
+    the budget can report which categories were left out rather than just how
+    many items overall.
     """
 
     profile: MemoryProfile | None
@@ -137,6 +140,7 @@ class ContextSnapshot:
     project_top: Sequence[Memory]
     dynamic_candidates: Sequence[Memory]
     total_available: int
+    total_by_category: Mapping[str, int]
     focus: CandidatePools
 
 
@@ -968,15 +972,16 @@ class MemoryRepository:
                 .scalars()
                 .all()
             )
-            total_available = int(
-                (
-                    await session.execute(
-                        select(func.count())
-                        .select_from(Memory)
-                        .where(*self._filters(user_id, visibility=visibility, category=None))
-                    )
-                ).scalar_one()
-            )
+            category_counts = (
+                await session.execute(
+                    select(Memory.category, func.count())
+                    .select_from(Memory)
+                    .where(*self._filters(user_id, visibility=visibility, category=None))
+                    .group_by(Memory.category)
+                )
+            ).all()
+            total_by_category = {str(category): int(count) for category, count in category_counts}
+            total_available = sum(total_by_category.values())
             vector: list[ScoredMemory] = []
             text: list[ScoredMemory] = []
             trigram: list[ScoredMemory] = []
@@ -998,6 +1003,7 @@ class MemoryRepository:
                 project_top=project_top,
                 dynamic_candidates=dynamic_candidates,
                 total_available=total_available,
+                total_by_category=total_by_category,
                 focus=CandidatePools(vector=vector, text=text, trigram=trigram),
             )
 

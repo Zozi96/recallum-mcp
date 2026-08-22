@@ -19,7 +19,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
@@ -841,6 +841,10 @@ class MemoryService:
                 scored.memory for scored, _ in fused[: self._limits.context_focus_limit]
             ]
 
+        profile_items_by_category = Counter(
+            item.category for item in (*profile_block.static, *profile_block.dynamic)
+        )
+
         budget = SessionContextBudget(
             max_items=remaining_items,
             max_chars=remaining_chars,
@@ -852,10 +856,12 @@ class MemoryService:
             focus_memories,
             project=normalized_project,
             total_available=snapshot.total_available,
+            total_available_by_category=snapshot.total_by_category,
             focus=normalized_focus,
             stale_before=self._stale_cutoff(),
             exclude_ids=set(profile_block.source_memory_ids),
             profile_item_count=profile_count,
+            profile_items_by_category=profile_items_by_category,
         )
         result = result.model_copy(update={"profile": profile_block})
         served = [

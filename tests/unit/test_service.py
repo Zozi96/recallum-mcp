@@ -874,6 +874,62 @@ async def test_context_is_not_truncated_when_everything_fits():
     assert result.truncated is False
 
 
+async def test_context_reports_omitted_by_category_across_categories():
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(context_max_items_cap=3, context_default_max_items=3)
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+    for i in range(4):
+        await service.remember(USER, content=f"fact {i}", category="fact")
+    for i in range(2):
+        await service.remember(USER, content=f"decision {i}", category="decision")
+
+    result = await service.context(USER)
+
+    # Both decisions fit; only one of the four facts does, so only fact
+    # carries a reported omission.
+    assert result.omitted_by_category == {"fact": 3}
+
+
+async def test_context_omitted_by_category_empty_when_nothing_omitted():
+    service, _, _ = make_service()
+    await service.remember(USER, content="only one", category="fact")
+
+    result = await service.context(USER)
+
+    assert result.omitted_by_category == {}
+
+
+async def test_context_profile_items_excluded_from_omitted_by_category():
+    """A memory materialized into the profile block must not count as
+    omitted from its category, even though it never reaches ``groups``."""
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(
+        profile_static_max_items=1,
+        context_max_items_cap=2,
+        context_default_max_items=2,
+    )
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+    await service.remember(USER, content="vital constraint", category="constraint", importance=9)
+    await service.remember(
+        USER, content="extra constraint one", category="constraint", importance=1
+    )
+    await service.remember(
+        USER, content="extra constraint two", category="constraint", importance=1
+    )
+
+    result = await service.context(USER)
+
+    profile_contents = {item.content for item in result.profile.static}
+    assert profile_contents == {"vital constraint"}
+    # 3 constraints total: 1 served via profile, 1 via the group budget,
+    # 1 left out -- the profile item is not double-counted as omitted.
+    assert result.omitted_by_category == {"constraint": 1}
+
+
 async def test_memory_graph_crosses_projects_and_categories_and_keeps_isolated_nodes():
     vectors = {
         "alpha theme": [1.0, 0.0],

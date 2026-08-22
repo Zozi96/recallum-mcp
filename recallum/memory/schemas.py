@@ -272,8 +272,11 @@ class ContextResult(BaseModel):
     ``total_available`` counts every active memory visible to the request;
     ``omitted`` is how many of those the budget left out. When ``omitted`` is
     positive, ``recall`` with a focused query is the way to reach the rest.
-    ``focus`` echoes the task focus that biased the snapshot, when one was
-    given.
+    ``omitted_by_category`` breaks that count down per category (only
+    categories with omissions appear) so a follow-up ``recall`` can target
+    exactly what was left out, without listing the omitted content itself;
+    the profile block is always-on and never counts toward it. ``focus``
+    echoes the task focus that biased the snapshot, when one was given.
     """
 
     project: str | None = None
@@ -285,6 +288,7 @@ class ContextResult(BaseModel):
     total_items: int
     total_available: int
     omitted: int
+    omitted_by_category: dict[str, int] = Field(default_factory=dict)
     truncated: bool
 
 
