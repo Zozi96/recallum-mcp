@@ -91,25 +91,25 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--k", type=int, default=10, help="Ranking depth (default 10)")
     eval_cmd.add_argument(
         "--trigram-weight",
-        type=float,
+        type=_unit_float,
         default=None,
         help="Override recall_trigram_weight for this run",
     )
     eval_cmd.add_argument(
         "--importance-weight",
-        type=float,
+        type=_unit_float,
         default=None,
         help="Override recall_importance_weight for this run",
     )
     eval_cmd.add_argument(
         "--usage-weight",
-        type=float,
+        type=_unit_float,
         default=None,
         help="Override recall_usage_weight for this run",
     )
     eval_cmd.add_argument(
         "--freshness-weight",
-        type=float,
+        type=_unit_float,
         default=None,
         help="Override recall_freshness_weight for this run",
     )

@@ -643,7 +643,8 @@ class MemoryService:
         it is filled in, and ``recall_importance_weight`` sets how much a full
         sweep of the importance ranking is worth against one retrieval signal.
 
-        Recency deliberately does not get a vote. Newer memories superseding
+        Recency by default does not get a vote (the freshness voter below is
+        opt-in). Newer memories superseding
         older ones is a statement about truth, not about relevance, and paying
         for it here would quietly bury long-standing constraints. It stays what
         it was: the tie-break.
@@ -654,7 +655,7 @@ class MemoryService:
         may only influence ranking after real usage data justifies a weight.
 
         Freshness (``reconfirmed_at`` or, absent that, ``created_at``) is a
-        fourth competition-rank voter, capped the same way and shipping at
+        third competition-rank voter, capped the same way and shipping at
         ``recall_freshness_weight`` 0.0. It is deliberately bounded rather than
         a free-standing recency sort: a memory can be old and still be the
         correct answer -- a stale-but-correct constraint must not be buried
