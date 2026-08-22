@@ -87,7 +87,7 @@ _CODE_ISH_RE = re.compile(
         | [a-zA-Z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*  # camelCase / PascalCase
         | --?[A-Za-z][\w-]*                      # --flag / -f
         | [A-Za-z0-9_]+\(\)                      # func()
-        | [\w+-]+@[\w-]+                         # user@host-ish
+        | [\w.+-]+@[\w-]+                         # user@host-ish
     )$""",
     re.VERBOSE,
 )
