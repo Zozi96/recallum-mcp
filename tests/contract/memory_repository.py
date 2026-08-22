@@ -964,10 +964,16 @@ class MemoryRepositoryContract:
             user_id, **self._kwargs(content="fresh claim", content_hash=_hash("fresh"))
         )
         assert created.reconfirmed_at is None
+        assert created.reconfirm_count == 0
 
         stamped = await repo.mark_reconfirmed(user_id, created.id)
         assert stamped is not None
         assert stamped.reconfirmed_at is not None
+        assert stamped.reconfirm_count == 1
+
+        again = await repo.mark_reconfirmed(user_id, created.id)
+        assert again is not None
+        assert again.reconfirm_count == 2
 
         assert await repo.mark_reconfirmed(other_user_id, created.id) is None
         assert await repo.mark_reconfirmed(user_id, uuid.uuid4()) is None
