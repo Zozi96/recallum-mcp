@@ -13,7 +13,8 @@ Options:
                             (default: https://recallum.zozbit.com/mcp/)
                             Normalized to a trailing slash to avoid a redirect
                             that would expose or drop the bearer token
-  --target TARGET           auto | codex | claude | grok | cursor | both (default: auto)
+  --target TARGET           auto | codex | claude | grok | cursor | antigravity | both
+                            (default: auto)
                             auto installs into every detected CLI
                             both requires Codex and Claude Code (not Grok/Cursor)
   --token-env-var NAME      Codex, Grok, and Cursor: bearer-token environment variable
@@ -138,9 +139,9 @@ while (($#)); do
 done
 
 case "$target" in
-  auto | codex | claude | grok | cursor | both) ;;
+  auto | codex | claude | grok | cursor | antigravity | both) ;;
   *)
-    echo "error: --target must be auto, codex, claude, grok, cursor, or both" >&2
+    echo "error: --target must be auto, codex, claude, grok, cursor, antigravity, or both" >&2
     exit 2
     ;;
 esac
@@ -186,10 +187,13 @@ has_codex=0
 has_claude=0
 has_grok=0
 has_cursor=0
+has_agy=0
 cursor_cli=""
 if command -v codex >/dev/null 2>&1; then has_codex=1; fi
 if command -v claude >/dev/null 2>&1; then has_claude=1; fi
 if command -v grok >/dev/null 2>&1; then has_grok=1; fi
+# Antigravity CLI ships as `agy`.
+if command -v agy >/dev/null 2>&1; then has_agy=1; fi
 # Cursor ships as cursor-agent; some installs expose the same binary as agent.
 if command -v cursor-agent >/dev/null 2>&1; then
   has_cursor=1
@@ -203,14 +207,16 @@ install_codex=0
 install_claude=0
 install_grok=0
 install_cursor=0
+install_antigravity=0
 case "$target" in
   auto)
     install_codex=$has_codex
     install_claude=$has_claude
     install_grok=$has_grok
     install_cursor=$has_cursor
-    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0)); then
-      echo "error: none of the codex, claude, grok, or cursor-agent/agent CLIs is on PATH" >&2
+    install_antigravity=$has_agy
+    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_antigravity == 0)); then
+      echo "error: none of the codex, claude, grok, cursor-agent/agent, or agy CLIs is on PATH" >&2
       exit 1
     fi
     ;;
@@ -232,6 +238,10 @@ case "$target" in
       exit 1
     }
     install_cursor=1
+    ;;
+  antigravity)
+    ((has_agy)) || { echo "error: agy CLI is not installed or not on PATH" >&2; exit 1; }
+    install_antigravity=1
     ;;
   both)
     ((has_codex)) || { echo "error: codex CLI is not installed or not on PATH" >&2; exit 1; }
@@ -1730,6 +1740,118 @@ PY
   echo "        Then fully quit and reopen Cursor so MCP reloads."
 }
 
+# Antigravity CLI (`agy`). Two independent registrations, mirroring Claude:
+#   1. the plugin bundle via `agy plugin install <dir>` (skills/hooks);
+#   2. the native GLOBAL MCP config ~/.gemini/config/mcp_config.json.
+#
+# Antigravity performs no environment-variable expansion in mcp_config.json, so
+# the API key is written LITERALLY, in cleartext. That makes this the most
+# dangerous write in this installer:
+#   * mode 0600 on the file;
+#   * a RETAINED backup of any pre-existing file before it is rewritten. An
+#     atomic tmp-swap alone (what ensure_claude_native_mcp does) is not enough
+#     here: a literal token clobbered by a bad write is unrecoverable, unlike
+#     the ${ENV} indirection the other clients can fall back on;
+#   * a merge that preserves unrelated mcpServers entries.
+#
+# Deliberately GLOBAL only. Antigravity also reads a workspace-scope
+# .agents/mcp_config.json, and this installer never writes one: `.agents/` is a
+# tracked, committable directory in this repository, so a cleartext key written
+# there would be one `git add` away from a public commit. A pre-existing one is
+# named in a warning and otherwise left completely alone -- not modified, not
+# deleted, and never read (its contents may themselves be secret material).
+install_for_antigravity() {
+  local bundle_dir="$repo_root/plugins/recallum-memory"
+  [[ -d "$bundle_dir" ]] || { echo "error: plugin bundle directory not found: $bundle_dir" >&2; exit 1; }
+
+  # Warn without reading: -e only stats the path. Never cat, parse, or back up.
+  local workspace_config="$PWD/.agents/mcp_config.json"
+  if [[ -e "$workspace_config" ]]; then
+    echo "warning: $workspace_config is a workspace-scope Antigravity config outside this" >&2
+    echo "         installer's supported registration path; leaving it untouched (its contents" >&2
+    echo "         are never read). Recallum registers globally in ~/.gemini/config only." >&2
+  fi
+
+  run_action agy plugin install "$bundle_dir"
+
+  local agy_mcp="$HOME/.gemini/config/mcp_config.json"
+  local key_path=""
+  if [[ -n "${resolved_api_key-}" ]]; then
+    key_path="$tmp_dir/antigravity-api-key"
+    umask 077
+    printf '%s' "$resolved_api_key" >"$key_path"
+    chmod 600 "$key_path"
+  fi
+
+  if ((dry_run)); then
+    if [[ -n "$key_path" ]]; then
+      echo "dry-run: write $agy_mcp server recallum (serverUrl=$url, literal Bearer, mode 600, backup retained)"
+    else
+      echo "dry-run: write $agy_mcp server recallum (serverUrl=$url, Bearer \${$token_env_var})"
+    fi
+  else
+    python3 - "$agy_mcp" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+mcp_path = Path(sys.argv[1])
+url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+# No ${VAR} expansion exists on this client, so the placeholder form is inert;
+# it is still written so the entry is well-formed and the doctor can flag it.
+auth = f"Bearer {key}" if key else f"Bearer ${{{token_env}}}"
+
+mcp_path.parent.mkdir(parents=True, exist_ok=True)
+existed = mcp_path.is_file()
+data = {}
+if existed:
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid JSON in {mcp_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {mcp_path} root must be a JSON object")
+servers = data.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    raise SystemExit(f"error: {mcp_path} mcpServers must be an object")
+
+# Remote servers must use serverUrl: a type/url entry is rejected outright
+# ("MCP server \"recallum\" must have either command or serverUrl").
+entry = {"serverUrl": url, "headers": {"Authorization": auth}}
+if servers.get("recallum") == entry:
+    print(f"Antigravity MCP server 'recallum' in {mcp_path} already matches; leaving it unchanged.")
+    raise SystemExit(0)
+
+if existed:
+    stamp = f"{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
+    backup = mcp_path.with_name(f"{mcp_path.name}.bak-{stamp}")
+    shutil.copyfile(mcp_path, backup)
+    os.chmod(backup, 0o600)
+    print(f"Backed up the previous {mcp_path.name} to {backup.name} (mode 600).")
+
+servers["recallum"] = entry
+tmp = mcp_path.with_name(mcp_path.name + ".tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(mcp_path)
+os.chmod(mcp_path, 0o600)
+print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
+PY
+  fi
+  [[ -z "$key_path" ]] || rm -f -- "$key_path"
+
+  if [[ -z "${resolved_api_key-}" ]]; then
+    echo "warning: no API key stored for Antigravity; it does not expand \${$token_env_var} in" >&2
+    echo "         mcp_config.json, so re-run without --no-store-api-key or pass --api-key-file." >&2
+  fi
+}
+
 resolve_api_key
 persist_api_key
 
@@ -1737,6 +1859,7 @@ if ((install_codex)); then install_for_codex; fi
 if ((install_claude)); then install_for_claude; fi
 if ((install_grok)); then install_for_grok; fi
 if ((install_cursor)); then install_for_cursor; fi
+if ((install_antigravity)); then install_for_antigravity; fi
 
 # Drop the in-memory copy once clients are configured. Files already hold it.
 resolved_api_key=""
@@ -1773,4 +1896,9 @@ fi
 if ((install_cursor)); then
   echo "Cursor: after installing the plugin in the UI, restart Cursor and confirm the recallum MCP is ready."
   echo "        MCP config was written to ~/.cursor/mcp.json (mode 600)."
+fi
+if ((install_antigravity)); then
+  echo "Antigravity: plugin installed with 'agy plugin install' and the recallum server written to"
+  echo "             ~/.gemini/config/mcp_config.json (mode 600, literal Bearer -- this client does"
+  echo "             not expand environment variables). Restart agy so it reloads MCP."
 fi

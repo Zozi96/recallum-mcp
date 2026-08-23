@@ -49,6 +49,10 @@ GROK_PLUGIN_INDEX = REPO_ROOT / ".grok-plugin" / "plugin-index.json"
 URL = "https://recallum.example/mcp/"
 TOKEN_ENV_VAR = "TEST_RECALLUM_KEY"
 DEFAULT_URL = "https://recallum.zozbit.com/mcp/"
+# Never a plausible-looking credential: this string is asserted *absent*
+# from every captured stdout/stderr and from the fake-CLI invocation log.
+SENTINEL_KEY = "SENTINEL-NOT-A-REAL-KEY-antigravity"
+DECOY_KEY = "DECOY-DO-NOT-USE"
 
 FAKE_CODEX = """#!/usr/bin/env python3
 import json, os, sys
@@ -218,6 +222,32 @@ elif args == ["plugin", "list", "--json"]:
         print(json.dumps([]))
 """
 
+
+# The real Antigravity CLI (agy) may sit on the developer's PATH. Every line
+# this fake emits carries FAKE_AGY_SENTINEL so a test that accidentally reaches
+# the real binary fails loudly instead of silently passing against it.
+FAKE_AGY = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["agy", *args]) + "\\n")
+if args[:2] == ["plugin", "install"] and len(args) == 3:
+    marker = os.environ.get("FAKE_AGY_INSTALL_DIR")
+    if marker:
+        with open(os.path.join(marker, "installed"), "w", encoding="utf-8") as stream:
+            stream.write(args[2])
+    print(json.dumps({"ok": True, "sentinel": "FAKE_AGY_SENTINEL"}))
+elif args == ["plugin", "list"]:
+    if os.environ.get("FAKE_AGY_PLUGIN", "missing") == "installed":
+        print(json.dumps({
+            "sentinel": "FAKE_AGY_SENTINEL",
+            "imports": [{"name": "recallum-memory"}],
+            "components": ["skills", "mcpServers"],
+        }))
+    else:
+        print(json.dumps({"sentinel": "FAKE_AGY_SENTINEL", "imports": [], "components": []}))
+# Unknown subcommands succeed quietly so unrelated installer probes stay green.
+"""
 
 CODEX_PREFIX = "mcp__recallum__"
 CLAUDE_PREFIX = "mcp__plugin_recallum-memory_recallum__"
@@ -1203,6 +1233,7 @@ class InstallerTestCase(unittest.TestCase):
         stub_claude: bool = True,
         stub_grok: bool = True,
         stub_cursor: bool = True,
+        stub_agy: bool = False,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -1212,6 +1243,7 @@ class InstallerTestCase(unittest.TestCase):
             ("claude", FAKE_CLAUDE, stub_claude),
             ("grok", FAKE_GROK, stub_grok),
             ("cursor-agent", FAKE_CURSOR, stub_cursor),
+            ("agy", FAKE_AGY, stub_agy),
         ):
             if not wanted:
                 continue
@@ -1291,6 +1323,8 @@ class InstallerTestCase(unittest.TestCase):
                 "FAKE_GROK_MARKETPLACE": grok_marketplace,
                 "FAKE_GROK_PLUGIN": grok_plugin,
                 "FAKE_CURSOR_MARKETPLACE": cursor_marketplace,
+                "FAKE_AGY_PLUGIN": "missing",
+                "FAKE_AGY_INSTALL_DIR": str(root),
                 "GROK_HOME": str(grok_home),
                 "HOME": str(root),
                 # Pin the Claude config dir so the settings assertions never
@@ -1305,10 +1339,12 @@ class InstallerTestCase(unittest.TestCase):
         )
         return env, log
 
-    def _run(self, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, env: dict[str, str], *args: str, cwd: Path | str = REPO_ROOT
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(INSTALLER), *args],
-            cwd=REPO_ROOT,
+            cwd=cwd,
             env=env,
             text=True,
             capture_output=True,
@@ -1466,7 +1502,7 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "none of the codex, claude, grok, or cursor-agent/agent CLIs",
+                "none of the codex, claude, grok, cursor-agent/agent, or agy CLIs",
                 result.stderr,
             )
             self.assertFalse(log.exists())
@@ -2973,6 +3009,301 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("recallum_doctor.py", skill)
         self.assertNotIn("json.load", skill)
         self.assertNotIn("cat ~/.cursor/mcp.json", skill)
+class AntigravityInstallTests(InstallerTestCase):
+    """Antigravity writes the API key into mcp_config.json *literally*.
+
+    Antigravity performs no environment-variable expansion, so unlike every
+    other client this installer supports there is no ``${VAR}`` indirection to
+    hide behind: the file is cleartext credential material. These tests are
+    therefore weighted towards the file-safety properties (mode, retained
+    backup, merge preservation) and towards proving that nothing leaks into
+    the tracked `.agents/` workspace-scope path, rather than towards the CLI
+    plumbing.
+    """
+
+    def _agy_env(self, root: Path) -> tuple[dict[str, str], Path]:
+        env, log = self._fake_clis(root, stub_agy=True)
+        # A sentinel, never a plausible credential. Asserted absent from all
+        # captured output below.
+        env[TOKEN_ENV_VAR] = SENTINEL_KEY
+        return env, log
+
+    @staticmethod
+    def _config(env: dict[str, str]) -> Path:
+        return Path(env["HOME"]) / ".gemini" / "config" / "mcp_config.json"
+
+    def _assert_no_leak(self, result: subprocess.CompletedProcess[str], log: Path) -> None:
+        """The sentinel must never reach stdout, stderr, or the CLI argv log."""
+        captured = result.stdout + result.stderr
+        if log.exists():
+            captured += log.read_text(encoding="utf-8")
+        self.assertNotIn(SENTINEL_KEY, captured)
+
+    def _install(
+        self, root: Path, *extra: str, cwd: Path | str = REPO_ROOT
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path]:
+        env, log = self._agy_env(root)
+        result = self._run(
+            env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR, *extra, cwd=cwd
+        )
+        self._assert_no_leak(result, log)
+        return result, env, log
+
+    def test_installs_plugin_bundle_and_writes_native_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, env, log = self._install(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            bundle = str(PLUGIN_ROOT)
+            self.assertIn(["agy", "plugin", "install", bundle], self._calls(log))
+            # Proves the *fake* ran: a real agy would not drop this marker.
+            self.assertEqual((root / "installed").read_text(encoding="utf-8"), bundle)
+
+            config = json.loads(self._config(env).read_text(encoding="utf-8"))
+            entry = config["mcpServers"]["recallum"]
+            self.assertTrue(entry["serverUrl"].endswith("/mcp/"))
+            # Remote servers are rejected outright unless they use serverUrl.
+            self.assertNotIn("url", entry)
+            self.assertNotIn("type", entry)
+            self.assertTrue(entry["headers"]["Authorization"].startswith("Bearer "))
+            # Read back in-process only; never echoed into a captured stream.
+            self.assertEqual(entry["headers"]["Authorization"], f"Bearer {SENTINEL_KEY}")
+
+    def test_fails_closed_and_writes_nothing_without_agy_on_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._fake_clis(root, stub_agy=False)
+            result = self._run(env, "--target", "antigravity")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("agy", result.stderr)
+            self.assertFalse(self._config(env).exists())
+            self.assertFalse(log.exists())
+
+    def test_auto_includes_antigravity_when_agy_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._agy_env(root)
+            result = self._run(env, "--target", "auto", "--token-env-var", TOKEN_ENV_VAR)
+            self._assert_no_leak(result, log)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(["agy", "plugin", "install", str(PLUGIN_ROOT)], self._calls(log))
+            self.assertTrue(self._config(env).is_file())
+
+    def test_auto_skips_antigravity_when_agy_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._fake_clis(root, stub_agy=False)
+            result = self._run(env, "--target", "auto", "--token-env-var", TOKEN_ENV_VAR)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self._config(env).exists())
+            self.assertNotIn("agy", [call[0] for call in self._calls(log)])
+
+    def test_both_stays_codex_and_claude_only(self) -> None:
+        """`--target both` predates this client and keeps its old meaning."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._agy_env(root)
+            result = self._run(env, "--target", "both", "--token-env-var", TOKEN_ENV_VAR)
+            self._assert_no_leak(result, log)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("agy", [call[0] for call in self._calls(log)])
+            self.assertFalse(self._config(env).exists())
+
+    def test_written_config_is_private(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, env, _ = self._install(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._config(env).stat().st_mode & 0o777, 0o600)
+
+    def test_pre_existing_config_is_backed_up_before_being_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._agy_env(root)
+            config = self._config(env)
+            config.parent.mkdir(parents=True)
+            prior = json.dumps(
+                {"mcpServers": {"recallum": {"serverUrl": "https://old.example/mcp/"}}},
+                indent=2,
+            )
+            config.write_text(prior, encoding="utf-8")
+
+            result = self._run(
+                env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR
+            )
+            self._assert_no_leak(result, log)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            backups = [p for p in config.parent.iterdir() if p != config]
+            self.assertEqual(len(backups), 1, backups)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), prior)
+            self.assertNotEqual(config.read_text(encoding="utf-8"), prior)
+            # The backup holds credential material too.
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+
+    def test_merge_preserves_unrelated_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._agy_env(root)
+            config = self._config(env)
+            config.parent.mkdir(parents=True)
+            other = {"serverUrl": "https://other.example/mcp/", "headers": {"X-Keep": "yes"}}
+            config.write_text(
+                json.dumps({"theme": "dark", "mcpServers": {"other-tool": other}}, indent=2),
+                encoding="utf-8",
+            )
+
+            result = self._run(
+                env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR
+            )
+            self._assert_no_leak(result, log)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            merged = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(merged["mcpServers"]["other-tool"], other)
+            self.assertEqual(merged["theme"], "dark")
+            self.assertTrue(merged["mcpServers"]["recallum"]["serverUrl"].endswith("/mcp/"))
+
+    def test_rerunning_with_a_matching_entry_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._agy_env(root)
+            first = self._run(env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            config = self._config(env)
+            before = config.read_bytes()
+
+            second = self._run(env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR)
+            self._assert_no_leak(second, log)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("already matches", second.stdout)
+            self.assertEqual(config.read_bytes(), before)
+            # An idempotent run must not accumulate backup copies of a secret.
+            self.assertEqual([p for p in config.parent.iterdir() if p != config], [])
+
+    def test_invalid_urls_are_rejected_before_any_file_is_written(self) -> None:
+        for bad in (
+            "http://example.com/mcp/",
+            "https://example.com/other",
+            "https://example.com/mcp/extra",
+        ):
+            with self.subTest(url=bad), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env, log = self._agy_env(root)
+                result = self._run(env, "--target", "antigravity", "--url", bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self._config(env).exists())
+                self.assertFalse(log.exists())
+
+    def test_loopback_http_url_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, env, _ = self._install(root, "--url", "http://127.0.0.1:8080/mcp/")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(self._config(env).read_text(encoding="utf-8"))
+            self.assertEqual(
+                config["mcpServers"]["recallum"]["serverUrl"], "http://127.0.0.1:8080/mcp/"
+            )
+
+    def test_summary_names_antigravity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, _ = self._install(Path(directory))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.count("Antigravity: plugin installed"), 1)
+
+    def test_no_workspace_scope_config_is_ever_created(self) -> None:
+        """`.agents/` is tracked here: a cleartext key there is committable."""
+        for extra in ((), ("--url", "http://127.0.0.1:8080/mcp/"), ("--dry-run",)):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                cwd = root / "cwd"
+                cwd.mkdir()
+                result, _, _ = self._install(root, *extra, cwd=cwd)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(list(cwd.rglob("mcp_config.json")), [])
+                self.assertFalse((cwd / ".agents").exists())
+        self.assertFalse((REPO_ROOT / ".agents" / "mcp_config.json").exists())
+
+    def test_pre_existing_workspace_config_is_neither_read_nor_touched(self) -> None:
+        """Prove non-*read*, not just non-write.
+
+        The decoy is poisoned: malformed JSON carrying a credential-shaped
+        string. If the installer parsed the file it would either crash on the
+        malformed trailing content or echo the decoy — so an unchanged exit
+        status, an output identical to the file-absent baseline apart from the
+        warning, and the decoy's total absence from every stream together
+        establish that the bytes were never read.
+        """
+        poisoned = (
+            '{"mcpServers": {"recallum": {"headers": '
+            f'{{"Authorization": "Bearer {DECOY_KEY}"}}}}}}\n'
+            "}}} not json at all <<<\x00trailing\n"
+        ).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline_cwd = root / "clean"
+            baseline_cwd.mkdir()
+            baseline, _, _ = self._install(root, cwd=baseline_cwd)
+            # Fixture HOMEs differ between the two runs, so compare output with
+            # the fixture root folded away; every other path is a constant.
+            baseline_out = baseline.stdout.replace(str(root), "ROOT")
+            baseline_err = baseline.stderr.replace(str(root), "ROOT")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cwd = root / "poisoned"
+            (cwd / ".agents").mkdir(parents=True)
+            target = cwd / ".agents" / "mcp_config.json"
+            target.write_bytes(poisoned)
+            before = target.stat().st_mode & 0o777
+
+            result, _, log = self._install(root, cwd=cwd)
+
+            out = result.stdout.replace(str(root), "ROOT")
+            err = result.stderr.replace(str(root), "ROOT")
+            self.assertEqual(result.returncode, baseline.returncode)
+            self.assertEqual(out, baseline_out)
+            warning = [line for line in err.splitlines() if line not in baseline_err]
+            self.assertTrue(
+                any(".agents/mcp_config.json" in line for line in warning), result.stderr
+            )
+            self.assertTrue(
+                any("workspace-scope" in line for line in warning), result.stderr
+            )
+            # Aside from that warning block, the two runs say the same thing.
+            remainder = "\n".join(
+                line for line in err.splitlines() if line not in warning
+            )
+            self.assertEqual(remainder.strip(), baseline_err.strip())
+
+            self.assertEqual(target.read_bytes(), poisoned)
+            self.assertEqual(target.stat().st_mode & 0o777, before)
+            spilled = result.stdout + result.stderr + log.read_text(encoding="utf-8")
+            self.assertNotIn(DECOY_KEY, spilled)
+
+    def test_repository_working_tree_stays_clean(self) -> None:
+        """The run must not perturb the tree it is launched from.
+
+        Compared before/after rather than against an empty status, so the
+        guard still holds while this change itself is uncommitted.
+        """
+
+        def status() -> str:
+            return subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+
+        before = status()
+        with tempfile.TemporaryDirectory() as directory:
+            result, _, _ = self._install(Path(directory))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(status(), before)
 
 
 if __name__ == "__main__":
