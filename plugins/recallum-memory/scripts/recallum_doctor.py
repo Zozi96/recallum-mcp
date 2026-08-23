@@ -166,7 +166,7 @@ def _safe_url(value: Any) -> dict[str, Any]:
     return result
 
 
-def _safe_server(server: Any, *, include_type: bool = True) -> dict[str, Any]:
+def _safe_server(server: Any, *, include_type: bool = True, url_key: str = "url") -> dict[str, Any]:
     if not isinstance(server, dict):
         result = {
             **_safe_url(None),
@@ -174,7 +174,7 @@ def _safe_server(server: Any, *, include_type: bool = True) -> dict[str, Any]:
         }
         return result
     result: dict[str, Any] = {
-        **_safe_url(server.get("url")),
+        **_safe_url(server.get(url_key)),
         "auth": _auth_from_server(server),
     }
     if include_type:
@@ -234,12 +234,20 @@ def _find_item(payload: Any, key: str, value: str) -> dict[str, Any] | None:
     return next((item for item in _items(payload) if item.get(key) == value), None)
 
 
-def _record_permission(result: dict[str, Any], path: Path, auth: str, problems: list[str]) -> None:
+def _record_permission(
+    result: dict[str, Any],
+    path: Path,
+    auth: str,
+    problems: list[str],
+    *,
+    client: str | None = None,
+) -> None:
     mode = _file_mode(path)
     if mode is not None:
         result["file_mode"] = mode
     if auth == "Bearer *** (literal)" and mode != "0600":
-        problems.append(f"permission: literal bearer file is not mode 600 ({path})")
+        label = f"{client} " if client else ""
+        problems.append(f"permission: {label}literal bearer file is not mode 600 ({path})")
         result["permission_warning"] = "literal bearer file is not mode 600"
 
 
@@ -502,6 +510,93 @@ def _cursor(
     return result
 
 
+def _antigravity_endpoint_problem(client: str, raw_url: Any, problems: list[str]) -> None:
+    """HTTPS with an exact ``/mcp/`` path, except loopback hosts may use plain
+    HTTP. Mirrors install.sh's write-time ``normalize_url`` rule
+    (scripts/install.sh ~L174-181) so the doctor never diverges from what the
+    installer accepts -- this is the one place that rule is re-expressed in
+    Python and it must not be forked a second time."""
+    if not isinstance(raw_url, str) or not raw_url:
+        problems.append(f"config: {client} serverUrl is missing")
+        return
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        problems.append(f"config: {client} serverUrl is invalid")
+        return
+    hostname = parsed.hostname
+    if not parsed.scheme or hostname is None:
+        problems.append(f"config: {client} serverUrl is invalid")
+        return
+    local = hostname in {"localhost", "127.0.0.1"}
+    allowed_schemes = {"https", "http"} if local else {"https"}
+    if parsed.scheme not in allowed_schemes:
+        problems.append(
+            f"config: {client} serverUrl must use HTTPS "
+            "(HTTP is allowed only for localhost or 127.0.0.1)"
+        )
+        return
+    if parsed.path != "/mcp/":
+        problems.append(f"config: {client} serverUrl path must be exactly /mcp/")
+
+
+def _antigravity_plugin_present(problems: list[str]) -> bool | None:
+    """Best-effort ``agy plugin list --json`` check. Returns ``None`` (and
+    appends no problem) when ``agy`` is absent from PATH or its output cannot
+    be parsed, mirroring ``_run_json``'s existing None-on-failure contract and
+    ``_codex``'s ``shutil.which`` fallback (L386-408): a missing or broken
+    CLI is not itself a Recallum health problem."""
+    if shutil.which("agy") is None:
+        return None
+    payload = _run_json(["agy", "plugin", "list", "--json"])
+    if payload is None:
+        return None
+    imports = payload.get("imports") if isinstance(payload, dict) else None
+    entry = None
+    if isinstance(imports, list):
+        entry = next(
+            (
+                item
+                for item in imports
+                if isinstance(item, dict) and item.get("name") == "recallum-memory"
+            ),
+            None,
+        )
+    components = entry.get("components") if isinstance(entry, dict) else None
+    present = isinstance(components, list) and "mcpServers" in components
+    if not present:
+        problems.append(
+            "config: Antigravity CLI plugin recallum-memory is not listed by agy plugin list"
+        )
+    return present
+
+
+def _antigravity(
+    home: Path, _expected: str | None, token_env: str, problems: list[str]
+) -> dict[str, Any]:
+    """``_expected`` is accepted only to keep the call signature uniform with
+    ``_codex``/``_grok`` -- Antigravity has no version-drift signal today."""
+    result: dict[str, Any] = {}
+    config_path = home / ".gemini" / "config" / "mcp_config.json"
+    config = _read_json(config_path)
+    server = _configured_server(config, "mcpServers", "recallum", "Antigravity CLI", problems)
+    if config is not None and not isinstance(server, dict):
+        problems.append(
+            f"config: Antigravity CLI recallum server entry is missing ({config_path})"
+        )
+    if isinstance(server, dict):
+        safe = _safe_server(server, url_key="serverUrl")
+        result["native_mcp"] = safe
+        auth = safe["auth"]
+        _auth_problem("Antigravity CLI", auth, token_env, problems)
+        _record_permission(safe, config_path, auth, problems, client="Antigravity CLI")
+        _antigravity_endpoint_problem("Antigravity CLI", server.get("serverUrl"), problems)
+        present = _antigravity_plugin_present(problems)
+        if present is not None:
+            result["plugin_present"] = present
+    return result
+
+
 def _load_expected(repo_root: Path, problems: list[str]) -> str | None:
     manifest = _read_json(repo_root / "plugins" / "recallum-memory" / "plugin.json")
     version = manifest.get("version") if isinstance(manifest, dict) else None
@@ -562,6 +657,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Codex", _codex(home, expected, args.token_env_var, problems)),
         ("Grok Build", _grok(home, expected, args.token_env_var, problems)),
         ("Cursor", _cursor(home, expected, args.token_env_var, problems)),
+        ("Antigravity CLI", _antigravity(home, expected, args.token_env_var, problems)),
     ):
         if value:
             report["clients"][client] = value

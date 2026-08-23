@@ -2446,6 +2446,63 @@ class DoctorTests(unittest.TestCase):
             check=False,
         )
 
+    def _write_antigravity_config(
+        self,
+        home: Path,
+        *,
+        url: str = "https://recallum.zozbit.com/mcp/",
+        token: str | None = "rcl_doctor_secret_123",
+        mode: int = 0o600,
+        include_server: bool = True,
+    ) -> Path:
+        path = home / ".gemini" / "config" / "mcp_config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        servers: dict[str, object] = {}
+        if include_server:
+            server: dict[str, object] = {"serverUrl": url}
+            if token is not None:
+                server["headers"] = {"Authorization": f"Bearer {token}"}
+            servers["recallum"] = server
+        # Create the file first, then chmod in a separate step -- chmod sets
+        # the mode directly and is not subject to umask, unlike a mode passed
+        # to write_text/open, so this is immune to the process umask.
+        path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def _write_agy_cli(
+        self,
+        home: Path,
+        *,
+        plugin_listed: bool = True,
+        mcp_servers_present: bool = True,
+        malformed: bool = False,
+        nonzero_exit: bool = False,
+    ) -> Path:
+        """Fake ``agy`` on PATH. Every invocation is logged with a sentinel
+        string only this fake binary emits, so a test can prove it was not
+        silently satisfied by the real ``agy`` on the developer's machine."""
+        components = ["skills"] + (["mcpServers"] if mcp_servers_present else [])
+        imports = [{"name": "recallum-memory", "components": components}] if plugin_listed else []
+        payload = json.dumps({"imports": imports})
+        lines = [
+            "import json, sys",
+            "from pathlib import Path",
+            "log = Path(__file__).with_name('agy.log')",
+            "with log.open('a', encoding='utf-8') as fh:",
+            "    fh.write('FAKE_AGY_SENTINEL_v1 ' + json.dumps(sys.argv[1:]) + chr(10))",
+            "if sys.argv[1:] != ['plugin', 'list', '--json']:",
+            "    sys.exit(0)",
+        ]
+        if nonzero_exit:
+            lines.append("sys.exit(1)")
+        elif malformed:
+            lines.append("print('not-json-output {')")
+        else:
+            lines.append(f"print({payload!r})")
+        self._write_cli(home, "agy", "\n".join(lines) + "\n")
+        return home / "bin" / "agy.log"
+
     def test_doctor_fake_home_all_clients_planted_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -2708,6 +2765,208 @@ class DoctorTests(unittest.TestCase):
             result = self._run_doctor(Path(directory))
             self.assertEqual(result.returncode, 0)
             self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_antigravity_absent_when_no_gemini_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            result = self._run_doctor(home, "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertNotIn("Antigravity CLI", report["clients"])
+
+    def test_antigravity_absence_does_not_affect_sibling_clients(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            result = self._run_doctor(home, "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            for client in ("Claude Code", "Codex", "Grok Build", "Cursor"):
+                self.assertIn(client, report["clients"])
+            self.assertNotIn("Antigravity CLI", report["clients"])
+
+    def test_antigravity_healthy_config_reports_no_problems(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(any("Antigravity" in p for p in report["problems"]))
+            self.assertEqual(report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"], "0600")
+
+    def test_antigravity_missing_server_entry_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home, include_server=False)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertTrue(
+                any("Antigravity" in p and "missing" in p for p in report["problems"])
+            )
+
+    def test_antigravity_world_readable_config_is_flagged_under_restrictive_umask(self) -> None:
+        # Belt-and-braces: a restrictive process umask must not accidentally
+        # mask a 0644 bug by producing a private file anyway. chmod (used by
+        # _write_antigravity_config) is immune to umask; this proves it.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            previous_umask = os.umask(0o077)
+            try:
+                path = self._write_antigravity_config(home, mode=0o644)
+            finally:
+                os.umask(previous_umask)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"], "0644")
+            self.assertTrue(
+                any(
+                    "Antigravity" in p and "permission" in p and str(path) in p
+                    for p in report["problems"]
+                )
+            )
+
+    def test_antigravity_group_readable_config_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            path = self._write_antigravity_config(home, mode=0o640)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"], "0640")
+            self.assertTrue(
+                any(
+                    "Antigravity" in p and "permission" in p and str(path) in p
+                    for p in report["problems"]
+                )
+            )
+
+    def test_antigravity_missing_authorization_header_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home, token=None)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertTrue(any("Antigravity" in p and "auth" in p for p in report["problems"]))
+
+    def test_antigravity_endpoint_rule_matches_url_examples(self) -> None:
+        cases = (
+            ("http://example.com/mcp/", False),
+            ("https://example.com/other", False),
+            ("https://example.com/mcp/extra", False),
+            ("http://127.0.0.1:8080/mcp/", True),
+            ("http://localhost:8080/mcp/", True),
+        )
+        for url, expect_healthy in cases:
+            with self.subTest(url=url):
+                with tempfile.TemporaryDirectory() as directory:
+                    home = Path(directory)
+                    self._healthy_home(home)
+                    self._write_antigravity_config(home, url=url)
+                    result = self._run_doctor(home, "--json")
+                    report = json.loads(result.stdout)
+                    antigravity_problems = [p for p in report["problems"] if "Antigravity" in p]
+                    if expect_healthy:
+                        self.assertEqual(antigravity_problems, [])
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertTrue(antigravity_problems)
+                        self.assertEqual(result.returncode, 1)
+
+    def test_antigravity_token_never_appears_in_any_output_mode(self) -> None:
+        token = "rcl_antigravity_secret_321"
+        cases = (
+            ("https://recallum.zozbit.com/mcp/", 0o600),
+            ("https://recallum.zozbit.com/mcp/", 0o644),
+            ("http://example.com/mcp/", 0o600),
+        )
+        for url, mode in cases:
+            with self.subTest(url=url, mode=mode):
+                with tempfile.TemporaryDirectory() as directory:
+                    home = Path(directory)
+                    self._healthy_home(home)
+                    self._write_antigravity_config(home, url=url, token=token, mode=mode)
+                    for args in ((), ("--json",)):
+                        result = self._run_doctor(home, *args)
+                        output = result.stdout + result.stderr
+                        self.assertNotIn("Traceback", output)
+                        self.assertNotIn(token, output)
+                        self.assertNotIn(token[4:], output)
+
+    def test_antigravity_plugin_listed_via_agy_sets_plugin_present_true(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            log = self._write_agy_cli(home, plugin_listed=True, mcp_servers_present=True)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(report["clients"]["Antigravity CLI"]["plugin_present"])
+            self.assertFalse(any("plugin" in p for p in report["problems"]))
+            self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
+
+    def test_antigravity_plugin_not_listed_via_agy_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            log = self._write_agy_cli(home, plugin_listed=False)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(report["clients"]["Antigravity CLI"]["plugin_present"])
+            self.assertTrue(
+                any("Antigravity" in p and "plugin" in p for p in report["problems"])
+            )
+            self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
+
+    def test_antigravity_agy_absent_from_path_skips_plugin_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertNotIn("plugin_present", report["clients"]["Antigravity CLI"])
+            self.assertFalse(any("plugin" in p for p in report["problems"]))
+
+    def test_antigravity_agy_malformed_json_skips_plugin_check_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            log = self._write_agy_cli(home, malformed=True)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertNotIn("plugin_present", report["clients"]["Antigravity CLI"])
+            self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
+
+    def test_antigravity_agy_nonzero_exit_skips_plugin_check_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            log = self._write_agy_cli(home, nonzero_exit=True)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertNotIn("plugin_present", report["clients"]["Antigravity CLI"])
+            self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
 
     def test_setup_skill_uses_doctor_for_secret_inspection(self) -> None:
         skill = (PLUGIN_ROOT / "skills" / "recallum-setup" / "SKILL.md").read_text(encoding="utf-8")
