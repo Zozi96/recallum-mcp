@@ -16,7 +16,7 @@ Options:
   --target TARGET           auto | codex | claude | grok | cursor | antigravity | both
                             (default: auto)
                             auto installs into every detected CLI
-                            both requires Codex and Claude Code (not Grok/Cursor)
+                            both requires Codex and Claude Code (not Grok/Cursor/Antigravity)
   --token-env-var NAME      Codex, Grok, and Cursor: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
