@@ -193,7 +193,8 @@ the API key is written to disk in cleartext — read the whole section before ru
    only, not evidence the hook ever dispatches (see Diagnostics below).
 6. Start a new Antigravity session so the plugin and MCP server are picked up.
 
-Skill-driven tool discovery works today (skills validate and load). Session-start hook parity is
+Skills validate cleanly (`skills : 2 processed`), but that is validation acceptance only — it is
+not evidence that skill-driven tool discovery works at runtime. Session-start hook parity is also
 **unconfirmed**: `agy` gates every session behind interactive Google OAuth sign-in before any
 session-start hook, hook dispatch, or MCP tool surface becomes reachable, so do not rely on a
 hook-injected context digest for Antigravity CLI. The MCP tool-name prefix for Antigravity CLI is
