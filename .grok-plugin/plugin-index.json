@@ -11,7 +11,7 @@
           },
           {
             "name": "recallum-setup",
-            "description": "Install, configure, and diagnose Recallum for Cursor, Grok Build, Codex, or Claude Code."
+            "description": "Install, configure, and diagnose Recallum for Cursor, Grok Build, Codex, Claude Code, or Antigravity CLI."
           }
         ],
         "hooks": [
@@ -27,7 +27,7 @@
         "mcpServers": [
           {
             "name": "recallum",
-            "description": "Streamable HTTP Recallum MCP. On Grok Build, register the server natively in config.toml with Bearer ${RECALLUM_API_KEY}; the plugin-bundled Claude userConfig placeholders are not resolved by Grok."
+            "description": "Streamable HTTP Recallum MCP. On Grok Build, register the server natively in config.toml with Bearer ${RECALLUM_API_KEY}; the plugin-bundled Claude userConfig placeholders are not resolved by Grok. Antigravity CLI also registers natively (agy plugin install writes ~/.gemini/config/mcp_config.json), and, unlike Grok, writes the bearer token in cleartext since Antigravity performs no ${...} expansion at all."
           }
         ]
       }

@@ -1,6 +1,6 @@
 ---
 name: recallum-setup
-description: Set up or diagnose the Recallum plugin and remote MCP connection for Cursor, Codex, Claude Code, or Grok Build when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
+description: Set up or diagnose the Recallum plugin and remote MCP connection for Cursor, Codex, Claude Code, Grok Build, or Antigravity CLI when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
 ---
 
 # Recallum Setup
@@ -16,12 +16,17 @@ prompt) so clients can authenticate after install:
 - All targets → `~/.config/recallum/env` and Linux `~/.config/environment.d/99-recallum.conf`
 
 Never pass the key as `claude --config api_token=...` or as a CLI flag (argv / process list). Use
-`--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `both`, or
-default `auto`. Run with `--dry-run` first to see the planned actions.
+`--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `antigravity`,
+`both`, or default `auto`. Run with `--dry-run` first to see the planned actions. `--target both`
+means Codex + Claude Code only; it does not include Grok, Cursor, or Antigravity CLI.
 
 Cursor: `install.sh --target cursor` (or `auto` when `cursor-agent`/`agent` is on PATH) registers the
 marketplace and writes a mode-600 `~/.cursor/mcp.json` entry. Plugin install is still done in the
 Cursor UI (`/plugins` or Settings → Plugins); the CLI cannot install plugins.
+
+Antigravity CLI: `install.sh --target antigravity` runs `agy plugin install <dir>` and writes a
+mode-600 `~/.gemini/config/mcp_config.json` entry with a **literal, cleartext** bearer token — see
+the dedicated section below before running it.
 
 ## Diagnose
 
@@ -152,6 +157,48 @@ native entry takes precedence over any broken plugin-bundled MCP definition with
 4. Export `RECALLUM_API_KEY` in the environment that launches Grok, then start a **new** session.
 5. Optional: validate the plugin with `grok plugin validate <repo-root>/plugins/recallum-memory`.
 
+## Setup — Antigravity CLI
+
+Antigravity CLI ships as `agy`. It performs no environment-variable expansion in its MCP config, so
+the API key is written to disk in cleartext — read the whole section before running the installer.
+
+1. Confirm `agy` is on `PATH` (`agy --version`).
+2. Run the installer:
+
+   ```bash
+   export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+   plugins/recallum-memory/scripts/install.sh --target antigravity --url https://recallum.example.com/mcp/
+   ```
+
+   This calls `agy plugin install <dir>` (accepts a local directory or an **HTTPS** GitHub URL only
+   — `git@…` and the `owner/repo` shorthand both fail) and writes the `recallum` server natively to
+   `~/.gemini/config/mcp_config.json` at mode `0600`. `--target both` does not cover Antigravity CLI;
+   use `--target antigravity` explicitly. `--remote` does not currently cover this target.
+3. **Cleartext key warning:** the bearer token is written literally into
+   `~/.gemini/config/mcp_config.json` — a `${RECALLUM_API_KEY}`-style placeholder will **not** be
+   expanded by Antigravity. The installer's backup of the prior config also holds the key in
+   cleartext. Treat both files as sensitive; never commit either one.
+4. Confirm the registration with the read-only doctor:
+
+   ```bash
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
+   ```
+
+   It reports the `Antigravity CLI` client: server presence, `serverUrl`, the Authorization header
+   (flagging any unexpanded `${...}` placeholder as wrong for this client), the config file's
+   permission mode, and whether `agy plugin list` shows the plugin. If `agy` is not on `PATH`, that
+   last sub-check is skipped, not failed.
+5. Optional: `agy plugin validate plugins/recallum-memory` — expect `mcpServers : 1 processed` and
+   `skills : 2 processed`. It also reports `hooks : 1 processed`, but that is validation acceptance
+   only, not evidence the hook ever dispatches (see Diagnostics below).
+6. Start a new Antigravity session so the plugin and MCP server are picked up.
+
+Skill-driven tool discovery works today (skills validate and load). Session-start hook parity is
+**unconfirmed**: `agy` gates every session behind interactive Google OAuth sign-in before any
+session-start hook, hook dispatch, or MCP tool surface becomes reachable, so do not rely on a
+hook-injected context digest for Antigravity CLI. The MCP tool-name prefix for Antigravity CLI is
+also not yet determined — no prefix constant exists in the shared hook code.
+
 ## Shared Checks
 
 1. Check only whether the token environment variable or Claude Code fallback is present. The
@@ -172,6 +219,7 @@ native entry takes precedence over any broken plugin-bundled MCP definition with
    | Claude Code (native / Desktop) | `mcp__recallum__` |
    | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
    | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
+   | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every
    character outside `[A-Za-z0-9_-]` to `_` when building tool ids (long prefix). The installer also
@@ -223,3 +271,7 @@ echo the key while doing so.
   missing interpreter is silent.
 - Hook not firing (Grok Build): confirm `grok plugin list` shows `recallum-memory` enabled and
   trusted, and that `python3` is on PATH.
+- Hook not firing (Antigravity CLI): expected. `agy plugin validate` reporting `hooks : 1 processed`
+  is validation acceptance only, not dispatch evidence — `agy` gates every session behind
+  interactive Google OAuth sign-in before any session-start hook is reachable, so hook parity is
+  unconfirmed. Use skill-driven tool discovery instead of relying on a hook-injected context digest.

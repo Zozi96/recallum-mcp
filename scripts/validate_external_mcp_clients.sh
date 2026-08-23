@@ -6,7 +6,7 @@
 set -euo pipefail
 
 echo "=== Task 10.1 external MCP client validation ==="
-echo "Required clients: Codex, Claude Code, Cursor"
+echo "Required clients: Codex, Claude Code, Cursor, Antigravity CLI"
 echo "Required probes: initialize, discovery, tools/resources, isolation, revocation, safe errors"
 echo "Transport: exact HTTPS URL ending in /mcp/"
 echo

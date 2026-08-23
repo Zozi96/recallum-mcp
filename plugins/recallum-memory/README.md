@@ -4,18 +4,21 @@
 
 # Recallum Memory plugin
 
-Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, and **Claude Code**, backed
-by a self-hosted Recallum MCP server.
+Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claude Code**, and
+**Antigravity CLI**, backed by a self-hosted Recallum MCP server.
 
 The plugin ships:
 
 - two skills — `recallum-memory` (load context and capture verified reusable knowledge) and
   `recallum-setup` (install and diagnose);
 - shared hooks — Codex, Claude Code, and Grok wire `SessionStart` plus `UserPromptSubmit`; Cursor
-  wires `sessionStart` and adds an always-applied rule as a delivery fallback. All fail open;
+  wires `sessionStart` and adds an always-applied rule as a delivery fallback. Antigravity CLI ships
+  the same `hooks.json`, accepted by `agy plugin validate` (`hooks : 1 processed`), but dispatch is
+  unconfirmed — `agy` gates every session behind Google OAuth sign-in before any hook is reachable
+  (see docs/clients.md). All fail open;
 - the MCP wiring for each client.
 
-One plugin package, four native entry points — not a Claude-only addon:
+One plugin package, five native entry points — not a Claude-only addon:
 
 | Client | Marketplace index | Plugin metadata |
 | --- | --- | --- |
@@ -23,6 +26,7 @@ One plugin package, four native entry points — not a Claude-only addon:
 | Grok Build | `.grok-plugin/marketplace.json` | `plugin.json` |
 | Codex | `.agents/plugins/marketplace.json` | `.codex-plugin/plugin.json` |
 | Claude Code | `.claude-plugin/marketplace.json` | `.claude-plugin/plugin.json` |
+| Antigravity CLI | n/a — `agy plugin install <dir>` (local dir or HTTPS GitHub URL) | `plugin.json` |
 
 ## Grok only (no Claude Code)
 
@@ -392,6 +396,7 @@ Claude Desktop ToolSearch (`mcp__recallum__*`):
 | Claude Code (native / Desktop) | `mcp__recallum__` |
 | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
 | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
+| Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
 Both skills document this, and the session hook emits the client-appropriate name or discovery
 hint. This is why the plugin behaves consistently despite the different tool ids.

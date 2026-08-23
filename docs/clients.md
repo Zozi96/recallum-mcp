@@ -1,4 +1,4 @@
-# Configuring MCP Clients (Cursor, Grok Build, Codex, and Claude Code)
+# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, and Antigravity CLI)
 
 Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
@@ -10,9 +10,10 @@ The server exposes eleven MCP tools: `remember`, `remember_batch`, `recall`,
 `context`, `get_memory`, `list_memories`, `update`, `merge_memories`,
 `related_memories`, `reconfirm`, and `forget`.
 
-Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, and Grok Build. Cursor
-uses its native marketplace and Settings flow below. Keep credentials in client-owned settings;
-do not rely on a shell-only export as the sole GUI strategy, and verify the setup after restart.
+Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build, and
+Antigravity CLI. Cursor uses its native marketplace and Settings flow below. Keep credentials in
+client-owned settings; do not rely on a shell-only export as the sole GUI strategy, and verify the
+setup after restart.
 
 ## Grok Build (no Claude Code required)
 
@@ -107,6 +108,53 @@ claude mcp list | grep recallum   # plugin:recallum-memory:recallum and/or recal
 # Nested shell claude mcp list inside Desktop is not proof of Desktop tool registration
 ```
 
+## Antigravity CLI
+
+Antigravity CLI ships as `agy`. Install with the bundled installer:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target antigravity --url https://recallum.example.com/mcp/
+```
+
+This runs `agy plugin install <dir>` (a local directory path, or an **HTTPS** GitHub URL — `git@…`
+SSH form and the `owner/repo` shorthand both fail; `agy` does not accept them) and writes the
+`recallum` server natively to `~/.gemini/config/mcp_config.json`.
+
+`--target both` remains Codex + Claude Code only and does **not** include Antigravity CLI; you must
+pass `--target antigravity` explicitly. The installer's `--remote` flag does not currently cover the
+Antigravity target.
+
+**The API key is stored in cleartext.** Antigravity performs no environment-variable expansion in
+`mcp_config.json` (unlike Codex/Grok's `${VAR}` references), so a `${RECALLUM_API_KEY}`-style
+placeholder will **not** work there — the installer writes the literal bearer token to
+`~/.gemini/config/mcp_config.json`. The installer sets that file to mode `0600` and keeps a backup
+of the prior config, and **that backup also contains the key in cleartext**. Treat both the live
+file and its backup as sensitive; do not commit them, and understand that anyone who can read either
+file has the raw token.
+
+As with every other client, the endpoint must be HTTPS with the exact `/mcp/` path; plain HTTP is
+accepted only for `localhost`/`127.0.0.1`.
+
+`agy plugin validate plugins/recallum-memory` reports `hooks : 1 processed`. **This is validation
+acceptance only — it is not evidence that the hook ever dispatches.** `agy` gates every session
+behind interactive Google OAuth sign-in before any session-start hook, hook dispatch, or MCP tool
+surface becomes reachable, so hook parity with Codex/Claude Code/Grok Build is unconfirmed and must
+not be assumed. Skills load and validate cleanly (`agy plugin validate` reports `skills : 2
+processed`), so skill-driven tool discovery works even though hook-based context injection does not
+yet have confirmed parity.
+
+Diagnose with the same read-only doctor used for the other clients:
+
+```bash
+python3 plugins/recallum-memory/scripts/recallum_doctor.py
+```
+
+It reports an `Antigravity CLI` client: whether the `recallum` server entry is present, its
+`serverUrl`, the Authorization header (and whether it is an unexpanded `${...}` placeholder, which
+is always wrong for Antigravity), the config file's permission mode, and whether the plugin is
+listed by `agy plugin list`. If `agy` is not on `PATH`, that last sub-check is skipped, not failed.
+
 ## Agent usage guidance
 
 Put a short instruction in each project's AGENTS.md / CLAUDE.md so agents
@@ -127,7 +175,9 @@ Never store full conversations; store the distilled fact.
 Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
 `mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` (native/Desktop), Grok Build
 `recallum__*` via `search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in
-Available Tools.
+Available Tools. Antigravity CLI's tool-name prefix is **not yet determined** — no prefix constant
+exists in `recallum_hook.py` — so prefer skill-driven tool discovery over assuming a specific prefix
+string when working in Antigravity CLI.
 
 ## Troubleshooting
 
