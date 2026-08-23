@@ -67,6 +67,39 @@ def _agy_binary() -> str | None:
 AGY = _agy_binary()
 
 
+def _agy_validate(directory: Path) -> tuple[int, str]:
+    """Run ``agy plugin validate`` on a bundle directory; return exit code and output.
+
+    S001 (mcp_config.json) and S004 (hooks.json) each shelled out to the same
+    binary with the same flags. S001 asserts on the exit status, S004 on the
+    merged report text, so this returns both and each caller takes what it
+    needs. Callers must be guarded by ``@skipUnless(AGY, ...)``. See ADR 0023.
+    """
+
+    assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
+    result = subprocess.run(
+        [AGY, "plugin", "validate", str(directory)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode, result.stdout + result.stderr
+
+
+def _agy_report_line(output: str, section: str) -> str:
+    """Return agy's per-section report line, e.g. ``"skills      : 2 processed"``.
+
+    Tolerant of agy's column padding, and anchored to the named section, so a
+    count belonging to a different section can never satisfy the match.
+    Raises if the section reported no count at all (e.g. "skipped (not found)").
+    """
+
+    match = re.search(rf"{section}\s*:\s*\d+ processed", output)
+    assert match is not None, f"no {section!r} report line in: {output}"
+    return match.group(0)
+
+
 def _endpoint_rule_satisfied(url: str) -> bool:
     """HTTPS with the exact ``/mcp/`` path, except plain HTTP for loopback hosts."""
 
@@ -1316,20 +1349,15 @@ class AntigravityMcpConfigTests(unittest.TestCase):
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_agy_plugin_validate_reports_skills_and_mcp_servers(self) -> None:
-        assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
-        result = subprocess.run(
-            [AGY, "plugin", "validate", str(PLUGIN_ROOT)],
-            cwd=REPO_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        output = result.stdout + result.stderr
-        self.assertEqual(result.returncode, 0, output)
-        self.assertIn("skills", output)
-        self.assertIn("2 processed", output)
-        self.assertIn("mcpServers", output)
-        self.assertNotIn("mcpServers  : skipped (not found)", output)
+        returncode, output = _agy_validate(PLUGIN_ROOT)
+        self.assertEqual(returncode, 0, output)
+        # Both sections must report a processed count rather than
+        # "skipped (not found)". Assert that the anchored line exists, not the
+        # count it carries: per S004's stage-6 ruling a hard-coded skill count
+        # breaks whenever a skill is added or removed. The anchored form also
+        # replaces a literal match on agy's exact column padding.
+        self.assertNotIn("skipped", _agy_report_line(output, "skills"))
+        self.assertNotIn("skipped", _agy_report_line(output, "mcpServers"))
         self.assertNotIn(
             'Error: MCP server "recallum" must have either command or serverUrl',
             output,
@@ -1358,15 +1386,8 @@ class AntigravityMcpConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            result = subprocess.run(
-                [AGY, "plugin", "validate", str(probe)],
-                cwd=REPO_ROOT,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            output = result.stdout + result.stderr
-            self.assertNotEqual(result.returncode, 0)
+            returncode, output = _agy_validate(probe)
+            self.assertNotEqual(returncode, 0)
             self.assertIn(
                 'Error: MCP server "recallum" must have either command or serverUrl',
                 output,
@@ -1417,29 +1438,10 @@ class AntigravityHookGapTests(unittest.TestCase):
     reachable in tests.
     """
 
-    @staticmethod
-    def _validate(directory: Path) -> str:
-        assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
-        result = subprocess.run(
-            [AGY, "plugin", "validate", str(directory)],
-            cwd=REPO_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        return result.stdout + result.stderr
-
-    @staticmethod
-    def _report_line(output: str, section: str) -> str:
-        # e.g. "skills      : 2 processed" -- tolerant of agy's column padding.
-        match = re.search(rf"{section}\s*:\s*\d+ processed", output)
-        assert match is not None, f"no {section!r} report line in: {output}"
-        return match.group(0)
-
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_skills_and_mcp_servers_unaffected_by_hooks_json_presence(self) -> None:
         # With the shipped (inert) hooks.json present.
-        with_hooks_output = self._validate(PLUGIN_ROOT)
+        _, with_hooks_output = _agy_validate(PLUGIN_ROOT)
         self.assertIn("hooks", with_hooks_output)
 
         # Same bundle with hooks.json removed: skills/mcpServers must report
@@ -1452,18 +1454,18 @@ class AntigravityHookGapTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("tests", "__pycache__"),
             )
             (copy_root / "hooks.json").unlink()
-            without_hooks_output = self._validate(copy_root)
+            _, without_hooks_output = _agy_validate(copy_root)
 
         # Assert the invariant directly -- the skills/mcpServers report is
         # identical with and without hooks.json -- rather than pinning a
         # skill count that changes whenever a skill is added or removed.
         self.assertEqual(
-            self._report_line(with_hooks_output, "skills"),
-            self._report_line(without_hooks_output, "skills"),
+            _agy_report_line(with_hooks_output, "skills"),
+            _agy_report_line(without_hooks_output, "skills"),
         )
         self.assertEqual(
-            self._report_line(with_hooks_output, "mcpServers"),
-            self._report_line(without_hooks_output, "mcpServers"),
+            _agy_report_line(with_hooks_output, "mcpServers"),
+            _agy_report_line(without_hooks_output, "mcpServers"),
         )
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
@@ -1496,7 +1498,7 @@ class AntigravityHookGapTests(unittest.TestCase):
                     (probe / "hooks.json").write_text(
                         json.dumps(schema), encoding="utf-8"
                     )
-                    output = self._validate(probe)
+                    _, output = _agy_validate(probe)
                     self.assertNotIn("cannot unmarshal", output, output)
                     self.assertIn("hooks", output)
                     self.assertIn("1 processed", output)
