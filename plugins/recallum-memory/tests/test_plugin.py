@@ -3028,7 +3028,10 @@ class DoctorTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(any("Antigravity" in p for p in report["problems"]))
-            self.assertEqual(report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"], "0600")
+            self.assertEqual(
+                report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"],
+                "0600",
+            )
 
     def test_antigravity_missing_server_entry_is_flagged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3057,7 +3060,10 @@ class DoctorTests(unittest.TestCase):
             result = self._run_doctor(home, "--json")
             report = json.loads(result.stdout)
             self.assertEqual(result.returncode, 1)
-            self.assertEqual(report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"], "0644")
+            self.assertEqual(
+                report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"],
+                "0644",
+            )
             self.assertTrue(
                 any(
                     "Antigravity" in p and "permission" in p and str(path) in p
@@ -3073,7 +3079,10 @@ class DoctorTests(unittest.TestCase):
             result = self._run_doctor(home, "--json")
             report = json.loads(result.stdout)
             self.assertEqual(result.returncode, 1)
-            self.assertEqual(report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"], "0640")
+            self.assertEqual(
+                report["clients"]["Antigravity CLI"]["native_mcp"]["file_mode"],
+                "0640",
+            )
             self.assertTrue(
                 any(
                     "Antigravity" in p and "permission" in p and str(path) in p
@@ -3592,7 +3601,7 @@ class AntigravityInstallTests(InstallerTestCase):
             '{"mcpServers": {"recallum": {"headers": '
             f'{{"Authorization": "Bearer {DECOY_KEY}"}}}}}}\n'
             "}}} not json at all <<<\x00trailing\n"
-        ).encode("utf-8")
+        ).encode()
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
