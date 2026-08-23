@@ -1419,6 +1419,7 @@ class AntigravityHookGapTests(unittest.TestCase):
 
     @staticmethod
     def _validate(directory: Path) -> str:
+        assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
         result = subprocess.run(
             [AGY, "plugin", "validate", str(directory)],
             cwd=REPO_ROOT,
@@ -1428,13 +1429,17 @@ class AntigravityHookGapTests(unittest.TestCase):
         )
         return result.stdout + result.stderr
 
+    @staticmethod
+    def _report_line(output: str, section: str) -> str:
+        # e.g. "skills      : 2 processed" -- tolerant of agy's column padding.
+        match = re.search(rf"{section}\s*:\s*\d+ processed", output)
+        assert match is not None, f"no {section!r} report line in: {output}"
+        return match.group(0)
+
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_skills_and_mcp_servers_unaffected_by_hooks_json_presence(self) -> None:
         # With the shipped (inert) hooks.json present.
         with_hooks_output = self._validate(PLUGIN_ROOT)
-        self.assertIn("skills", with_hooks_output)
-        self.assertIn("2 processed", with_hooks_output)
-        self.assertIn("mcpServers", with_hooks_output)
         self.assertIn("hooks", with_hooks_output)
 
         # Same bundle with hooks.json removed: skills/mcpServers must report
@@ -1449,9 +1454,17 @@ class AntigravityHookGapTests(unittest.TestCase):
             (copy_root / "hooks.json").unlink()
             without_hooks_output = self._validate(copy_root)
 
-        self.assertIn("skills", without_hooks_output)
-        self.assertIn("2 processed", without_hooks_output)
-        self.assertIn("mcpServers", without_hooks_output)
+        # Assert the invariant directly -- the skills/mcpServers report is
+        # identical with and without hooks.json -- rather than pinning a
+        # skill count that changes whenever a skill is added or removed.
+        self.assertEqual(
+            self._report_line(with_hooks_output, "skills"),
+            self._report_line(without_hooks_output, "skills"),
+        )
+        self.assertEqual(
+            self._report_line(with_hooks_output, "mcpServers"),
+            self._report_line(without_hooks_output, "mcpServers"),
+        )
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_validate_does_not_discriminate_array_vs_object_hooks_schema(self) -> None:
