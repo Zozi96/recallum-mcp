@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "recallum": {
+      "serverUrl": "https://recallum.zozbit.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}

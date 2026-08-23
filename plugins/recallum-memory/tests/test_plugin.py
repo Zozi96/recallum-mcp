@@ -7,11 +7,13 @@ import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from urllib.parse import urlsplit
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parents[1]
@@ -48,6 +50,34 @@ GROK_PLUGIN_INDEX = REPO_ROOT / ".grok-plugin" / "plugin-index.json"
 
 URL = "https://recallum.example/mcp/"
 TOKEN_ENV_VAR = "TEST_RECALLUM_KEY"
+
+ANTIGRAVITY_MCP_CONFIG = PLUGIN_ROOT / "mcp_config.json"
+LEGACY_MCP_JSON = PLUGIN_ROOT / "mcp.json"
+LEGACY_DOT_MCP_JSON = PLUGIN_ROOT / ".mcp.json"
+
+
+def _agy_binary() -> str | None:
+    found = shutil.which("agy")
+    if found:
+        return found
+    fallback = Path.home() / ".local" / "bin" / "agy"
+    return str(fallback) if fallback.exists() else None
+
+
+AGY = _agy_binary()
+
+
+def _endpoint_rule_satisfied(url: str) -> bool:
+    """HTTPS with the exact ``/mcp/`` path, except plain HTTP for loopback hosts."""
+
+    parsed = urlsplit(url)
+    if parsed.path != "/mcp/":
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme == "http":
+        return parsed.hostname in {"localhost", "127.0.0.1"}
+    return False
 DEFAULT_URL = "https://recallum.zozbit.com/mcp/"
 # Never a plausible-looking credential: this string is asserted *absent*
 # from every captured stdout/stderr and from the fake-CLI invocation log.
@@ -1215,6 +1245,161 @@ class ManifestTests(unittest.TestCase):
                     self.assertIn("CLAUDE_PLUGIN_ROOT", hook["command"])
                     self.assertIn("GROK_PLUGIN_ROOT", hook["commandWindows"])
                     self.assertIn("CLAUDE_PLUGIN_ROOT", hook["commandWindows"])
+
+
+class AntigravityMcpConfigTests(unittest.TestCase):
+    """Bundle-root `mcp_config.json` for Antigravity CLI (`agy`).
+
+    Antigravity requires the `serverUrl` shape (not the legacy `type`/`url`
+    shape the pre-existing `mcp.json` / `.mcp.json` use), so this is a third,
+    independent config file living alongside those two, not a replacement.
+    """
+
+    def test_antigravity_mcp_config_shape(self) -> None:
+        data = json.loads(ANTIGRAVITY_MCP_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(set(data), {"mcpServers"})
+        self.assertEqual(set(data["mcpServers"]), {"recallum"})
+        server = data["mcpServers"]["recallum"]
+        self.assertIn("serverUrl", server)
+        self.assertNotIn("type", server)
+        self.assertNotIn("url", server)
+        self.assertNotIn("command", server)
+        auth = server["headers"]["Authorization"]
+        # Non-secret placeholder only: an explicit literal marker, never a
+        # bare high-entropy token. Antigravity does not expand `${...}` in
+        # this file, so whatever is written here lands literally.
+        self.assertRegex(auth, r"^Bearer <[A-Za-z0-9_]+>$")
+
+    def test_antigravity_server_url_follows_endpoint_rule(self) -> None:
+        data = json.loads(ANTIGRAVITY_MCP_CONFIG.read_text(encoding="utf-8"))
+        server_url = data["mcpServers"]["recallum"]["serverUrl"]
+        self.assertTrue(_endpoint_rule_satisfied(server_url), server_url)
+
+    def test_endpoint_rule_examples(self) -> None:
+        satisfied = [
+            "https://api.example.com/mcp/",
+            "http://localhost:8000/mcp/",
+            "http://127.0.0.1:8000/mcp/",
+        ]
+        violated = [
+            "http://api.example.com/mcp/",
+            "https://api.example.com/mcp",
+        ]
+        for url in satisfied:
+            with self.subTest(url=url):
+                self.assertTrue(_endpoint_rule_satisfied(url))
+        for url in violated:
+            with self.subTest(url=url):
+                self.assertFalse(_endpoint_rule_satisfied(url))
+
+    def test_legacy_mcp_files_untouched(self) -> None:
+        # Regression guard: this story adds a third, bundle-root config file;
+        # the pre-existing legacy files and their (different) server key
+        # names must not be touched as a side effect.
+        mcp_json = json.loads(LEGACY_MCP_JSON.read_text(encoding="utf-8"))
+        dot_mcp_json = json.loads(LEGACY_DOT_MCP_JSON.read_text(encoding="utf-8"))
+        self.assertEqual(set(mcp_json["mcpServers"]), {"recallum_memory"})
+        legacy_server = mcp_json["mcpServers"]["recallum_memory"]
+        self.assertIn("type", legacy_server)
+        self.assertIn("url", legacy_server)
+        self.assertNotIn("serverUrl", legacy_server)
+        self.assertEqual(set(dot_mcp_json["mcpServers"]), {"recallum"})
+        legacy_dot_server = dot_mcp_json["mcpServers"]["recallum"]
+        self.assertIn("type", legacy_dot_server)
+        self.assertIn("url", legacy_dot_server)
+        self.assertNotIn("serverUrl", legacy_dot_server)
+
+    def test_plugin_json_unchanged_by_the_new_sibling_file(self) -> None:
+        # Adding mcp_config.json must not perturb plugin.json itself.
+        manifest = json.loads(GROK_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["name"], "recallum-memory")
+
+    @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
+    def test_agy_plugin_validate_reports_skills_and_mcp_servers(self) -> None:
+        result = subprocess.run(
+            [AGY, "plugin", "validate", str(PLUGIN_ROOT)],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("skills", output)
+        self.assertIn("2 processed", output)
+        self.assertIn("mcpServers", output)
+        self.assertNotIn("mcpServers  : skipped (not found)", output)
+        self.assertNotIn(
+            'Error: MCP server "recallum" must have either command or serverUrl',
+            output,
+        )
+
+    @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
+    def test_agy_plugin_validate_rejects_legacy_type_url_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "legacy-probe"
+            probe.mkdir()
+            (probe / "plugin.json").write_text(
+                GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (probe / "mcp_config.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": "http",
+                                "url": "https://recallum.zozbit.com/mcp/",
+                                "headers": {"Authorization": "Bearer <token>"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [AGY, "plugin", "validate", str(probe)],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                'Error: MCP server "recallum" must have either command or serverUrl',
+                output,
+            )
+
+    @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
+    def test_agy_plugin_install_copies_mcp_config_into_isolated_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            result = subprocess.run(
+                [AGY, "plugin", "install", str(PLUGIN_ROOT)],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            installed = (
+                home
+                / ".gemini"
+                / "config"
+                / "plugins"
+                / "recallum-memory"
+                / "mcp_config.json"
+            )
+            self.assertTrue(installed.exists(), result.stdout + result.stderr)
+            installed_data = json.loads(installed.read_text(encoding="utf-8"))
+            source_data = json.loads(ANTIGRAVITY_MCP_CONFIG.read_text(encoding="utf-8"))
+            self.assertEqual(
+                installed_data["mcpServers"]["recallum"]["serverUrl"],
+                source_data["mcpServers"]["recallum"]["serverUrl"],
+            )
 
 
 class InstallerTestCase(unittest.TestCase):
