@@ -1776,9 +1776,13 @@ install_for_antigravity() {
 
   local agy_mcp="$HOME/.gemini/config/mcp_config.json"
   local key_path=""
+  # Unconditional, and before the python3 child is forked: the child inherits
+  # this umask, so every file it creates is born private even on the paths
+  # where no key is resolved (--no-store-api-key, declined prompt). The
+  # backup it writes still holds the *previous* run's cleartext key.
+  umask 077
   if [[ -n "${resolved_api_key-}" ]]; then
     key_path="$tmp_dir/antigravity-api-key"
-    umask 077
     printf '%s' "$resolved_api_key" >"$key_path"
     chmod 600 "$key_path"
   fi
@@ -1831,13 +1835,30 @@ if servers.get("recallum") == entry:
 if existed:
     stamp = f"{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
     backup = mcp_path.with_name(f"{mcp_path.name}.bak-{stamp}")
-    shutil.copyfile(mcp_path, backup)
-    os.chmod(backup, 0o600)
-    print(f"Backed up the previous {mcp_path.name} to {backup.name} (mode 600).")
+    # O_CREAT|O_EXCL with an explicit 0o600 creation mode, rather than
+    # copyfile-then-chmod: the backup is never observable at a looser mode --
+    # not even for the copy window, and not permanently if the copy dies
+    # mid-write. O_EXCL also refuses a pre-seeded symlink at this predictable
+    # name, so the copy cannot be redirected onto another file.
+    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(fd, "wb") as handle, open(mcp_path, "rb") as source:
+        shutil.copyfileobj(source, handle)
+    print(
+        f"Backed up the previous {mcp_path.name} to {backup.name} (mode 600). "
+        "That backup contains your Recallum API key in cleartext -- delete it "
+        "once the new config is verified."
+    )
 
 servers["recallum"] = entry
 tmp = mcp_path.with_name(mcp_path.name + ".tmp")
-tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+# Same reasoning as the backup: create at 0o600 rather than inheriting a mode
+# from the umask and narrowing it afterwards. O_TRUNC (not O_EXCL) keeps a
+# stale tmp from a crashed run recoverable; O_NOFOLLOW refuses to write
+# through a symlink planted at this predictable name. Final mode and the
+# atomic rename below are unchanged.
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+with open(fd, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(data, indent=2) + "\n")
 os.chmod(tmp, 0o600)
 tmp.replace(mcp_path)
 os.chmod(mcp_path, 0o600)

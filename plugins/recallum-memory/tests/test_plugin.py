@@ -3327,6 +3327,116 @@ class AntigravityInstallTests(InstallerTestCase):
             # The backup holds credential material too.
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
 
+    def test_no_store_api_key_path_does_not_leak_the_login_umask(self) -> None:
+        """Regression (F1): `umask 077` used to sit *inside*
+        `if [[ -n "${resolved_api_key-}" ]]`, so `--no-store-api-key` forked the
+        python3 child under the login umask. The directory that child creates is
+        the only surviving witness of the umask it ran with: under a permissive
+        `002` it was born `0775`, and so was every file it created before being
+        narrowed by a follow-up chmod.
+        """
+        previous_umask = os.umask(0o002)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env, log = self._agy_env(root)
+                result = self._run(
+                    env,
+                    "--target",
+                    "antigravity",
+                    "--token-env-var",
+                    TOKEN_ENV_VAR,
+                    "--no-store-api-key",
+                )
+                self._assert_no_leak(result, log)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+                config = self._config(env)
+                self.assertTrue(config.is_file())
+                self.assertEqual(config.parent.stat().st_mode & 0o077, 0)
+                self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+        finally:
+            os.umask(previous_umask)
+
+    def test_backup_of_a_stored_key_is_private_on_the_no_store_path(self) -> None:
+        """Regression (F1): the auditor's reachable path -- run 1 stores the key
+        literally, run 2 with `--no-store-api-key` rewrites the entry and backs
+        the cleartext file up. That backup was created by
+        `shutil.copyfile` and only narrowed by a follow-up `chmod`, so under a
+        permissive umask it existed group/world-readable for the copy window --
+        and permanently if the copy died mid-write.
+
+        The copy window itself is not race-free to observe from outside the
+        process, so the birth mode is pinned at the source: exclusive creation
+        with an explicit `0o600`, never copy-then-narrow.
+        """
+        previous_umask = os.umask(0o002)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env, log = self._agy_env(root)
+                first = self._run(
+                    env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR
+                )
+                self.assertEqual(first.returncode, 0, first.stderr)
+                config = self._config(env)
+                # Read in-process only: run 1 wrote the key literally.
+                self.assertIn(SENTINEL_KEY, config.read_text(encoding="utf-8"))
+
+                second = self._run(
+                    env,
+                    "--target",
+                    "antigravity",
+                    "--token-env-var",
+                    TOKEN_ENV_VAR,
+                    "--no-store-api-key",
+                )
+                self._assert_no_leak(second, log)
+                self.assertEqual(second.returncode, 0, second.stderr)
+
+                backups = [p for p in config.parent.iterdir() if p != config]
+                self.assertEqual(len(backups), 1, backups)
+                # The backup carries the previous run's live cleartext key.
+                self.assertIn(SENTINEL_KEY, backups[0].read_text(encoding="utf-8"))
+                for path in (config, backups[0], config.parent):
+                    self.assertEqual(path.stat().st_mode & 0o077, 0, path.name)
+                self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+
+            source = INSTALLER.read_text(encoding="utf-8")
+            block = source.split("install_for_antigravity()", 1)[1]
+            self.assertIn("os.O_CREAT | os.O_EXCL, 0o600", block)
+            self.assertNotIn("shutil.copyfile(mcp_path, backup)", block)
+        finally:
+            os.umask(previous_umask)
+
+    def test_backup_message_names_the_credential_it_retains(self) -> None:
+        """Regression (F2): retention is required, so the disclosure carries the
+        warning. "Backed up ... (mode 600)" alone reads as reassurance and left
+        users with an undeleted cleartext key swept up by any $HOME sync.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._agy_env(root)
+            first = self._run(env, "--target", "antigravity", "--token-env-var", TOKEN_ENV_VAR)
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            second = self._run(
+                env,
+                "--target",
+                "antigravity",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+                "--no-store-api-key",
+            )
+            self._assert_no_leak(second, log)
+            self.assertEqual(second.returncode, 0, second.stderr)
+
+            message = second.stdout
+            self.assertIn("Backed up the previous", message)
+            self.assertIn("cleartext", message)
+            self.assertIn("API key", message)
+            self.assertIn("delete it", message)
+
     def test_merge_preserves_unrelated_servers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
