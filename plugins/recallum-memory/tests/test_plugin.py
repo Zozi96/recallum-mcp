@@ -1316,6 +1316,7 @@ class AntigravityMcpConfigTests(unittest.TestCase):
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_agy_plugin_validate_reports_skills_and_mcp_servers(self) -> None:
+        assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
         result = subprocess.run(
             [AGY, "plugin", "validate", str(PLUGIN_ROOT)],
             cwd=REPO_ROOT,
@@ -1336,6 +1337,7 @@ class AntigravityMcpConfigTests(unittest.TestCase):
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_agy_plugin_validate_rejects_legacy_type_url_shape(self) -> None:
+        assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
         with tempfile.TemporaryDirectory() as directory:
             probe = Path(directory) / "legacy-probe"
             probe.mkdir()
@@ -1372,6 +1374,7 @@ class AntigravityMcpConfigTests(unittest.TestCase):
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_agy_plugin_install_copies_mcp_config_into_isolated_home(self) -> None:
+        assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             env = os.environ.copy()
