@@ -36,6 +36,12 @@ CREDENTIAL_PREFIX = re.compile(r"^(?:rcl|sk|pk|ghp|gho|ghs|xox[abps])[-_]", re.I
 # their shape (AKIA + 16 upper alphanumerics) satisfies the env-var predicate.
 AWS_KEY_ID = re.compile(r"^(?:AKIA|ASIA)[A-Z0-9]{16}$")
 TRANSPORT_TYPES = frozenset({"http", "sse", "streamable_http", "stdio"})
+# Antigravity (agy v1.1.19) prints plain text, not JSON, exit 0, when no
+# plugins are imported at all -- verified against the real binary. Matched
+# loosely (a phrase, not the full exact string) so minor wording/punctuation
+# drift in future agy releases still counts as a definitive answer instead
+# of silently falling back to "cannot tell".
+AGY_NO_PLUGINS_PATTERN = re.compile(r"no imported plugins", re.IGNORECASE)
 
 
 def _read_json(path: Path) -> Any:
@@ -541,16 +547,39 @@ def _antigravity_endpoint_problem(client: str, raw_url: Any, problems: list[str]
 
 
 def _antigravity_plugin_present(problems: list[str]) -> bool | None:
-    """Best-effort ``agy plugin list --json`` check. Returns ``None`` (and
-    appends no problem) when ``agy`` is absent from PATH or its output cannot
-    be parsed, mirroring ``_run_json``'s existing None-on-failure contract and
-    ``_codex``'s ``shutil.which`` fallback (L386-408): a missing or broken
-    CLI is not itself a Recallum health problem."""
+    """``agy plugin list --json`` check. Returns ``None`` (and appends no
+    problem) only when ``agy`` is absent from PATH, exits non-zero, or its
+    output is genuinely unparseable, mirroring ``_run_json``'s existing
+    None-on-failure contract and ``_codex``'s ``shutil.which`` fallback
+    (L386-408): a missing or broken CLI is not itself a Recallum health
+    problem.
+
+    The real CLI (verified against agy v1.1.19) does *not* emit JSON when no
+    plugins are imported at all -- it prints plain text, ``No imported
+    plugins.``, with exit 0. That text is a definitive "not present" answer,
+    not an unparseable one; collapsing it into the None/skip branch would
+    silently pass the exact case this check exists to catch. So a
+    non-JSON, zero-exit response is treated as "not present" when it
+    contains that phrase, and as "cannot tell" (skip) only otherwise --
+    matched loosely, not as a brittle exact string, so minor formatting
+    differences in the real CLI's text still count as a definitive answer.
+    """
     if shutil.which("agy") is None:
         return None
-    payload = _run_json(["agy", "plugin", "list", "--json"])
-    if payload is None:
+    output = _run_text(["agy", "plugin", "list", "--json"])
+    if output is None:
         return None
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if payload is None:
+        if not AGY_NO_PLUGINS_PATTERN.search(output):
+            return None
+        problems.append(
+            "config: Antigravity CLI plugin recallum-memory is not listed by agy plugin list"
+        )
+        return False
     imports = payload.get("imports") if isinstance(payload, dict) else None
     entry = None
     if isinstance(imports, list):
@@ -589,6 +618,21 @@ def _antigravity(
         result["native_mcp"] = safe
         auth = safe["auth"]
         _auth_problem("Antigravity CLI", auth, token_env, problems)
+        if auth.startswith("Bearer ${"):
+            # Antigravity-specific: unlike every other client this doctor
+            # checks, Antigravity performs NO environment-variable expansion
+            # (theme constraint 3). A ${VAR} placeholder in the config is
+            # therefore sent to the server literally and can never
+            # authenticate, even when the referenced variable is set in the
+            # environment -- so this must be flagged regardless of
+            # `_auth_problem`'s unset-variable outcome above. Other clients
+            # DO expand, so this check must never move into the shared
+            # `_auth_problem` helper.
+            problems.append(
+                "auth: Antigravity CLI header is an unexpanded ${...} "
+                "placeholder -- Antigravity does not expand environment "
+                "variables, so the API key must be written literally"
+            )
         _record_permission(safe, config_path, auth, problems, client="Antigravity CLI")
         _antigravity_endpoint_problem("Antigravity CLI", server.get("serverUrl"), problems)
         present = _antigravity_plugin_present(problems)

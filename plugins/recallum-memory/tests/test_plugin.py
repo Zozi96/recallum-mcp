@@ -2699,10 +2699,19 @@ class DoctorTests(unittest.TestCase):
         mcp_servers_present: bool = True,
         malformed: bool = False,
         nonzero_exit: bool = False,
+        no_plugins_text: bool = False,
     ) -> Path:
         """Fake ``agy`` on PATH. Every invocation is logged with a sentinel
         string only this fake binary emits, so a test can prove it was not
-        silently satisfied by the real ``agy`` on the developer's machine."""
+        silently satisfied by the real ``agy`` on the developer's machine.
+
+        ``no_plugins_text=True`` reproduces the real CLI's behaviour
+        (verified against agy v1.1.19: no imports at all prints
+        ``No imported plugins.``, exit 0) -- plain text, not JSON.
+        ``plugin_listed=False`` alone still models a *parsed* JSON response
+        that omits recallum-memory (e.g. other plugins imported), which is a
+        distinct real-world shape from the no-imports-at-all case.
+        """
         components = ["skills"] + (["mcpServers"] if mcp_servers_present else [])
         imports = [{"name": "recallum-memory", "components": components}] if plugin_listed else []
         payload = json.dumps({"imports": imports})
@@ -2719,6 +2728,9 @@ class DoctorTests(unittest.TestCase):
             lines.append("sys.exit(1)")
         elif malformed:
             lines.append("print('not-json-output {')")
+        elif no_plugins_text:
+            # Exact real-CLI stdout, not JSON -- see docstring above.
+            lines.append("print('No imported plugins.')")
         else:
             lines.append(f"print({payload!r})")
         self._write_cli(home, "agy", "\n".join(lines) + "\n")
@@ -3079,6 +3091,30 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertTrue(any("Antigravity" in p and "auth" in p for p in report["problems"]))
 
+    def test_antigravity_unexpanded_env_placeholder_is_flagged(self) -> None:
+        """D1: Antigravity performs NO environment-variable expansion (theme
+        constraint 3), so ``Bearer ${RECALLUM_API_KEY}`` in the config is
+        sent to the server *literally* and can never authenticate -- even
+        though ``_run_doctor`` sets RECALLUM_API_KEY in the environment
+        (proving this is not merely the pre-existing unset-variable check).
+        Before the D1 fix this config reported healthy, exit 0."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(
+                home, token="${RECALLUM_API_KEY}", mode=0o644
+            )
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertTrue(
+                any(
+                    "Antigravity" in p and "${" in p and "literally" in p
+                    for p in report["problems"]
+                ),
+                report["problems"],
+            )
+
     def test_antigravity_endpoint_rule_matches_url_examples(self) -> None:
         cases = (
             ("http://example.com/mcp/", False),
@@ -3145,6 +3181,28 @@ class DoctorTests(unittest.TestCase):
             result = self._run_doctor(home, "--json")
             report = json.loads(result.stdout)
             self.assertEqual(result.returncode, 1)
+            self.assertFalse(report["clients"]["Antigravity CLI"]["plugin_present"])
+            self.assertTrue(
+                any("Antigravity" in p and "plugin" in p for p in report["problems"])
+            )
+            self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
+
+    def test_antigravity_plugin_no_plugins_text_is_reported_not_present(self) -> None:
+        """D2: the real ``agy`` CLI (v1.1.19) prints plain text, not JSON,
+        with exit 0, when no plugins are imported at all: ``No imported
+        plugins.``. Before the D2 fix, `_run_json` returned None for this
+        non-JSON output, so `_antigravity_plugin_present` silently *skipped*
+        the check -- exactly when the plugin is genuinely missing. This must
+        be reported as "not present", not skipped."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            log = self._write_agy_cli(home, no_plugins_text=True)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("plugin_present", report["clients"]["Antigravity CLI"])
             self.assertFalse(report["clients"]["Antigravity CLI"]["plugin_present"])
             self.assertTrue(
                 any("Antigravity" in p and "plugin" in p for p in report["problems"])
