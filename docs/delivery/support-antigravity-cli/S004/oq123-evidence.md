@@ -1,56 +1,71 @@
 # S004 — OQ1/OQ2/OQ3 evidence
 
-Status: **BLOCKED**. Neither fork branch may be recorded.
+Status: **GAP branch, evidenced.** Hooks do not dispatch. OQ2 and OQ3 are moot for this story.
 
-## Why neither outcome can be recorded
+## Why earlier attempts were inconclusive, and what was wrong with them
 
-S004's story permits exactly two outcomes, Parity or Gap, and both require observation
-in a live interactive `agy` session:
+Every earlier probe used `HOME=$(mktemp -d)`, which creates a virgin **unauthenticated** profile,
+so `agy` stopped at a Google OAuth sign-in gate before any session existed. That was reported as
+an environmental blocker needing a human. It was an artifact of the isolation choice: the real
+profile at `~/.gemini/` is authenticated (`antigravity-cli/antigravity-oauth-token`) and `agy -p`
+answers with exit 0 and no prompt.
 
-- **Parity** needs the hook to dispatch, the stdin fields observed, and injected content
-  confirmed to reach the model's context.
-- **Gap** needs *no dispatch observed after a genuine interactive attempt*.
+## Method
 
-The blocker stops us before either observation is possible. A prior agent on this theme made
-a genuine interactive attempt — isolated `HOME`, `tmux` pty, no `-p` — and `agy` presented a
-**Google OAuth sign-in gate before any session, hook dispatch, or MCP listing surface was
-reachable**. Full transcript in `../S001/oq4-evidence.md`.
+Against the authenticated profile, fully reversible. The bundle was installed, its installed
+`hooks.json` temporarily replaced with a probe that appends `DISPATCHED`, the hook's stdin, and a
+filtered `env` dump to a file — so dispatch is proven independently of whether any output field
+renders. The original was restored and the plugin uninstalled afterwards.
 
-Being stopped at sign-in is **"cannot tell"**, not "no dispatch observed". Recording the Gap
-branch from this evidence would misstate what was seen, which is exactly what the story's
-evidence bar exists to prevent. Hence `blocked`.
+The probe `hooks.json` used the Antigravity single-object event schema and was accepted:
+`agy plugin validate` → `hooks : 1 processed`.
 
-Theme constraint 7 independently established that hooks do not fire under `agy -p` or
-`--input-format stream-json`, so there is no headless substitute for the observation.
+## Result — OQ1: no dispatch, in either mode
 
-## What WAS established without an interactive session
+```
+print mode
+  $ agy -p "reply with the word: probe"
+  probe                                   ← model answered, so a turn ran
+  probe file: absent                      ← NO DISPATCH
 
-- `plugins/recallum-memory/hooks.json` in the Antigravity single-object event schema is
-  accepted: `agy plugin validate plugins/recallum-memory` reports `hooks : 1 processed`,
-  with `skills : 2 processed` and `mcpServers : 1 processed` unchanged.
-- The hook command resolves the plugin root from `PLUGIN_ROOT` / `GROK_PLUGIN_ROOT` /
-  `CLAUDE_PLUGIN_ROOT` and, when none resolves, consumes stdin and exits 0 harmlessly.
-  OQ3 is unresolved, so no new Antigravity-specific variable was invented — a wrong constant
-  that silently never matches would be worse than none.
-- `recallum_hook.py` was deliberately NOT given an Antigravity branch: OQ2 (the tool-name
-  prefix) is unresolved, and guessing it would ship a constant that never matches.
-- Real `agy` v1.1.19 facts confirmed: `agy plugin list --json` prints `No imported plugins.`
-  (plain text, exit 0) when empty; after install it returns JSON with
-  `imports[].name = "recallum-memory"` and `components: ["skills","mcpServers"]`.
+interactive mode, via a pty (script -qec), authenticated
+  $ script -qec "agy -i 'reply with the word probe then exit'"
+  TUI initialised; conversation created ("Resume with -c (or command below):")
+  probe file: absent                      ← NO DISPATCH
 
-## Open risk this creates — needs a decision before the branch is merged
+~/.gemini/antigravity-cli/cli.log
+  no hook entries at all — no dispatch record AND no parse error,
+  so the hooks.json was valid and simply never invoked
+```
 
-Shipping `hooks.json` flips `agy plugin validate` from `hooks : skipped (not found)` to
-`hooks : 1 processed`. If the hook never actually fires, that line tells a user hook parity
-works when it may not. A green indicator that lies is worse than an absent one.
+A session genuinely existed in the interactive run — the TUI initialised and a resumable
+conversation was created — and the `SessionStart` hook still did not fire.
 
-Options: hold `hooks.json` until OQ1 is answered; or ship it with an explicit doc note in
-S005 stating that validation acceptance is not evidence of dispatch. **Not decided here.**
+This meets the story's Gap evidence bar: no dispatch observed after a genuine interactive
+attempt, in an authenticated profile, with a valid installed `hooks.json`.
 
-## What unblocks this
+Theme constraint 7 is therefore **confirmed rather than superseded**: it reported that hooks do
+not fire under `agy -p`, and that holds even once authentication is not a factor.
 
-A human with a browser and a Google account, completing sign-in in an interactive `agy`
-session, then observing whether a `SessionStart` hook dispatches — and if it does, which of
-`injectSteps` / `ephemeralMessage` / `userMessage` / `systemMessage` / `decision` injects
-model-visible text (OQ1), what tool-name prefix the MCP tools appear under (OQ2), and which
-environment variable identifies the plugin root (OQ3).
+## OQ2 and OQ3 — moot for this story
+
+- **OQ3** (which env var identifies the plugin root) can only be answered from inside a running
+  hook process. No hook process is ever created, so there is nothing to observe.
+- **OQ2** (the MCP tool-name prefix) requires recallum's MCP tools to be loaded. Per S001's OQ4
+  result, the bundle config is not honoured at runtime, so that needs a native config entry with
+  a **real API key** — out of scope here, and not something to do without the owner's say-so.
+
+Neither is needed for the Gap branch: with no hook process, `recallum_hook.py` needs no
+Antigravity detection branch and no tool-prefix constant. The absence of both is now the
+correct implementation, not an omission.
+
+## Consequence for the shipped `hooks.json`
+
+The bundle's `hooks.json` validates (`hooks : 1 processed`) but is inert. It should either be
+withdrawn, or kept with the documentation stating plainly — as `docs/clients.md` now does — that
+validation acceptance is not dispatch evidence. **This is a decision for the repository owner.**
+
+## Environment restored
+
+Original `hooks.json` restored, plugin uninstalled, native config diffed identical to its
+pre-experiment snapshot, temporary files removed.

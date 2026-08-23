@@ -1,99 +1,72 @@
-# OQ4 probe evidence — S001
+# S001 — OQ4 evidence
 
-## Outcome
+Status: **RESOLVED — NOT HONOURED.**
 
-**BLOCKED** (not honoured / not honoured / inconclusive — none recorded).
+## The question
 
-This is deliberately not "inconclusive" as a story outcome. The story's AC3(c)
-sets an evidence bar for "inconclusive": at least one genuine interactive-mode
-attempt, a transcript, and a named technical blocker. This agent could not
-complete that attempt far enough to observe the running CLI's active MCP
-servers at all — the attempt was stopped by an earlier gate (sign-in), not by
-reaching and failing at the MCP-listing surface. Recording "inconclusive"
-would overstate what was actually tried. The honest state is: this needs a
-human at a real terminal with a Google account to get past sign-in and
-finish the probe.
+Does a plugin-carried `mcp_config.json` get honoured at runtime? This decides whether the
+native MCP registration in S002 is belt-and-braces or the only working path.
 
-## What was attempted (transcript)
+## Why earlier attempts failed, and what was wrong with them
 
-All commands ran with an isolated `HOME` (`$(mktemp -d)`), never the
-operator's real `$HOME`/`~/.gemini/`.
+Every earlier probe used `HOME=$(mktemp -d)` to avoid touching the developer's real
+configuration. That creates a **virgin, unauthenticated profile**, so `agy` presented a Google
+OAuth sign-in gate before any session or MCP surface was reachable. That gate was reported
+three times as an environmental blocker requiring a human.
 
-1. **Isolation check.**
-   `HOME=$QA_HOME agy plugin list` → `No imported plugins.` Confirms
-   `$QA_HOME/.gemini` started empty, per the QA plan's step 1.
+It was an artifact of the isolation choice, not a property of `agy`. The real profile at
+`~/.gemini/` holds `antigravity-cli/antigravity-oauth-token` and answers `agy -p` with exit 0
+and no prompt. The experiment was runnable all along.
 
-2. **Bundle install, no native config.**
-   `HOME=$QA_HOME agy plugin install plugins/recallum-memory` from repo root
-   → exit 0, printed `skills: 2 processed`, `mcpServers: 1 processed`.
-   `test ! -f "$QA_HOME/.gemini/config/mcp_config.json"` → confirmed absent
-   (no native registration present). The bundle's `mcp_config.json` was
-   copied verbatim to
-   `$QA_HOME/.gemini/config/plugins/recallum-memory/mcp_config.json`.
+## Method
 
-3. **Genuine interactive-mode attempt.**
-   Launched `HOME=$QA_HOME agy` (no `-p`, no `--input-format stream-json`)
-   inside a real pty via `tmux new-session -d -s oq4probe "HOME=$QA_HOME agy"`
-   — a true interactive terminal session, not headless/print mode. Captured
-   with `tmux capture-pane`. Output:
+Run against the authenticated profile, fully reversible, with no real credential involved —
+the bundle carries only the placeholder `Bearer <token>`, and `agy plugin install` never writes
+`~/.gemini/config/mcp_config.json` (independently confirmed).
 
-   ```
-   Welcome to the Antigravity CLI. You are currently not signed in.
+The native config was snapshotted before and diffed after; the plugin was uninstalled afterwards.
 
-   Select login method:
-   > 1. Google OAuth
-     2. Use a Google Cloud project
-   ```
+## Result
 
-   Selected option 1 (`tmux send-keys "1" Enter`). Output advanced to:
+```
+1. baseline, no plugin installed
+   $ agy mcp list
+   NAME       TYPE   STATUS   COMMAND/URL
+   codegraph  stdio  enabled  codegraph serve --mcp
 
-   ```
-   Open the URL below in your browser:
-   https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=...
-   (Google OAuth authorization URL, full scope list, PKCE challenge, state)
+2. install the bundle
+   $ agy plugin install plugins/recallum-memory
+   ✔ skills      : 2 processed
+   ✔ mcpServers  : 1 processed
 
-   After authenticating, copy the code displayed in the browser and paste it
-   below:
-   authorization code...
-   ```
+3. the question
+   $ agy mcp list
+   NAME       TYPE   STATUS   COMMAND/URL
+   codegraph  stdio  enabled  codegraph serve --mcp        ← recallum absent
 
-   No further command was sent past this point.
+4. independent confirmation, via the model's own view
+   $ agy -p "List the names of the MCP servers you currently have tools from."
+   codegraph
 
-## Named technical blocker
+5. the plugin IS registered, with the component recognised
+   $ agy plugin list --json
+   [('recallum-memory', ['skills', 'mcpServers', 'hooks'])]
+```
 
-Interactive `agy` requires completing a Google OAuth device-code flow (or a
-GCP project login) before any session — and therefore any in-session MCP
-server listing surface — becomes reachable. Completing it requires a human
-opening the printed URL in a real browser, authenticating with a Google
-account, and pasting back an authorization code. This agent has no browser
-and no Google account credentials to supply, and the isolated `HOME` used for
-this probe deliberately starts with zero cached credentials (per the
-isolation contract in the QA plan — reusing the operator's real
-`~/.gemini/` credentials would defeat the "bundle alone, no native config"
-precondition the OQ4 finding depends on, and would risk mutating real state).
-There is no non-interactive/headless substitute for this login step that was
-found, and the QA plan's own evidence bar (theme.md constraint 7 discussion,
-non-blocking wording defect aside) already anticipates that this class of
-check needs a human-operated terminal.
+## Conclusion
 
-Consequence: whether `recallum` appears among "active MCP servers" once
-signed in was never reached and was not observed either way.
+`agy` registers the plugin and recognises its `mcpServers` component at install time, but the
+bundle-carried server **does not reach the runtime MCP server list**. `mcpServers : 1 processed`
+is install-time acceptance, not runtime propagation — the same validation-versus-runtime
+distinction that bit this theme twice elsewhere.
 
-## Escalation
+**Consequence for the theme.** The brief's decided model was "plugin bundle + native MCP", with
+the native write as redundancy in case the plugin failed. That is backwards. The bundle supplies
+the skills; the native `~/.gemini/config/mcp_config.json` write in S002 is **the only path that
+makes the server available**. S002 is load-bearing, and ADR 0019's provisional reading is now
+directly proven.
 
-This blocks S001 AC3 (the OQ4 probe requirement) on a human prerequisite:
-a person with a Google account, a browser, and a real interactive terminal
-must run steps 1-2 above (already scripted and verified reproducible) and
-then complete sign-in inside the `tmux`/interactive `agy` session (or a plain
-terminal) to reach an in-session command that lists active MCP servers
-(discoverable via `/help` inside the session, per the QA plan's procedure),
-and record honoured / not honoured / inconclusive with that evidence.
+## Environment restored
 
-## Isolation and cleanup
-
-- `$QA_HOME` was a fresh `mktemp -d`, never the operator's `$HOME`.
-- `tmux kill-server` and `rm -rf "$QA_HOME"` were run after the attempt.
-- `git status --porcelain` at repo root after cleanup shows no changes
-  outside this story's diff (`plugins/recallum-memory/mcp_config.json`,
-  `plugins/recallum-memory/tests/test_plugin.py`, and this file) — the
-  operator's real `~/.gemini/` was never touched.
+Plugin uninstalled; `~/.gemini/config/mcp_config.json` diffed identical to the pre-experiment
+snapshot; temporary files removed.
