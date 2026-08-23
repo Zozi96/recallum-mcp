@@ -74,12 +74,13 @@ Feature: Document Antigravity CLI support and update client-list strings
 
   Rule: README.md lists Antigravity CLI as a supported client
 
-    Scenario: README.md's client table gains an Antigravity CLI row
+    Scenario: README.md's prose client enumeration names Antigravity CLI
       Given README.md as published
-      When a reader looks at the client list/table naming Codex, Claude Code,
-        Grok Build, and Cursor
-      Then the table contains a row for Antigravity CLI
-      And that row has values in the same columns as the other four rows
+      When a reader looks at the prose that enumerates supported clients
+        (Codex, Claude Code, Grok Build, and Cursor)
+      Then that enumeration also names Antigravity CLI
+      And the pointer to docs/clients.md for setup detail covers Antigravity
+        CLI the same way it covers the other four clients
 
   Rule: Plugin metadata mentions Antigravity CLI wherever the other clients are enumerated
 
