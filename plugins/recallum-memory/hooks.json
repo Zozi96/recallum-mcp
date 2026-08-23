@@ -1,0 +1,11 @@
+{
+  "SessionStart": {
+    "hooks": [
+      {
+        "type": "command",
+        "command": "p=\"${PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; y=\"$(command -v python3 || command -v python)\"; if [ -n \"$p\" ] && [ -n \"$y\" ] && [ -f \"$p/hooks/recallum_hook.py\" ]; then exec \"$y\" \"$p/hooks/recallum_hook.py\" session; fi; cat >/dev/null 2>&1; exit 0",
+        "timeout": 15
+      }
+    ]
+  }
+}

@@ -1,0 +1,63 @@
+# QA plan — S002: Add `agy` as an installer target with native MCP registration
+
+## Risks and cheapest detection layer
+
+1. **Critical — cleartext key mishandled (wrong mode, no backup, or leaked into test output/CI logs).** Constraint 3 forces a literal, unrecoverable secret on disk. Unit-test the Python merge helper's permission/backup logic in isolation; integration-test `mode 0600` and a retained, distinct backup file after `./install.sh --target antigravity` runs against a fake `$HOME`. Never assert on the real key string — see sentinel-token technique below.
+2. **Critical — installer writes/reads `.agents/mcp_config.json` (workspace scope).** Explicitly out of scope per story, but `.agents/` exists, is tracked, and is not gitignored — a regression here commits a secret. Integration-test: assert the file's absence after every fixture invocation, and a poisoned pre-existing `.agents/mcp_config.json` is untouched and unread (see poisoned-fixture technique below).
+3. **High — merge clobbers pre-existing `mcpServers` entries or malformed JSON in `~/.gemini/config/mcp_config.json`.** Unit-test the JSON merge function directly (Python, no subprocess) with a pre-existing file containing an unrelated server key and with invalid JSON; integration-test via full installer run that other servers survive.
+4. **High — idempotency false positive/negative.** Re-running with unchanged target state must report "matching" (mirroring `claude_native_mcp_state`), not rewrite the file (mode/mtime would still be assertable, but the operative behavior is no spurious backup). Unit-test the state-comparison predicate directly; integration-test two consecutive installer runs and assert the second produces no new backup file and no diff report.
+5. **High — `has_agy` detection and `--target` gating regress other targets or silently no-op.** Unit-test `has_agy` shares the exact `command -v` pattern as `has_codex`/`has_claude`. Integration-test `--target auto`/`--target both` include Antigravity only when the fake `agy` is on `PATH`, and that `codex`/`claude`/`grok`/`cursor` behavior is unchanged when `agy` is added (regression, not just addition).
+6. **Medium — URL validation bypassed for the Antigravity path.** The existing Python validator (L163-181-ish) is shared, but confirm the Antigravity call site actually routes through it. Unit-test is not meaningful here since validation is shared and already covered by S001/general install tests; integration-test one non-HTTPS/non-loopback URL and one wrong-path URL against `--target antigravity`, asserting non-zero exit and no file written, before any other target-specific write occurs.
+7. **Medium — missing-`agy` path leaves partial state.** Integration-test: with `agy` absent from fixture `PATH`, exit non-zero, error names `agy`, and no `~/.gemini/config/mcp_config.json` (and no `.agents/mcp_config.json`) is created or modified.
+8. **Medium — summary block omits or duplicates the Antigravity line.** Integration-test stdout of a successful run contains exactly one Antigravity summary line; a run where `agy` was not detected omits it.
+9. **Low — HOME isolation leak touches the developer's real `~/.gemini/`.** Not a product risk but a test-harness risk that invalidates every other check if it fails. Enforced structurally (see HOME isolation below) plus a `git status --porcelain` assertion after the full suite, matching the precedent's evidence discipline.
+
+## Fixtures
+
+- **`FAKE_AGY`** (new, add to `plugins/recallum-memory/tests/test_plugin.py` alongside `FAKE_CODEX`/`FAKE_CURSOR`/`FAKE_CLAUDE`/`FAKE_GROK` at L57/L90/L123/L194): a `#!/usr/bin/env python3` script that:
+  - logs every invocation to `FAKE_CLI_LOG` (same convention as the other fakes).
+  - on `["plugin", "install", <bundle_dir>]`: succeeds (exit 0), optionally writes a marker file under `$FAKE_AGY_INSTALL_DIR` so the test can assert the bundle path argument was correct.
+  - on `["plugin", "list"]`: prints JSON with `imports[].name` and `components[]` shaped per constraint 4, gated by `FAKE_AGY_PLUGIN` env var (`"installed"` vs default/missing), mirroring the `FAKE_CLAUDE_PLUGIN`/`FAKE_GROK_PLUGIN` pattern.
+  - unknown subcommands succeed quietly (matches `FAKE_CURSOR`'s "succeed quietly" fallback) so unrelated installer probes stay green.
+- **Sentinel token**: use the literal string `SENTINEL-NOT-A-REAL-KEY-<testname>` (or reuse the existing `TEST_RECALLUM_KEY`/`URL` constants' pattern at the top of `test_plugin.py`) as the resolved API key in every fixture. Never generate or embed a plausible-looking credential. Assertions on file contents check *structure* (`Authorization` header present, starts with `"Bearer "`, mode `0600`) and *presence of the sentinel string*, never log the sentinel to stdout/stderr — read it back via `Path.read_text()` inside the test process only, not via a subprocess whose output could be captured by CI. This matches the repo's existing discipline ("never printed") in `resolve_api_key`/`ensure_claude_native_mcp`.
+- **Poisoned `.agents/mcp_config.json` fixture**: before invoking the installer, write a malformed/pre-existing `.agents/mcp_config.json` into the fixture's CWD (not HOME) containing a decoy `Authorization: Bearer DECOY-DO-NOT-USE` and invalid trailing content. After the run, assert byte-for-byte the file is unchanged (`Path.read_bytes()` equality) and that `FAKE_CLI_LOG` and stdout contain no occurrence of `DECOY-DO-NOT-USE` — this proves non-read, not just non-write, and discharges the spec-review's carried-forward gap on the "does not read secret values" clause.
+- **Pre-existing native config fixture**: seed `$HOME/.gemini/config/mcp_config.json` with an unrelated `mcpServers.other-tool` entry before the run; assert after the run that `other-tool` still exists (merge-preservation) and a backup file (e.g. `mcp_config.json.bak` or timestamped, whatever the implementation names it — the test asserts *a distinct backup file exists and its content equals the pre-run content*, not a specific filename convention) is present.
+
+## HOME isolation
+
+Every test in this suite must set `HOME` (and `XDG_CONFIG_HOME`, matching `store_env_key_files`'s fallback) to a fresh `tempfile.mkdtemp()`-rooted path in the subprocess env dict passed to `subprocess.run`, exactly as the existing Claude/Grok tests do (`test_plugin.py` L1294-1299, L2435). Never rely on `unittest.mock.patch.dict(os.environ, ...)` for `HOME` alone, since `install.sh` and the fake CLIs run as subprocesses that read the real process environment, not the mocked in-process one — the env dict must be constructed explicitly and passed via `subprocess.run(..., env=fixture_env)`. `PATH` in that same fixture env must prepend only the fixture's fake-CLI directory, so a real `agy` (or `claude`/`codex`) elsewhere on the developer's `PATH` cannot leak in. Assert `git status --porcelain` is empty after the full test module runs (mirrors precedent's evidence discipline) as the final structural guard that no test escaped its fake `$HOME`/CWD.
+
+## CI vs local divergence
+
+The real `agy` v1.1.19 at `/home/zozi/.local/bin/agy` MUST NOT be required or invoked by any automated test — CI has no `agy` binary. All `install_for_antigravity` tests run exclusively against `FAKE_AGY` on a fixture `PATH`; no test conditionally skips based on `shutil.which("agy")`. If a future test wants to validate against the real binary (e.g. confirming `agy plugin list` JSON shape still matches `FAKE_AGY`'s assumptions), that is a separate, explicitly-marked local-only manual check (see below), never part of the `python3 -m unittest` target CI runs.
+
+## Checks by layer
+
+- **Unit (pure Python, no subprocess, extracted the way `_load_doctor()` does at test_plugin.py L20-33):** JSON-merge function preserves unrelated keys; state-comparison predicate returns `matching`/`different`/`missing` correctly for the Antigravity shape; backup-naming/permission logic sets `0600` on both new file and backup. These are cheapest here because the logic is pure JSON transformation independent of `agy` or the filesystem's real HOME.
+- **Integration (subprocess `./install.sh --target ...` against fixture HOME/PATH, `unittest` in `test_plugin.py`):** all 9 risks above except #9 are proven end-to-end through the actual bash+python installer path, since the risk is in the wiring (flag parsing, target gating, file writes under real permission calls, summary text) not in isolable pure logic. This is the layer the story's acceptance criteria are written against, so it is also the layer stage 8 evidence must be captured at.
+- **No end-to-end/live layer**: this story has no network or live-CLI dependency (`agy` is not invoked for real), so there is no end-to-end tier beyond the integration layer above — pushing further would only add flakiness without proving anything the integration tests don't already cover.
+
+## Operational done criteria (stage 8 `pass` requires all of)
+
+1. `cd plugins/recallum-memory && python3 -m unittest tests.test_plugin -v` (or the project's existing test invocation) passes with zero failures/errors, including all new `AntigravityInstallTests` (or equivalently named) cases covering: agy-present success, agy-absent failure, `--target auto` inclusion, `--target both`, mode `0600` on the written file, backup-file-exists-and-matches-prior-content, merge-preserves-unrelated-server, idempotent re-run (no new backup, "matching" reported), invalid-URL rejection before any write, `.agents/mcp_config.json` absence after every fixture invocation, poisoned `.agents/mcp_config.json` byte-unchanged and its decoy string absent from `FAKE_CLI_LOG`/captured stdout, and summary-line presence/absence.
+2. `git status --porcelain` run from repo root immediately after the test module completes is empty — no test wrote outside its fixture HOME/tmp dirs.
+3. `grep` of the full captured test stdout/stderr (or CI log) for the literal sentinel token string returns zero matches outside the test process's own in-memory assertions (i.e., the sentinel is never `print()`ed or passed to a subprocess whose output is captured verbatim) — confirms no credential-shaped string reaches CI logs.
+4. No test is skipped, xfail, or conditionally gated on `shutil.which("agy")` finding a real binary — `grep -n "skipIf\|skipUnless" tests/test_plugin.py` for the new test class returns nothing tied to `agy` presence.
+5. Evidence captured for the stage-8 report: full command line, exit code, and the specific assertions listed in (1) confirmed present in test output (test names visible via `-v`).
+
+Any retried, flaky, or environment-skipped case in this list is fail/block, not pass.
+
+## Not automatable / needs manual evidence
+
+- **Real `agy` v1.1.19 compatibility**: whether the real binary's `agy plugin install`/`agy plugin list` output actually matches `FAKE_AGY`'s assumed JSON shape (constraint 4) is not re-verified by this suite — it was verified once by the analyst/theme brief against the live install. A manual spot-check (`agy plugin install <bundle>` then `agy plugin list` against the real binary, one-time, on a developer machine with a disposable `$HOME`) is recommended before this story is marked delivered, but is not part of the automated gate. Record the transcript, not a screenshot, and scrub any token before attaching.
+- **Filesystem permission enforcement on non-POSIX or unusual mount options**: `0600` semantics assume a standard POSIX filesystem; no automated check covers network-mounted or exotic-filesystem HOME directories.
+- **Interactive/manual confirmation that the written config is actually read by a live `agy` session**: covered by S001's OQ4, not this story; this plan only proves the file this story writes has the right shape, mode, and merge behavior, not runtime consumption.
+
+## Deliberate coverage gaps
+
+- Doctor-side verification of the Antigravity entry (S003, out of scope for this story).
+- Hook-runtime behavior (S004, out of scope).
+- Docs/string content (S005, out of scope).
+- Workspace-scope (`.agents/`) *registration* — deliberately not built per story's out-of-scope section; only the negative guard (non-write, non-read) is tested, not a working workspace-scope path, since none exists.
+- Load/concurrency testing of simultaneous installer runs — the story implies no concurrent-invocation requirement (single operator, single run), so no concurrency test is written; only ordinary re-run idempotency (#4 above) is covered.
+- Cross-platform (non-Linux) path/permission behavior — the theme brief's verified environment is Linux only; no Windows/macOS-specific test is written.
