@@ -65,6 +65,34 @@ The bundle's `hooks.json` validates (`hooks : 1 processed`) but is inert. It sho
 withdrawn, or kept with the documentation stating plainly — as `docs/clients.md` now does — that
 validation acceptance is not dispatch evidence. **This is a decision for the repository owner.**
 
+## Constraint 5 is unverified at the reachable layers
+
+Theme constraint 5 claims a Claude-style array-of-groups `SessionStart` (`{"SessionStart":[{"hooks":[...]}]}`)
+is rejected by `agy plugin validate`/`install` with
+`failed to parse hooks.json: json: cannot unmarshal array into Go struct field .SessionStart`.
+Re-tested directly against real `agy` v1.1.19 (isolated `HOME=$(mktemp -d)`, unauthenticated —
+sufficient for `plugin validate`/`install`, which do not require a session) with a minimal probe
+bundle:
+
+```
+hooks.json = {"SessionStart":[{"hooks":[{"type":"command","command":"true","timeout":15}]}]}   (array)
+  $ agy plugin validate <probe>
+  hooks : 1 processed        ← ACCEPTED, no parse error
+
+hooks.json = {"SessionStart":{"hooks":[{"type":"command","command":"true","timeout":15}]}}     (object, ours)
+  $ agy plugin install <dir>  (isolated HOME)
+  hooks : 1 processed        ← ACCEPTED
+```
+
+Both schema forms are accepted by both `plugin validate` and `plugin install`; `cannot unmarshal`
+never appears at either layer. Whatever produces the Go unmarshal error, if it exists at all, is
+not observable from `validate`/`install` — it could only be the runtime hook-loading path at
+session start, which per OQ1 above is never reached. This is the same class of error as the
+OAuth-wall artifact: a claim recorded from an isolation choice (validate/install only, no
+interactive dispatch) that does not hold up to direct re-verification. It changes nothing about
+the story's outcome — the Gap branch already does not depend on constraint 5 — but the theme brief
+should not be treated as settled fact for this constraint without a runtime reproduction.
+
 ## Environment restored
 
 Original `hooks.json` restored, plugin uninstalled, native config diffed identical to its

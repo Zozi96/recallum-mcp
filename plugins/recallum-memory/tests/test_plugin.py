@@ -1402,6 +1402,102 @@ class AntigravityMcpConfigTests(unittest.TestCase):
             )
 
 
+class AntigravityHookGapTests(unittest.TestCase):
+    """S004 (Gap branch): `SessionStart` hooks never dispatch under `agy`.
+
+    See docs/delivery/support-antigravity-cli/S004/oq123-evidence.md — an
+    installed, validating `hooks.json` produced no dispatch in either print
+    or genuine interactive mode against an authenticated profile. Skills are
+    plugin content, independent of `hooks.json`, so the user is not worse
+    off: this class pins that skill loading does not regress, and that the
+    schema-rejection theme constraint 5 claimed does not hold at the layers
+    reachable in tests.
+    """
+
+    @staticmethod
+    def _validate(directory: Path) -> str:
+        result = subprocess.run(
+            [AGY, "plugin", "validate", str(directory)],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result.stdout + result.stderr
+
+    @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
+    def test_skills_and_mcp_servers_unaffected_by_hooks_json_presence(self) -> None:
+        # With the shipped (inert) hooks.json present.
+        with_hooks_output = self._validate(PLUGIN_ROOT)
+        self.assertIn("skills", with_hooks_output)
+        self.assertIn("2 processed", with_hooks_output)
+        self.assertIn("mcpServers", with_hooks_output)
+        self.assertIn("hooks", with_hooks_output)
+
+        # Same bundle with hooks.json removed: skills/mcpServers must report
+        # identically, proving the hook file is not load-bearing for them.
+        with tempfile.TemporaryDirectory() as directory:
+            copy_root = Path(directory) / "recallum-memory"
+            shutil.copytree(
+                PLUGIN_ROOT,
+                copy_root,
+                ignore=shutil.ignore_patterns("tests", "__pycache__"),
+            )
+            (copy_root / "hooks.json").unlink()
+            without_hooks_output = self._validate(copy_root)
+
+        self.assertIn("skills", without_hooks_output)
+        self.assertIn("2 processed", without_hooks_output)
+        self.assertIn("mcpServers", without_hooks_output)
+
+    @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
+    def test_validate_does_not_discriminate_array_vs_object_hooks_schema(self) -> None:
+        # Theme constraint 5 claims a Claude-style array-of-groups
+        # SessionStart is rejected with a Go unmarshal error. Verified
+        # against real agy v1.1.19: both the array form and the shipped
+        # object form are ACCEPTED by `plugin validate` and `plugin
+        # install`; no parse error is observed at either layer. See
+        # docs/delivery/support-antigravity-cli/S004/oq123-evidence.md,
+        # "Constraint 5 is unverified at the reachable layers".
+        object_schema = {
+            "SessionStart": {
+                "hooks": [{"type": "command", "command": "true", "timeout": 15}]
+            }
+        }
+        array_schema = {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "true", "timeout": 15}]}
+            ]
+        }
+        for name, schema in (("object", object_schema), ("array", array_schema)):
+            with self.subTest(schema=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    probe = Path(directory) / "probe"
+                    probe.mkdir()
+                    (probe / "plugin.json").write_text(
+                        GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
+                    (probe / "hooks.json").write_text(
+                        json.dumps(schema), encoding="utf-8"
+                    )
+                    output = self._validate(probe)
+                    self.assertNotIn("cannot unmarshal", output, output)
+                    self.assertIn("hooks", output)
+                    self.assertIn("1 processed", output)
+
+    def test_recallum_hook_has_no_antigravity_branch_or_prefix_constant(self) -> None:
+        # Deliberate absence, not an omission: with no SessionStart dispatch
+        # ever observed (see S004/oq123-evidence.md), an Antigravity branch
+        # in _tool()/_lookup_hint()/_emit() or an ANTIGRAVITY_TOOL_PREFIX
+        # constant can never be exercised or matched at runtime. Adding one
+        # anyway is the exact failure this theme spent effort avoiding — a
+        # future contributor "fixing" a gap that isn't fixable this way.
+        # Re-adding requires new dispatch evidence superseding that file.
+        source = HOOK.read_text(encoding="utf-8")
+        self.assertNotIn("ANTIGRAVITY", source)
+        self.assertNotIn("antigravity", source.lower())
+
+
 class InstallerTestCase(unittest.TestCase):
     def _fake_clis(
         self,
