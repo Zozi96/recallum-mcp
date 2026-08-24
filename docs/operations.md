@@ -67,14 +67,19 @@ are not enforcement by themselves:
 | `RECALLUM__BOUNDARY__REQUEST__PASSWORD_MAX_CHARS` | `256` | Password ceiling |
 | `RECALLUM__BOUNDARY__RATE__*` | `30/300`, `5/300`, `60/60`, `10000` | Login IP, login IP-account, invalid MCP, and bucket budgets |
 
-For example, list settings use JSON in the environment:
+This VPS (Dokploy + Traefik on `dokploy-network`) uses the reviewed values
+below. MCP `Host` is `recallum.zozbit.com`; the web UI origin is
+`https://memory.zozbit.com`. Both hosts are allowlisted because Traefik may
+present either name to the same app. Do not set
+`RECALLUM__RUNTIME__MCP_STATELESS_HTTP` to unlock extra workers.
 
 ```bash
 RECALLUM__ENVIRONMENT=production
-# Replace memory.example.com and 10.42.0.0/16 with the reviewed deployment values.
-RECALLUM__BOUNDARY__MCP__ALLOWED_HOSTS='["memory.example.com"]'
-RECALLUM__BOUNDARY__MCP__ALLOWED_ORIGINS='["https://memory.example.com"]'
-RECALLUM__BOUNDARY__PROXY__TRUSTED_CIDRS='["10.42.0.0/16"]'
+RECALLUM__RUNTIME__WORKERS=1
+RECALLUM__WEB__ALLOWED_ORIGIN=https://memory.zozbit.com
+RECALLUM__BOUNDARY__MCP__ALLOWED_HOSTS='["recallum.zozbit.com","memory.zozbit.com"]'
+RECALLUM__BOUNDARY__MCP__ALLOWED_ORIGINS='["https://recallum.zozbit.com","https://memory.zozbit.com"]'
+RECALLUM__BOUNDARY__PROXY__TRUSTED_CIDRS='["10.0.1.0/24"]'
 RECALLUM__BOUNDARY__REQUEST__GENERAL_BODY_BYTES=1048576
 RECALLUM__BOUNDARY__REQUEST__LOGIN_BODY_BYTES=16384
 RECALLUM__BOUNDARY__REQUEST__PASSWORD_MAX_CHARS=256
@@ -193,12 +198,38 @@ ALTER SCHEMA public OWNER TO recallum;
 ```
 
 **2. Recallum environment** (connect as the `recallum` app role, **never**
-`recallum_admin` — the admin is a superuser and would fail readiness):
+`recallum_admin` — the admin is a superuser and would fail readiness).
+Production startup **rejects** the process unless the MCP allowlists, trusted
+proxy CIDRs, request ceilings and rate budgets are all explicit. Set them on
+the Recallum **Application** (not in `deploy/dokploy-compose.yml`). Clients
+must use `https://recallum.zozbit.com/mcp/` — never configure `/mcp`.
 
 ```
 RECALLUM__DATABASE__URL=postgresql+asyncpg://recallum:CHANGE_ME_APP@<pg-internal-host>:5432/recallum
 RECALLUM__OLLAMA__URL=http://<ollama-internal-host>:11434
+RECALLUM__ENVIRONMENT=production
+RECALLUM__RUNTIME__WORKERS=1
+RECALLUM__WEB__ALLOWED_ORIGIN=https://memory.zozbit.com
+RECALLUM__BOUNDARY__MCP__ALLOWED_HOSTS=["recallum.zozbit.com","memory.zozbit.com"]
+RECALLUM__BOUNDARY__MCP__ALLOWED_ORIGINS=["https://recallum.zozbit.com","https://memory.zozbit.com"]
+RECALLUM__BOUNDARY__PROXY__TRUSTED_CIDRS=["10.0.1.0/24"]
+RECALLUM__BOUNDARY__REQUEST__GENERAL_BODY_BYTES=1048576
+RECALLUM__BOUNDARY__REQUEST__LOGIN_BODY_BYTES=16384
+RECALLUM__BOUNDARY__REQUEST__PASSWORD_MAX_CHARS=256
+RECALLUM__BOUNDARY__RATE__LOGIN_IP_ATTEMPTS=30
+RECALLUM__BOUNDARY__RATE__LOGIN_IP_WINDOW_SECONDS=300
+RECALLUM__BOUNDARY__RATE__LOGIN_ACCOUNT_ATTEMPTS=5
+RECALLUM__BOUNDARY__RATE__LOGIN_ACCOUNT_WINDOW_SECONDS=300
+RECALLUM__BOUNDARY__RATE__INVALID_MCP_AUTH_ATTEMPTS=60
+RECALLUM__BOUNDARY__RATE__INVALID_MCP_AUTH_WINDOW_SECONDS=60
+RECALLUM__BOUNDARY__RATE__MAX_BUCKETS=10000
 ```
+
+`10.0.1.0/24` is the live `dokploy-network` overlay (Traefik is the trusted
+peer). Re-inspect that network after a Dokploy upgrade before changing it.
+`RECALLUM__RUNTIME__WORKERS` and `RECALLUM__WEB__ALLOWED_ORIGIN` currently
+default to the same values; set them explicitly so a future image default
+cannot silently diverge.
 
 **3. Migrations: nothing to configure.** The image migrates before it serves
 (see "Migrations" above), inside the Recallum container as the `recallum` role,
