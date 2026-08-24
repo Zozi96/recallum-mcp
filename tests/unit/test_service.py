@@ -708,6 +708,88 @@ async def test_recall_respects_limit():
     assert len(result.results) == 2
 
 
+async def test_recall_max_tokens_packs_prefix_without_mid_truncation():
+    from recallum.memory.token_budget import estimate_tokens
+
+    service, _, _ = make_service()
+    short = await service.remember(USER, content="bug root cause A", category="fact")
+    long_text = "preference filler " + ("x" * 200)
+    await service.remember(USER, content=long_text, category="preference")
+    budget = estimate_tokens(short.memory.content)
+    # debugging puts the fact first; budget fits only that full hit.
+    result = await service.recall(
+        USER,
+        query="bug root cause preference filler",
+        limit=10,
+        max_tokens=budget,
+        strategy="debugging",
+    )
+    assert [r.content for r in result.results] == ["bug root cause A"]
+    assert result.results[0].content == short.memory.content
+
+
+
+async def test_recall_without_max_tokens_limit_behaves_as_today():
+    service, _, _ = make_service()
+    for i in range(5):
+        await service.remember(USER, content=f"shared note {i}", category="fact")
+    limited = await service.recall(USER, query="shared note", limit=2)
+    assert len(limited.results) == 2
+
+
+async def test_recall_rejects_unknown_strategy_before_retrieval():
+    service, _, embedder = make_service()
+    with pytest.raises(MemoryValidationError, match="unknown strategy 'chaos'"):
+        await service.recall(USER, query="anything", strategy="chaos")
+    assert embedder.embedded_texts == []
+
+
+async def test_recall_debugging_strategy_orders_facts_before_preferences():
+    service, _, _ = make_service()
+    await service.remember(USER, content="prefers quiet logs for deploy", category="preference")
+    await service.remember(USER, content="deploy fails on missing env", category="fact")
+    result = await service.recall(
+        USER, query="deploy", limit=10, strategy="debugging"
+    )
+    categories = [r.category for r in result.results]
+    assert "fact" in categories and "preference" in categories
+    assert categories.index("fact") < categories.index("preference")
+
+
+async def test_recall_debugging_strategy_keeps_sole_preference_hit():
+    service, _, _ = make_service()
+    await service.remember(USER, content="unique preference about widgets", category="preference")
+    result = await service.recall(
+        USER, query="unique preference widgets", strategy="debugging"
+    )
+    assert [r.category for r in result.results] == ["preference"]
+
+
+async def test_context_max_tokens_reserves_profile_before_remainder():
+    """Profile token cost is subtracted first; a tight budget must not starve it."""
+    from recallum.memory.token_budget import estimate_tokens
+
+    service, _, _ = make_service()
+    pref = "always prefer quiet deploy logs"
+    await service.remember(USER, content=pref, category="preference", importance=9)
+    fact = "deploy fails on missing DATABASE_URL " + ("y" * 80)
+    await service.remember(USER, content=fact, category="fact", importance=5)
+
+    result = await service.context(
+        USER,
+        max_tokens=estimate_tokens(pref),
+        max_items=20,
+        max_chars=6000,
+        strategy="debugging",
+    )
+
+    profile_contents = [item.content for item in (*result.profile.static, *result.profile.dynamic)]
+    assert pref in profile_contents
+    group_contents = [item.content for group in result.groups for item in group.items]
+    assert fact not in group_contents
+    assert group_contents == []
+
+
 async def test_context_groups_by_category_and_truncates():
     service, _, _ = make_service()
     await service.remember(USER, content="prefiero oscuro", category="preference", importance=9)

@@ -143,6 +143,8 @@ class SearchMemoriesRequest(BaseModel):
     scope: Scope | None = None
     category: Category | None = None
     limit: StrictPositiveLimit | None = None
+    max_tokens: StrictPositiveLimit | None = None
+    strategy: Literal["coding", "debugging", "planning", "review", "architecture"] | None = None
 
 
 class SupersedeResponse(BaseModel):
@@ -267,6 +269,8 @@ def create_self_service_router(
         scope: Scope | None,
         category: Category | None,
         limit: int | None,
+        max_tokens: int | None = None,
+        strategy: str | None = None,
     ) -> RecallResult:
         return await memories.recall(
             current.user.id,
@@ -275,6 +279,8 @@ def create_self_service_router(
             scope=scope,
             category=category,
             limit=limit,
+            max_tokens=max_tokens,
+            strategy=strategy,
         )
 
     @router.get("/memories", response_model=ListResult)
@@ -331,6 +337,8 @@ def create_self_service_router(
             scope=body.scope,
             category=body.category,
             limit=body.limit,
+            max_tokens=body.max_tokens,
+            strategy=body.strategy,
         )
 
     @router.get(
@@ -372,6 +380,11 @@ def create_self_service_router(
         scope: Annotated[Scope | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
         limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
+        max_tokens: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
+        strategy: Annotated[
+            Literal["coding", "debugging", "planning", "review", "architecture"] | None,
+            Query(),
+        ] = None,
     ) -> RecallResult:
         # Query text must never be logged (URL query is itself a migration risk).
         response.headers["Deprecation"] = "true"
@@ -383,6 +396,8 @@ def create_self_service_router(
             scope=scope,
             category=category,
             limit=limit,
+            max_tokens=max_tokens,
+            strategy=strategy,
         )
 
     @router.post("/memories", response_model=RememberResult, status_code=201)

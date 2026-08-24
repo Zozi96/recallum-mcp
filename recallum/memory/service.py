@@ -38,6 +38,12 @@ from recallum.db.repositories.memory_repo import (
 )
 from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE, record_sanitized_failure
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
+from recallum.memory.token_budget import (
+    estimate_tokens,
+    pack_by_token_budget,
+    reorder_by_strategy,
+    validate_strategy,
+)
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.context import SessionContextBudget
 from recallum.memory.language import LANGUAGE_WARNING, looks_non_english
@@ -618,8 +624,18 @@ class MemoryService:
         scope: str | None = None,
         category: str | None = None,
         limit: StrictPositiveLimit | None = None,
+        max_tokens: StrictPositiveLimit | None = None,
+        strategy: str | None = None,
     ) -> RecallResult:
-        """Hybrid retrieval with RRF fusion; degrades to textual on embed failure."""
+        """Hybrid retrieval with RRF fusion; degrades to textual on embed failure.
+
+        ``max_tokens`` packs a prefix of the ranked hits by a local estimate
+        (``ceil(chars/4)`` plus a small per-hit overhead). That count is an
+        estimate for server-side packing, not the client model's tokenizer.
+        ``strategy`` stably reorders already-fused candidates by category
+        priority and never drops a hit that still fits the budget.
+        """
+        validated_strategy = validate_strategy(strategy)
         normalized_query = self._normalize_content(query)
         normalized_project = self._normalize_project(project)
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
@@ -627,6 +643,7 @@ class MemoryService:
         effective_limit = self._clamp_limit(
             limit, self._limits.recall_default_limit, self._limits.recall_max_limit
         )
+        effective_max_tokens = self._clamp_max_tokens(max_tokens)
         candidate_limit = min(MAX_CANDIDATES, max(effective_limit * 3, 10))
 
         mode = "hybrid"
@@ -651,9 +668,20 @@ class MemoryService:
         fused = self._reciprocal_rank_fusion(
             list(pools.vector), list(pools.text), list(pools.trigram)
         )
+        ordered = reorder_by_strategy(
+            fused,
+            validated_strategy,
+            category_of=lambda pair: pair[0].memory.category,
+        )
+        packed = pack_by_token_budget(
+            ordered,
+            max_items=effective_limit,
+            max_tokens=effective_max_tokens,
+            content_of=lambda pair: pair[0].memory.content,
+        )
         results = [
             RecalledMemory(**_to_memory_out(scored.memory).model_dump(), score=score)
-            for scored, score in fused[:effective_limit]
+            for scored, score in packed
         ]
         await self._record_recalled(user_id, [result.id for result in results])
         return RecallResult(query=normalized_query, mode=mode, results=results)
@@ -779,6 +807,8 @@ class MemoryService:
         focus: str | None = None,
         max_items: StrictPositiveLimit | None = None,
         max_chars: StrictPositiveLimit | None = None,
+        max_tokens: StrictPositiveLimit | None = None,
+        strategy: str | None = None,
     ) -> ContextResult:
         """Compact context: always-on profile first, then category snapshot.
 
@@ -786,12 +816,19 @@ class MemoryService:
         hybrid matches are added to importance-ranked pools -- never
         displacing the profile block -- before the remaining budget is applied.
 
+        ``max_tokens`` and ``strategy`` apply only to the categorized remainder
+        after the reserved profile. Token counts use the same local estimate as
+        ``recall`` (``ceil(chars/4)`` plus per-hit overhead), not the client
+        model's tokenizer. When both ``max_tokens`` and ``max_chars`` are set,
+        packing stops at the first exhausted budget.
+
         The read observes one database snapshot (``context_snapshot``):
         profile row, generation, importance pools, dynamic candidates, the
         visible total and the focus pools all come from the same RLS-pinned
         transaction. The focus embedding (HTTP to Ollama) and the post-hoc
         usage recording stay outside that transaction.
         """
+        validated_strategy = validate_strategy(strategy)
         normalized_project = self._normalize_project(project)
         normalized_focus = (
             self._normalize_content(focus) if focus is not None and focus.strip() else None
@@ -802,6 +839,7 @@ class MemoryService:
         effective_max_chars = self._clamp_limit(
             max_chars, self._limits.context_default_max_chars, self._limits.context_max_chars_cap
         )
+        effective_max_tokens = self._clamp_max_tokens(max_tokens)
 
         # Embed before the snapshot: Ollama is HTTP and must not hold the
         # database transaction open. Failure degrades the focus to textual.
@@ -869,6 +907,13 @@ class MemoryService:
             effective_max_chars
             - sum(len(item.content) for item in (*profile_block.static, *profile_block.dynamic)),
         )
+        remaining_tokens: int | None = None
+        if effective_max_tokens is not None:
+            profile_tokens = sum(
+                estimate_tokens(item.content)
+                for item in (*profile_block.static, *profile_block.dynamic)
+            )
+            remaining_tokens = max(0, effective_max_tokens - profile_tokens)
 
         focus_memories: list[Memory] = []
         if normalized_focus is not None:
@@ -889,6 +934,8 @@ class MemoryService:
             max_items=remaining_items,
             max_chars=remaining_chars,
             truncate_floor=self._limits.context_truncate_floor,
+            max_tokens=remaining_tokens,
+            strategy=validated_strategy,
         )
         result = budget.assemble(
             list(snapshot.global_top),
@@ -1301,6 +1348,12 @@ class MemoryService:
         if not isinstance(requested, int) or isinstance(requested, bool):
             raise MemoryValidationError("limit must be an integer")
         return max(1, min(requested, maximum))
+
+    def _clamp_max_tokens(self, requested: int | None) -> int | None:
+        """Optional token budget: absent means no token packing; present clamps to cap."""
+        if requested is None:
+            return None
+        return self._clamp_limit(requested, requested, self._limits.max_tokens_cap)
 
     def _normalize_content(self, content: str) -> str:
         if content is None:

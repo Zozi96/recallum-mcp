@@ -50,6 +50,9 @@ class MemoryLimits(BaseModel):
     max_metadata_keys: int = Field(default=16, gt=0)
     recall_default_limit: int = Field(default=10, gt=0)
     recall_max_limit: int = Field(default=50, gt=0)
+    # Server ceiling for optional ``max_tokens`` on recall/context packing.
+    # Clients omit the arg for item/char-only packing; when set, values clamp here.
+    max_tokens_cap: int = Field(default=32_000, gt=0)
     list_default_limit: int = Field(default=50, gt=0)
     list_max_limit: int = Field(default=100, gt=0)
     list_max_offset: int = Field(default=10_000, ge=0)

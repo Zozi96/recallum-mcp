@@ -755,6 +755,10 @@ async def test_discovery_announces_exactly_eleven_tools_and_three_prompts(
         schema = tool.inputSchema or {}
         properties = set(schema.get("properties", {}))
         assert not properties & {"user_id", "user", "owner", "tenant"}
+    recall = next(tool for tool in tools if tool.name == "recall")
+    context = next(tool for tool in tools if tool.name == "context")
+    assert {"max_tokens", "strategy"} <= set((recall.inputSchema or {}).get("properties", {}))
+    assert {"max_tokens", "strategy"} <= set((context.inputSchema or {}).get("properties", {}))
 
 
 async def test_missing_token_is_rejected(server: ServerInfo):

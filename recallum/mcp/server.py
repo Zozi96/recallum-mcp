@@ -230,6 +230,11 @@ def build_mcp_server(container: Container) -> FastMCP:
         scope: Literal["global", "project"] | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
         limit: StrictPositiveLimit | None = None,
+        max_tokens: StrictPositiveLimit | None = None,
+        strategy: Literal[
+            "coding", "debugging", "planning", "review", "architecture"
+        ]
+        | None = None,
     ) -> RecallResult:
         """Search memories by meaning, exact terms and close spellings.
 
@@ -242,6 +247,10 @@ def build_mcp_server(container: Container) -> FastMCP:
         project's memories plus the user's global ones; scope narrows to
         exactly 'global' or 'project'. When embeddings are unavailable the
         result mode is 'degraded_textual' (lexical legs only).
+
+        Optional ``max_tokens`` packs by a local estimate (not the client
+        model tokenizer). Optional ``strategy`` reorders fused hits by
+        task-type category priority without dropping matches that still fit.
         """
         return await memory_service().recall(
             require_identity().user_id,
@@ -250,6 +259,8 @@ def build_mcp_server(container: Container) -> FastMCP:
             scope=scope,
             category=category,
             limit=limit,
+            max_tokens=max_tokens,
+            strategy=strategy,
         )
 
     @mcp.tool
@@ -259,6 +270,11 @@ def build_mcp_server(container: Container) -> FastMCP:
         focus: str | None = None,
         max_items: StrictPositiveLimit | None = None,
         max_chars: StrictPositiveLimit | None = None,
+        max_tokens: StrictPositiveLimit | None = None,
+        strategy: Literal[
+            "coding", "debugging", "planning", "review", "architecture"
+        ]
+        | None = None,
     ) -> ContextResult:
         """Get compact session context: always-on profile plus project snapshot.
 
@@ -272,6 +288,10 @@ def build_mcp_server(container: Container) -> FastMCP:
         Items marked `content_truncated` were clipped; fetch the full text
         with get_memory. Profile-only reads can use the recallum://profile
         resource instead.
+
+        Optional ``max_tokens`` / ``strategy`` apply to the categorized
+        remainder only (profile stays reserved). Token counts are a local
+        estimate, not the client model tokenizer.
         """
         return await memory_service().context(
             require_identity().user_id,
@@ -279,6 +299,8 @@ def build_mcp_server(container: Container) -> FastMCP:
             focus=focus,
             max_items=max_items,
             max_chars=max_chars,
+            max_tokens=max_tokens,
+            strategy=strategy,
         )
 
     @mcp.resource(

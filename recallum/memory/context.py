@@ -10,16 +10,18 @@ from datetime import datetime
 
 from recallum.db.models import Memory
 from recallum.memory.schemas import ContextGroup, ContextItem, ContextResult
-
-# Category presentation order for context grouping.
-CONTEXT_CATEGORY_ORDER = ("preference", "constraint", "decision", "fact")
+from recallum.memory.token_budget import (
+    RecallStrategy,
+    category_order_for_strategy,
+    estimate_tokens,
+)
 
 _ELLIPSIS = "…"
 
 
 @dataclass(frozen=True, slots=True)
 class SessionContextBudget:
-    """Item- and char-budget rules for assembling a session context snapshot.
+    """Item-, char- and optional token-budget rules for a session snapshot.
 
     ``truncate_floor`` is the smallest leftover character budget worth filling
     with a clipped item. An item overflowing a leftover at least that large is
@@ -28,11 +30,19 @@ class SessionContextBudget:
     importance order -- the previous behaviour skipped the long item and kept
     back-filling with shorter, less important ones, silently biasing snapshots
     against verbose constraints.
+
+    ``max_tokens`` (when set) stops before adding a full item that would exceed
+    the estimate; it never mid-truncates content. When both ``max_chars`` and
+    ``max_tokens`` apply, packing stops at the first exhausted budget.
+    ``strategy`` only reorders category presentation for the remainder; the
+    profile block is assembled by the caller and stays unevictable.
     """
 
     max_items: int
     max_chars: int
     truncate_floor: int = 200
+    max_tokens: int | None = None
+    strategy: RecallStrategy | None = None
 
     def assemble(
         self,
@@ -114,13 +124,19 @@ class SessionContextBudget:
         groups: list[ContextGroup] = []
         total_items = 0
         used_chars = 0
+        used_tokens = 0
         exhausted = False
-        for category in CONTEXT_CATEGORY_ORDER:
+        for category in category_order_for_strategy(self.strategy):
             if exhausted:
                 break
             kept: list[ContextItem] = []
             for item in grouped.get(category, []):
                 if total_items >= self.max_items:
+                    exhausted = True
+                    break
+                cost = estimate_tokens(item.content)
+                if self.max_tokens is not None and used_tokens + cost > self.max_tokens:
+                    # Token budget never mid-truncates; stop before this full item.
                     exhausted = True
                     break
                 remaining = self.max_chars - used_chars
@@ -137,11 +153,13 @@ class SessionContextBudget:
                         )
                         total_items += 1
                         used_chars = self.max_chars
+                        used_tokens += cost
                     exhausted = True
                     break
                 kept.append(item)
                 total_items += 1
                 used_chars += length
+                used_tokens += cost
             if kept:
                 groups.append(ContextGroup(category=category, items=kept))
 

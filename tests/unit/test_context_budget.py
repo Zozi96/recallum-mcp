@@ -367,3 +367,69 @@ def test_omitted_by_category_counts_focus_hits_as_served():
 
     assert flatten(result) == ["the focused fact"]
     assert result.omitted_by_category == {"fact": 1}
+
+
+def test_debugging_strategy_presents_facts_before_preferences():
+    budget = SessionContextBudget(max_items=10, max_chars=1000, strategy="debugging")
+    result = budget.assemble(
+        [
+            memory("a preference", category="preference", importance=9),
+            memory("a failure fact", category="fact", importance=5),
+        ],
+        [],
+        project=None,
+        total_available=2,
+    )
+    assert flatten(result) == ["a failure fact", "a preference"]
+    assert [group.category for group in result.groups] == ["fact", "preference"]
+
+
+def test_debugging_strategy_keeps_sole_preference():
+    budget = SessionContextBudget(max_items=10, max_chars=1000, strategy="debugging")
+    result = budget.assemble(
+        [memory("only preference", category="preference")],
+        [],
+        project=None,
+        total_available=1,
+    )
+    assert flatten(result) == ["only preference"]
+
+
+def test_max_tokens_stops_before_next_full_item():
+    from recallum.memory.token_budget import estimate_tokens
+
+    first = memory("short fact", category="fact")
+    second = memory("another fact here", category="fact")
+    budget = SessionContextBudget(
+        max_items=10,
+        max_chars=1000,
+        max_tokens=estimate_tokens(first.content),
+    )
+    result = budget.assemble([first, second], [], project=None, total_available=2)
+    assert flatten(result) == ["short fact"]
+    assert result.truncated is True
+
+
+def test_max_tokens_and_max_chars_stop_at_first_exhausted_budget():
+    from recallum.memory.token_budget import estimate_tokens
+
+    a = memory("aaaa", category="fact")
+    b = memory("bbbbbbbb", category="fact")
+    # Char budget exhausted first (fits one short item by chars).
+    tight_chars = SessionContextBudget(
+        max_items=10,
+        max_chars=len(a.content),
+        max_tokens=estimate_tokens(a.content) + estimate_tokens(b.content),
+    )
+    by_chars = tight_chars.assemble([a, b], [], project=None, total_available=2)
+    assert flatten(by_chars) == ["aaaa"]
+
+    # Token budget exhausted first.
+    tight_tokens = SessionContextBudget(
+        max_items=10,
+        max_chars=1000,
+        max_tokens=estimate_tokens(a.content),
+    )
+    by_tokens = tight_tokens.assemble([a, b], [], project=None, total_available=2)
+    assert flatten(by_tokens) == ["aaaa"]
+
