@@ -39,12 +39,6 @@ from recallum.db.repositories.memory_repo import (
 )
 from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE, record_sanitized_failure
 from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
-from recallum.memory.token_budget import (
-    estimate_tokens,
-    pack_by_token_budget,
-    reorder_by_strategy,
-    validate_strategy,
-)
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.context import SessionContextBudget
 from recallum.memory.language import LANGUAGE_WARNING, looks_non_english
@@ -81,6 +75,12 @@ from recallum.memory.schemas import (
     RememberResult,
     SimilarMemory,
     UpdateResult,
+)
+from recallum.memory.token_budget import (
+    estimate_tokens,
+    pack_by_token_budget,
+    reorder_by_strategy,
+    validate_strategy,
 )
 from recallum.retrieval import reciprocal_rank_fusion
 

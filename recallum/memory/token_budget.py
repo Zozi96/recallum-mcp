@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from typing import Literal, TypeVar
+from typing import Literal
 
 from recallum.memory import MemoryValidationError
 
@@ -36,8 +36,6 @@ STRATEGY_CATEGORY_PRIORITY: dict[RecallStrategy, tuple[str, ...]] = {
     "coding": ("constraint", "decision", "fact", "preference"),
 }
 
-T = TypeVar("T")
-
 
 def estimate_tokens(content: str) -> int:
     """Estimated tokens for one memory hit (content + fixed envelope overhead)."""
@@ -62,7 +60,7 @@ def category_order_for_strategy(strategy: RecallStrategy | None) -> tuple[str, .
     return STRATEGY_CATEGORY_PRIORITY[strategy]
 
 
-def reorder_by_strategy(
+def reorder_by_strategy[T](
     items: Sequence[T],
     strategy: RecallStrategy | None,
     *,
@@ -74,7 +72,9 @@ def reorder_by_strategy(
     """
     if strategy is None:
         return list(items)
-    priority = {category: index for index, category in enumerate(STRATEGY_CATEGORY_PRIORITY[strategy])}
+    priority = {
+        category: index for index, category in enumerate(STRATEGY_CATEGORY_PRIORITY[strategy])
+    }
     fallback = len(priority)
     return [
         item
@@ -85,7 +85,7 @@ def reorder_by_strategy(
     ]
 
 
-def pack_by_token_budget(
+def pack_by_token_budget[T](
     items: Sequence[T],
     *,
     max_items: int,
