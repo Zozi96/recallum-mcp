@@ -68,10 +68,13 @@ def test_cap_of_ten_enforced_and_prefers_structured_over_prose(tmp_path):
     assert scan.omitted > 0
     kept_refs = {c.source_ref for c in scan.candidates}
     assert "README.md" not in kept_refs
-    assert "AGENTS.md" not in kept_refs
-    assert "CLAUDE.md" not in kept_refs
     assert "pyproject.toml" in kept_refs
     assert "package.json" in kept_refs
+    assert "AGENTS.md" in kept_refs
+    assert "CLAUDE.md" in kept_refs
+    # Agent instructions outrank directory-presence facts: not all four
+    # directories survive the cap once AGENTS.md/CLAUDE.md are ranked above them.
+    assert len(kept_refs & {"src/", "tests/", "docs/", "migrations/"}) < 4
 
 
 def test_directory_presence_flags(tmp_path):
@@ -163,7 +166,20 @@ def test_unreadable_pyproject_toml_is_skipped_without_crashing(tmp_path):
     assert any(c.source_ref == "AGENTS.md" for c in scan.candidates)
 
 
-def test_symlinked_readme_does_not_crash(tmp_path):
+def test_symlinked_readme_does_not_crash(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    target = outside / "secret.md"
+    target.write_text("# Secret Title\n\nRequires: nothing special.\n")
+    link = tmp_path / "README.md"
+    link.symlink_to(target)
+
+    scan = scan_project(tmp_path)
+
+    assert not any(c.source_ref == "README.md" for c in scan.candidates)
+    assert scan.candidates == []
+
+
+def test_symlinked_readme_resolving_inside_project_is_read(tmp_path):
     target = tmp_path / "actual_readme.md"
     target.write_text("# Linked Title\n\nRequires: nothing special.\n")
     link = tmp_path / "README.md"

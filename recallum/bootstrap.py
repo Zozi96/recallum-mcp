@@ -84,6 +84,21 @@ def _dependency_name(requirement: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _is_within_root(path: Path, root: Path) -> bool:
+    """True when ``path`` resolves to somewhere inside ``root``.
+
+    Guards against an allowlisted name that is actually a symlink escaping
+    the scanned project (e.g. ``README.md -> /outside/file``): resolving both
+    sides means a symlink that stays inside ``root`` is unaffected, and a
+    symlinked ``root`` itself (e.g. macOS's ``/tmp`` -> ``/private/tmp``)
+    does not trip a false rejection.
+    """
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
 def _scan_pyproject(path: Path) -> list[BootstrapCandidate]:
     try:
         with path.open("rb") as handle:
@@ -196,8 +211,8 @@ def _scan_markdown(path: Path, filename: str) -> list[BootstrapCandidate]:
     return candidates
 
 
-def _scan_agent_instructions(path: Path, filename: str) -> BootstrapCandidate | None:
-    if not path.is_file():
+def _scan_agent_instructions(path: Path, filename: str, root: Path) -> BootstrapCandidate | None:
+    if not path.is_file() or not _is_within_root(path, root):
         return None
     return BootstrapCandidate(
         category="fact",
@@ -210,22 +225,23 @@ def scan_project(root: Path) -> BootstrapScan:
     """Scan ``root`` for the fixed allowlist and return capped candidates.
 
     Structured, cheap-to-trust sources (pyproject.toml, package.json,
-    Dockerfile/docker-compose.yml presence, directory presence) come before
-    prose (README heuristics), so when the cap trims the list it drops prose
-    first.
+    Dockerfile/docker-compose.yml presence) come first, then agent
+    instructions (AGENTS.md/CLAUDE.md presence), then directory presence,
+    then prose (README heuristics), so when the cap trims the list it drops
+    prose first and agent instructions ahead of directory-presence facts.
     """
     found: list[BootstrapCandidate] = []
 
     pyproject = root / "pyproject.toml"
-    if pyproject.is_file():
+    if pyproject.is_file() and _is_within_root(pyproject, root):
         found.extend(_scan_pyproject(pyproject))
 
     package_json = root / "package.json"
-    if package_json.is_file():
+    if package_json.is_file() and _is_within_root(package_json, root):
         found.extend(_scan_package_json(package_json))
 
     dockerfile = root / "Dockerfile"
-    if dockerfile.is_file():
+    if dockerfile.is_file() and _is_within_root(dockerfile, root):
         found.append(
             BootstrapCandidate(
                 category="fact",
@@ -235,7 +251,7 @@ def scan_project(root: Path) -> BootstrapScan:
         )
 
     compose = root / "docker-compose.yml"
-    if compose.is_file():
+    if compose.is_file() and _is_within_root(compose, root):
         found.append(
             BootstrapCandidate(
                 category="fact",
@@ -244,8 +260,14 @@ def scan_project(root: Path) -> BootstrapScan:
             )
         )
 
+    for filename in ("AGENTS.md", "CLAUDE.md"):
+        candidate = _scan_agent_instructions(root / filename, filename, root)
+        if candidate is not None:
+            found.append(candidate)
+
     for name in _PRESENCE_DIRECTORIES:
-        if (root / name).is_dir():
+        entry = root / name
+        if entry.is_dir() and _is_within_root(entry, root):
             found.append(
                 BootstrapCandidate(
                     category="fact",
@@ -254,16 +276,11 @@ def scan_project(root: Path) -> BootstrapScan:
                 )
             )
 
-    for filename in ("AGENTS.md", "CLAUDE.md"):
-        candidate = _scan_agent_instructions(root / filename, filename)
-        if candidate is not None:
-            found.append(candidate)
-
     readme_md = root / "README.md"
     readme = root / "README"
-    if readme_md.is_file():
+    if readme_md.is_file() and _is_within_root(readme_md, root):
         found.extend(_scan_markdown(readme_md, "README.md"))
-    elif readme.is_file():
+    elif readme.is_file() and _is_within_root(readme, root):
         found.extend(_scan_markdown(readme, "README"))
 
     capped = found[:MAX_CANDIDATES]

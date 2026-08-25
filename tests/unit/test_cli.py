@@ -10,7 +10,7 @@ import pytest
 from recallum.auth.api_keys import hash_token
 from recallum.cli import _run, build_parser
 from recallum.evaluation import EvalReport
-from tests.fakes import FakeEmbeddingClient, build_test_container
+from tests.fakes import FakeEmbeddingClient, ScriptedEmbeddingClient, build_test_container
 
 
 def parse(argv: list[str]):
@@ -462,6 +462,49 @@ async def test_bootstrap_apply_persists_via_remember_batch(tmp_path, capsys):
     assert all(m.source_type == "bootstrap" for m in stored)
     assert all(m.project == "demo" for m in stored)
     assert {m.source_ref for m in stored} == {"pyproject.toml", "AGENTS.md"}
+
+
+async def test_bootstrap_apply_reports_similar_pre_existing_memory(tmp_path, capsys):
+    runtime_content = "This project's Python runtime requirement is `>=3.11` (from pyproject.toml)."
+    shared = [1.0] + [0.0] * 7
+    near = [0.999, 0.0447] + [0.0] * 6
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "Existing note about Python 3.11 support": shared,
+            runtime_content: near,
+        }
+    )
+    container, fakes = build_test_container(embedder=embedder)
+    await _run(parse(["create-user", "--email", "similar@example.com"]), container)
+    capsys.readouterr()
+    user = next(iter(fakes["users"].users.values()))
+    await container.memory_service().remember(
+        user.id,
+        content="Existing note about Python 3.11 support",
+        category="fact",
+        project="demo",
+    )
+    (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.11"\n')
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "similar@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+                "--apply",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "similar:" in out
 
 
 async def test_bootstrap_apply_second_pass_creates_no_duplicates(tmp_path, capsys):

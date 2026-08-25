@@ -367,6 +367,12 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
                 continue
             status = "created" if outcome.created else "deduplicated"
             print(f"{status}: [{candidate.category}] ({candidate.source_ref}) {candidate.content}")
+            if outcome.created:
+                if outcome.similar:
+                    similar_ids = ", ".join(str(similar.id) for similar in outcome.similar)
+                    print(f"  similar: {similar_ids}")
+                if outcome.language_warning:
+                    print(f"  warning: {outcome.language_warning}")
         print(f"stored={result.stored} deduplicated={result.deduplicated} failed={result.failed}")
         if scan.omitted:
             print(
