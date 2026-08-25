@@ -1486,12 +1486,7 @@ PY
   else
     echo "Grok plugin 'recallum-memory' is already installed."
     if ((force_mcp)); then
-      if ((remote_marketplace)); then
-        run_action grok plugin update recallum-memory
-      else
-        # Path reinstall refreshes files without depending on marketplace git.
-        run_action grok plugin install "$plugin_install_source" --trust
-      fi
+      run_action grok plugin update recallum-memory
     fi
   fi
   # Plugins stay disabled until enabled; enable is idempotent.

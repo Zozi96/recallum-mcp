@@ -2528,6 +2528,18 @@ class GrokInstallerTests(InstallerTestCase):
             self.assertNotIn("dry-run: grok plugin install", result.stdout)
             self.assertIn("dry-run: grok plugin enable recallum-memory", result.stdout)
 
+    def test_force_updates_existing_local_plugin_instead_of_reinstalling(self) -> None:
+        # A local marketplace source rejects `plugin install` on an already
+        # installed plugin ("repo already installed"); `plugin update` is the
+        # one that actually refreshes it from the recorded local path.
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._fake_clis(Path(directory), grok_plugin="installed")
+            result = self._run_grok(env, "--force-mcp", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: grok plugin update recallum-memory", result.stdout)
+            self.assertNotIn("dry-run: grok plugin install", result.stdout)
+            self.assertIn("dry-run: grok plugin enable recallum-memory", result.stdout)
+
     def test_completion_notice_points_at_doctor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
