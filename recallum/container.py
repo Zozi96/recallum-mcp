@@ -21,11 +21,13 @@ from recallum.config import Settings
 from recallum.db.readiness import DatabaseReadiness
 from recallum.db.repositories.api_key_repo import ApiKeyRepository
 from recallum.db.repositories.memory_repo import MemoryRepository
+from recallum.db.repositories.skill_repo import SkillRepository
 from recallum.db.repositories.user_repo import UserRepository
 from recallum.db.repositories.web_session_repo import WebSessionRepository
 from recallum.db.session import SessionProvider
 from recallum.embeddings.ollama import OllamaEmbeddingClient
 from recallum.memory.service import MemoryService
+from recallum.skills.service import SkillService
 from recallum.telemetry.buffer import TelemetryBuffer
 from recallum.telemetry.repository import TelemetryRepository
 from recallum.web.admin_service import AdminService
@@ -116,6 +118,9 @@ class Container(containers.DeclarativeContainer):
     memory_repository = providers.Singleton(
         MemoryRepository, sessions=providers.Factory(_LazyProvider, provider=sessions.provider)
     )
+    skill_repository = providers.Singleton(
+        SkillRepository, sessions=providers.Factory(_LazyProvider, provider=sessions.provider)
+    )
     telemetry_repository = providers.Singleton(
         TelemetryRepository, sessions=providers.Factory(_LazyProvider, provider=sessions.provider)
     )
@@ -178,6 +183,12 @@ class Container(containers.DeclarativeContainer):
     memory_service = providers.Singleton(
         MemoryService,
         repository=memory_repository,
+        embeddings=embedding_client,
+        limits=config.limits,
+    )
+    skill_service = providers.Singleton(
+        SkillService,
+        repository=skill_repository,
         embeddings=embedding_client,
         limits=config.limits,
     )

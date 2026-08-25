@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from recallum.config import EMBEDDING_DIMENSIONS, Settings
 from recallum.container import Container, create_container
-from recallum.db.models import ApiKey, Memory, User, WebSession
+from recallum.db.models import ApiKey, Memory, Skill, User, WebSession
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
     BucketMismatchError,
@@ -29,6 +29,7 @@ from recallum.db.repositories.memory_repo import (
     _cap_pairs_by_degree,
     _scalable_edges_enabled,
 )
+from recallum.db.repositories.skill_repo import ScoredSkill, SkillCandidatePools
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryVisibility
 from recallum.telemetry.repository import ActivityAggregate, project_bucket_label
@@ -1032,6 +1033,157 @@ class FakeMemoryRepository:
         )
 
 
+class FakeSkillRepository:
+    """Dict-backed repository implementing the real skill interface."""
+
+    def __init__(self) -> None:
+        self.rows: dict[uuid.UUID, Skill] = {}
+
+    def _active(self, user_id: uuid.UUID) -> list[Skill]:
+        return [s for s in self.rows.values() if s.user_id == user_id and not s.is_deleted]
+
+    def _visible(self, user_id: uuid.UUID, visibility: MemoryVisibility) -> list[Skill]:
+        return [s for s in self._active(user_id) if visibility.includes(s)]
+
+    async def create_skill(self, user_id: uuid.UUID, *, version: int = 1, **kwargs: Any) -> Skill:
+        scope = kwargs["scope"]
+        project = kwargs["project"]
+        name = kwargs["name"]
+        for existing in self._active(user_id):
+            if (
+                existing.scope == scope
+                and (existing.project or "") == (project or "")
+                and existing.name == name
+            ):
+                raise IntegrityError("create_skill", {}, Exception("duplicate key"))
+        skill = Skill(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            version=version,
+            created_at=datetime.now(UTC),
+            deleted_at=None,
+            superseded_by=None,
+            **kwargs,
+        )
+        self.rows[skill.id] = skill
+        return skill
+
+    async def find_active_by_name(
+        self, user_id: uuid.UUID, *, scope: str, project: str | None, name: str
+    ) -> Skill | None:
+        for skill in self._active(user_id):
+            if (
+                skill.scope == scope
+                and (skill.project or "") == (project or "")
+                and skill.name == name
+            ):
+                return skill
+        return None
+
+    async def get_active(self, user_id: uuid.UUID, skill_id: uuid.UUID) -> Skill | None:
+        skill = self.rows.get(skill_id)
+        if skill is None or skill.user_id != user_id or skill.is_deleted:
+            return None
+        return skill
+
+    async def search_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        query: str,
+        embedding: list[float] | None,
+        visibility: MemoryVisibility,
+        limit: int,
+    ) -> SkillCandidatePools:
+        vector: list[ScoredSkill] = []
+        if embedding is not None:
+            scored = [
+                ScoredSkill(skill=s, score=_cosine(s.embedding, embedding))
+                for s in self._visible(user_id, visibility)
+            ]
+            scored.sort(key=lambda s: s.score, reverse=True)
+            vector = scored[:limit]
+        words = set(_WORD_RE.findall(query.lower())) - _STOPWORDS
+        text_scored: list[ScoredSkill] = []
+        for skill in self._visible(user_id, visibility):
+            haystack = " ".join([skill.description, *skill.triggers, *skill.steps])
+            tokens = set(_WORD_RE.findall(haystack.lower())) - _STOPWORDS
+            score = float(len(words & tokens))
+            if score > 0:
+                text_scored.append(ScoredSkill(skill=skill, score=score))
+        text_scored.sort(key=lambda s: s.score, reverse=True)
+        return SkillCandidatePools(vector=vector, text=text_scored[:limit])
+
+    async def similar_active(
+        self,
+        user_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        scope: str,
+        project: str | None,
+        min_similarity: float,
+        limit: int,
+        exclude_id: uuid.UUID | None = None,
+    ) -> Sequence[ScoredSkill]:
+        scored = [
+            ScoredSkill(skill=s, score=_cosine(s.embedding, embedding))
+            for s in self._active(user_id)
+            if s.scope == scope and (s.project or "") == (project or "") and s.id != exclude_id
+        ]
+        scored = [s for s in scored if s.score >= min_similarity]
+        scored.sort(key=lambda s: s.score, reverse=True)
+        return scored[:limit]
+
+    async def supersede(
+        self,
+        user_id: uuid.UUID,
+        skill_id: uuid.UUID,
+        *,
+        description: str,
+        triggers: list[str],
+        steps: list[str],
+        constraints: str | None,
+        content_hash: str,
+        embedding: list[float],
+        source_type: str | None,
+        source_ref: str | None,
+        set_source_ref: bool,
+    ) -> Skill | None:
+        original = self.rows.get(skill_id)
+        if original is None or original.user_id != user_id or original.is_deleted:
+            return None
+        replacement = Skill(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            scope=original.scope,
+            project=original.project,
+            name=original.name,
+            description=description,
+            triggers=triggers,
+            steps=steps,
+            constraints=constraints,
+            version=original.version + 1,
+            content_hash=content_hash,
+            embedding=embedding,
+            source_type=(source_type if source_type is not None else original.source_type),
+            source_ref=(source_ref if set_source_ref else original.source_ref),
+            created_at=datetime.now(UTC),
+            deleted_at=None,
+            superseded_by=None,
+        )
+        self.rows[replacement.id] = replacement
+        original.deleted_at = datetime.now(UTC)
+        original.superseded_by = replacement.id
+        return replacement
+
+    async def soft_delete(self, user_id: uuid.UUID, skill_id: uuid.UUID) -> bool:
+        skill = self.rows.get(skill_id)
+        if skill is None or skill.user_id != user_id or skill.is_deleted:
+            return False
+        skill.deleted_at = datetime.now(UTC)
+        return True
+
+
 class FakeUserRepository:
     def __init__(self) -> None:
         self.users: dict[uuid.UUID, User] = {}
@@ -1295,12 +1447,14 @@ def build_test_container(
     web_sessions = FakeWebSessionRepository(users)
     memories = FakeMemoryRepository()
     memories.users = users
+    skills = FakeSkillRepository()
     telemetry = FakeTelemetryRepository()
     embedder = embedder if embedder is not None else FakeEmbeddingClient()
     container.user_repository.override(providers.Object(users))
     container.api_key_repository.override(providers.Object(keys))
     container.web_session_repository.override(providers.Object(web_sessions))
     container.memory_repository.override(providers.Object(memories))
+    container.skill_repository.override(providers.Object(skills))
     container.telemetry_repository.override(providers.Object(telemetry))
     container.embedding_client.override(providers.Object(embedder))
     if engine is not None:
@@ -1310,6 +1464,7 @@ def build_test_container(
         "keys": keys,
         "web_sessions": web_sessions,
         "memories": memories,
+        "skills": skills,
         "embedder": embedder,
         "telemetry": telemetry,
     }

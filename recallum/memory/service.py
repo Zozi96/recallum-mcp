@@ -19,8 +19,8 @@ import logging
 import re
 import unicodedata
 import uuid
-from collections import Counter, defaultdict
-from collections.abc import Callable, Sequence
+from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
 
@@ -81,11 +81,9 @@ from recallum.memory.schemas import (
     SimilarMemory,
     UpdateResult,
 )
+from recallum.retrieval import reciprocal_rank_fusion
 
 logger = logging.getLogger("recallum.memory")
-
-# Reciprocal Rank Fusion constant; 60 is the conventional default.
-RRF_K = 60
 
 Category = Literal["preference", "decision", "constraint", "fact"]
 CATEGORIES: tuple[str, ...] = get_args(Category)
@@ -808,70 +806,31 @@ class MemoryService:
         under rows that merely got reconfirmed more recently. Only a measured
         weight, like the other voters, may raise it above 0.
         """
-        weighted_pools: list[tuple[list[ScoredMemory], float]] = [
-            (vector_candidates, 1.0),
-            (text_candidates, 1.0),
-            (trigram_candidates or [], self._limits.recall_trigram_weight),
-        ]
-        scores: dict[uuid.UUID, float] = defaultdict(float)
-        entries: dict[uuid.UUID, ScoredMemory] = {}
-        for candidates, pool_weight in weighted_pools:
-            if not pool_weight:
-                continue
-            for rank, scored in enumerate(candidates, start=1):
-                scores[scored.memory.id] += pool_weight / (RRF_K + rank)
-                entries.setdefault(scored.memory.id, scored)
-
-        # Importance and usage are the same competition-rank voter with
-        # different keys and weights. Ties share a rank so a secondary
-        # signal cannot sneak in through the sort order.
-        self._add_competition_vote(
-            entries,
-            scores,
-            key=lambda scored: scored.memory.importance,
-            weight=self._limits.recall_importance_weight,
+        return reciprocal_rank_fusion(
+            [
+                (vector_candidates, 1.0),
+                (text_candidates, 1.0),
+                (trigram_candidates or [], self._limits.recall_trigram_weight),
+            ],
+            id_of=lambda scored: scored.memory.id,
+            created_at_of=lambda scored: scored.memory.created_at,
+            # Importance and usage are the same competition-rank voter with
+            # different keys and weights. Ties share a rank so a secondary
+            # signal cannot sneak in through the sort order.
+            competition_votes=[
+                (lambda scored: scored.memory.importance, self._limits.recall_importance_weight),
+                (
+                    lambda scored: scored.memory.recall_count or 0,
+                    self._limits.recall_usage_weight,
+                ),
+                (
+                    lambda scored: int(
+                        (scored.memory.reconfirmed_at or scored.memory.created_at).timestamp()
+                    ),
+                    self._limits.recall_freshness_weight,
+                ),
+            ],
         )
-        self._add_competition_vote(
-            entries,
-            scores,
-            key=lambda scored: scored.memory.recall_count or 0,
-            weight=self._limits.recall_usage_weight,
-        )
-        self._add_competition_vote(
-            entries,
-            scores,
-            key=lambda scored: int(
-                (scored.memory.reconfirmed_at or scored.memory.created_at).timestamp()
-            ),
-            weight=self._limits.recall_freshness_weight,
-        )
-
-        ranked = sorted(
-            scores.items(), key=lambda item: entries[item[0]].memory.created_at, reverse=True
-        )
-        ranked.sort(key=lambda item: item[1], reverse=True)
-        return [(entries[memory_id], score) for memory_id, score in ranked]
-
-    def _add_competition_vote(
-        self,
-        entries: dict[uuid.UUID, ScoredMemory],
-        scores: dict[uuid.UUID, float],
-        *,
-        key: Callable[[ScoredMemory], int],
-        weight: float,
-    ) -> None:
-        """Add one RRF voter over already-found candidates, ties sharing a rank."""
-        if not weight:
-            return
-        ordered = sorted(entries.values(), key=lambda scored: -key(scored))
-        rank = 0
-        previous: int | None = None
-        for position, scored in enumerate(ordered, start=1):
-            value = key(scored)
-            if value != previous:
-                rank = position
-                previous = value
-            scores[scored.memory.id] += weight / (RRF_K + rank)
 
     # ------------------------------------------------------------------
     # context

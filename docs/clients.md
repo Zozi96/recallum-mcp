@@ -6,9 +6,11 @@ user; never share one between people.
 
 ## Tool surface
 
-The server exposes eleven MCP tools: `remember`, `remember_batch`, `recall`,
+The server exposes fifteen MCP tools: `remember`, `remember_batch`, `recall`,
 `context`, `get_memory`, `list_memories`, `update`, `merge_memories`,
-`related_memories`, `reconfirm`, and `forget`.
+`related_memories`, `reconfirm`, `forget`, `save_skill`, `match_skills`,
+`get_skill`, and `forget_skill`. The last four store versioned procedures
+(skills), a separate entity from memories.
 
 Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build, and
 Antigravity CLI. Cursor uses its native marketplace and Settings flow below. Keep credentials in

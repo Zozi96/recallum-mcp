@@ -6,9 +6,15 @@ are generated locally with Ollama, storage is PostgreSQL with pgvector.
 
 ## Features
 
-- **Eleven MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
+- **Fifteen MCP tools**: `remember`, `remember_batch`, `recall`, `context`,
   `get_memory`, `list_memories`, `update`, `merge_memories`,
-  `related_memories`, `reconfirm`, `forget`.
+  `related_memories`, `reconfirm`, `forget`, `save_skill`, `match_skills`,
+  `get_skill`, `forget_skill`.
+- **Skills, distinct from memories**: `save_skill`/`match_skills`/`get_skill`/
+  `forget_skill` store versioned procedures (name, description, triggers,
+  steps, optional constraints) -- never a memory `category`. Re-saving the
+  same name with identical steps is a no-op; different steps require
+  `replace=true`, which supersedes the active version.
 - **Explicit supersession**: `update` retires a memory and links it to its
   replacement; `merge_memories` consolidates several restatements into one
   linked replacement; `remember` reports similar existing memories so

@@ -1,4 +1,4 @@
-"""FastMCP server exposing eleven tools and a read-only profile resource.
+"""FastMCP server exposing fifteen tools and a read-only profile resource.
 
 Identity always comes from the authenticated API key (bound to a ContextVar by
 ``BearerAuthMiddleware``); tools and resources fail closed when the identity is
@@ -36,6 +36,12 @@ from recallum.memory.schemas import (
     RememberResult,
     SourceType,
     UpdateResult,
+)
+from recallum.skills.schemas import (
+    ForgetSkillResult,
+    GetSkillResult,
+    MatchSkillsResult,
+    SaveSkillResult,
 )
 from recallum.telemetry.middleware import UsageTelemetryMiddleware
 
@@ -163,6 +169,9 @@ def build_mcp_server(container: Container) -> FastMCP:
 
     def memory_service():
         return container.memory_service()
+
+    def skill_service():
+        return container.skill_service()
 
     @mcp.tool
     @translates_domain_errors
@@ -523,6 +532,93 @@ def build_mcp_server(container: Container) -> FastMCP:
         forgotten=false, without revealing ownership.
         """
         return await memory_service().forget(require_identity().user_id, memory_id)
+
+    @mcp.tool
+    @translates_domain_errors
+    async def save_skill(
+        name: str,
+        description: str,
+        triggers: list[str],
+        steps: list[str],
+        constraints: str | None = None,
+        project: str | None = None,
+        scope: Literal["global", "project"] | None = None,
+        replace: bool = False,
+        source_type: SourceType | None = None,
+        source_ref: str | None = None,
+    ) -> SaveSkillResult:
+        """Store a versioned procedure -- when to apply a method, not what happened.
+
+        A skill is distinct from a memory: use it for a repeatable procedure
+        with concrete steps, never for an outcome or a one-off lesson (that is
+        `remember`). `triggers` describe when the procedure applies; `steps`
+        are the ordered procedure itself; `constraints` is an optional bullet
+        list of invariants the procedure must respect. Omit `project` for a
+        global skill. Saving the same `name` in the same scope again returns
+        the existing skill unchanged when the steps are identical
+        (`created=false`). When the steps differ, the call is rejected unless
+        `replace=true`, which supersedes the active skill with a new version
+        and links it to what it replaced. The response's `similar` field
+        lists pre-existing skills about the same procedure; it is advisory
+        only and never auto-merges anything. `source_type` and `source_ref`
+        mean the same as on `remember`.
+        """
+        return await skill_service().save_skill(
+            require_identity().user_id,
+            name=name,
+            description=description,
+            triggers=triggers,
+            steps=steps,
+            constraints=constraints,
+            project=project,
+            scope=scope,
+            replace=replace,
+            source_type=source_type,
+            source_ref=source_ref,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
+    async def match_skills(
+        query: str,
+        project: str | None = None,
+        scope: Literal["global", "project"] | None = None,
+        limit: StrictPositiveLimit | None = None,
+    ) -> MatchSkillsResult:
+        """Find skills by procedure -- distinct from `recall`, which searches memories.
+
+        Hybrid retrieval over each skill's description, triggers and steps:
+        semantic similarity plus full-text ranking, fused. Passing project
+        includes that project's skills plus the user's global ones; scope
+        narrows to exactly 'global' or 'project'. When embeddings are
+        unavailable the result mode is 'degraded_textual' (textual leg only).
+        """
+        return await skill_service().match_skills(
+            require_identity().user_id,
+            query=query,
+            project=project,
+            scope=scope,
+            limit=limit,
+        )
+
+    @mcp.tool
+    @translates_domain_errors
+    async def get_skill(skill_id: uuid.UUID) -> GetSkillResult:
+        """Fetch one active skill by id, with its full triggers, steps and constraints.
+
+        Unknown ids, other users' ids and retired ids all return found=false.
+        """
+        return await skill_service().get_skill(require_identity().user_id, skill_id)
+
+    @mcp.tool
+    @translates_domain_errors
+    async def forget_skill(skill_id: uuid.UUID) -> ForgetSkillResult:
+        """Logically delete one of your skills by id.
+
+        Unknown ids and ids belonging to other users both return
+        forgotten=false, without revealing ownership.
+        """
+        return await skill_service().forget_skill(require_identity().user_id, skill_id)
 
     @mcp.prompt(name="session-start")
     def session_start(project: str | None = None, focus: str | None = None) -> str:

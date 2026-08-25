@@ -1,6 +1,6 @@
 """MCP tool-surface documentation gate (S001).
 
-The public docs must name exactly the canonical eleven MCP tools. This module
+The public docs must name exactly the canonical fifteen MCP tools. This module
 checks ``README.md`` and ``docs/clients.md`` against ``EXPECTED_TOOLS`` — the
 same constant the live-server discovery test uses — so the docs gate and the
 runtime gate share one allowlist and cannot drift apart. The check is pure
@@ -8,8 +8,8 @@ text logic over backtick tool tokens: no network, clock, or services, so the
 ``unit-plugin`` fast lane collects it.
 
 Rules:
-- README must name all eleven canonical tools and must not claim a count
-  other than eleven.
+- README must name all fifteen canonical tools and must not claim a count
+  other than fifteen.
 - README and ``docs/clients.md`` must render every explicit tool enumeration
   (a contiguous list of >=2 canonical names) as exactly the canonical set.
 - Usage guidance that names a subset (e.g. one tool per bullet followed by
@@ -58,6 +58,9 @@ _NUMBER_WORDS = {
     "ten": 10,
     "eleven": 11,
     "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
 }
 _COUNT_CLAIM_RE = re.compile(
     r"\b(?P<count>" + "|".join([*_NUMBER_WORDS, r"\d+"]) + r")\s+MCP\s+tools?\b",
@@ -79,8 +82,7 @@ class _Run(NamedTuple):
 def _runs(text: str) -> list[_Run]:
     """Maximal contiguous backtick-token runs; each with a comma-separator flag."""
     tokens = [
-        _Token(match.start(), match.end(), match.group(1))
-        for match in TOKEN_RE.finditer(text)
+        _Token(match.start(), match.end(), match.group(1)) for match in TOKEN_RE.finditer(text)
     ]
     runs: list[_Run] = []
     current: list[_Token] = []
@@ -132,9 +134,7 @@ def _count_claim_issues(text: str) -> list[str]:
         count = _NUMBER_WORDS[raw] if raw in _NUMBER_WORDS else int(raw)
         if count != len(ALLOWLIST):
             claim = text[match.start() : match.end()]
-            issues.append(
-                f"claims {claim!r}, but the canonical surface has {len(ALLOWLIST)} tools"
-            )
+            issues.append(f"claims {claim!r}, but the canonical surface has {len(ALLOWLIST)} tools")
     return issues
 
 
@@ -201,7 +201,7 @@ def test_reverting_readme_to_nine_tools_fails_naming_document_and_mismatch(tmp_p
     root = _copy_real_docs(tmp_path)
     readme = root / "README.md"
     text = readme.read_text(encoding="utf-8")
-    text = text.replace("Eleven MCP tools", "Nine MCP tools")
+    text = text.replace("Fifteen MCP tools", "Nine MCP tools")
     text = text.replace("`related_memories`, `reconfirm`, ", "")
     readme.write_text(text, encoding="utf-8")
 
@@ -230,7 +230,7 @@ def test_adding_a_twelfth_tool_to_readme_fails_naming_extra(tmp_path):
     root = _copy_real_docs(tmp_path)
     readme = root / "README.md"
     text = readme.read_text(encoding="utf-8").replace(
-        "`reconfirm`, `forget`.", "`reconfirm`, `forget`, `hibernate`."
+        "`get_skill`, `forget_skill`.", "`get_skill`, `forget_skill`, `hibernate`."
     )
     readme.write_text(text, encoding="utf-8")
 
@@ -250,9 +250,7 @@ def test_dropping_one_tool_to_ten_in_readme_fails_naming_missing(tmp_path):
 
 
 @pytest.mark.parametrize("removed", ["related_memories", "reconfirm"])
-def test_clients_enumeration_omitting_canonical_tool_fails_naming_guide(
-    tmp_path, removed
-):
+def test_clients_enumeration_omitting_canonical_tool_fails_naming_guide(tmp_path, removed):
     root = _copy_real_docs(tmp_path)
     clients = root / "docs" / "clients.md"
     text = clients.read_text(encoding="utf-8").replace(f"`{removed}`, ", "")
@@ -267,7 +265,7 @@ def test_clients_enumeration_including_extra_tool_fails_naming_guide(tmp_path):
     root = _copy_real_docs(tmp_path)
     clients = root / "docs" / "clients.md"
     text = clients.read_text(encoding="utf-8").replace(
-        "and `forget`.", "and `forget`, `hibernate`."
+        "and `forget_skill`.", "and `forget_skill`, `hibernate`."
     )
     clients.write_text(text, encoding="utf-8")
 
@@ -291,7 +289,7 @@ def test_aligned_copy_passes_and_is_idempotent(tmp_path):
 
 
 def test_clients_without_enumeration_passes(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}."
     assert _check(tmp_path, readme=readme, clients="# Clients\n\nNo tool list here.") == []
 
 
@@ -301,21 +299,19 @@ def test_boundary_incorrect_count_claims_fail(tmp_path, count):
     assert any("README.md" in issue and "MCP tools" in issue for issue in issues)
 
 
-@pytest.mark.parametrize("count", ["eleven", "11"])
+@pytest.mark.parametrize("count", ["fifteen", "15"])
 def test_boundary_correct_count_claims_pass(tmp_path, count):
     assert _check(tmp_path, readme=f"- **{count} MCP tools**: {ALLOWLIST_TOKENS}.") == []
 
 
 def test_boundary_ten_tool_enumeration_fails(tmp_path):
     names = ", ".join(f"`{name}`" for name in sorted(EXPECTED_TOOLS - {"reconfirm"}))
-    issues = _check(tmp_path, readme=f"- **Eleven MCP tools**: {names}.")
+    issues = _check(tmp_path, readme=f"- **Fifteen MCP tools**: {names}.")
     assert any("reconfirm" in issue for issue in issues)
 
 
 def test_boundary_twelve_tool_enumeration_fails(tmp_path):
-    issues = _check(
-        tmp_path, readme=f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}, `hibernate`."
-    )
+    issues = _check(tmp_path, readme=f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}, `hibernate`.")
     assert any("hibernate" in issue for issue in issues)
 
 
@@ -323,45 +319,45 @@ def test_boundary_duplicate_name_with_omission_fails(tmp_path):
     tokens = re.sub(
         r"`reconfirm`, ", "", ALLOWLIST_TOKENS.replace("`forget`", "`forget`, `forget`", 1)
     )
-    issues = _check(tmp_path, readme=f"- **Eleven MCP tools**: {tokens}.")
+    issues = _check(tmp_path, readme=f"- **Fifteen MCP tools**: {tokens}.")
     assert any("reconfirm" in issue for issue in issues)
 
 
 def test_boundary_duplicate_name_with_complete_set_passes(tmp_path):
     tokens = ALLOWLIST_TOKENS.replace("`forget`", "`forget`, `forget`", 1)
-    assert _check(tmp_path, readme=f"- **Eleven MCP tools**: {tokens}.") == []
+    assert _check(tmp_path, readme=f"- **Fifteen MCP tools**: {tokens}.") == []
 
 
 def test_boundary_name_split_across_lines_fails(tmp_path):
     tokens = ALLOWLIST_TOKENS.replace("`reconfirm`", "`reconf\nirm`")
-    issues = _check(tmp_path, readme=f"- **Eleven MCP tools**: {tokens}.")
+    issues = _check(tmp_path, readme=f"- **Fifteen MCP tools**: {tokens}.")
     assert any("reconfirm" in issue for issue in issues)
 
 
 def test_boundary_case_variant_fails(tmp_path):
     tokens = ALLOWLIST_TOKENS.replace("`remember`", "`Remember`")
-    issues = _check(tmp_path, readme=f"- **Eleven MCP tools**: {tokens}.")
+    issues = _check(tmp_path, readme=f"- **Fifteen MCP tools**: {tokens}.")
     assert any("remember" in issue for issue in issues)
 
 
 def test_boundary_bare_names_are_not_detected(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS.replace('`', '')}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS.replace('`', '')}."
     issues = _check(tmp_path, readme=readme)
     assert any("README.md" in issue for issue in issues)
 
 
 def test_boundary_name_in_heading_counts_as_present(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}.\n\n## `related_memories`\n"
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}.\n\n## `related_memories`\n"
     assert _check(tmp_path, readme=readme) == []
 
 
 def test_boundary_heading_only_mentions_are_not_enumerations(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}."
     assert _check(tmp_path, readme=readme, clients="## `recall`\n\nUse the memory tools.") == []
 
 
 def test_boundary_subset_usage_guidance_is_not_an_enumeration(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}."
     clients = """## Agent usage guidance
 
 Put a short instruction in each project's AGENTS.md:
@@ -374,27 +370,24 @@ Put a short instruction in each project's AGENTS.md:
 
 
 def test_boundary_clients_complete_enumeration_passes(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}."
     assert _check(tmp_path, readme=readme, clients=f"The tools are {ALLOWLIST_TOKENS}.") == []
 
 
 def test_boundary_clients_incomplete_enumeration_fails(tmp_path):
     names = ", ".join(
-        f"`{name}`"
-        for name in sorted(EXPECTED_TOOLS - {"related_memories", "reconfirm"})
+        f"`{name}`" for name in sorted(EXPECTED_TOOLS - {"related_memories", "reconfirm"})
     )
     issues = _check(tmp_path, clients=f"The tools are {names}.")
-    assert any(
-        "docs/clients.md" in issue and "related_memories" in issue for issue in issues
-    )
+    assert any("docs/clients.md" in issue and "related_memories" in issue for issue in issues)
 
 
 def test_boundary_two_name_prose_is_not_an_enumeration(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}."
     assert _check(tmp_path, readme=readme, clients="Use `remember` and `recall` regularly.") == []
 
 
 def test_boundary_two_name_comma_list_is_an_enumeration(tmp_path):
-    readme = f"- **Eleven MCP tools**: {ALLOWLIST_TOKENS}."
+    readme = f"- **Fifteen MCP tools**: {ALLOWLIST_TOKENS}."
     issues = _check(tmp_path, readme=readme, clients="Use `remember`, `recall` regularly.")
     assert any("docs/clients.md" in issue for issue in issues)

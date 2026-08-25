@@ -59,6 +59,7 @@ class User(Base):
     memories: Mapped[list[Memory]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    skills: Mapped[list[Skill]] = relationship(back_populates="user", cascade="all, delete-orphan")
     memory_profiles: Mapped[list[MemoryProfile]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
@@ -238,6 +239,83 @@ class Memory(Base):
     @property
     def is_expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= datetime.now(UTC)
+
+
+class Skill(Base):
+    """A versioned procedure: when to apply a method, distinct from a memory.
+
+    Never a memory ``category`` -- mixing the two would poison memory RRF and
+    profile static selection. Owned by one user, with the same global/project
+    scope and visibility rules as memories, but no marketplace and no sharing
+    between users. ``triggers`` and ``steps`` are ordered lists; ``constraints``
+    is a free-text bullet list, not a structured schema of steps.
+    """
+
+    __tablename__ = "skills"
+    __table_args__ = (
+        CheckConstraint("scope IN ('global', 'project')", name="ck_skills_scope"),
+        CheckConstraint("(scope = 'project') = (project IS NOT NULL)", name="ck_skills_project"),
+        CheckConstraint(
+            "source_type IN ('agent', 'user', 'bootstrap', 'unknown')",
+            name="ck_skills_source_type",
+        ),
+        Index(
+            "ix_skills_user_active_created",
+            "user_id",
+            text("created_at DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    project: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    triggers: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    steps: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    constraints: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Increments only on an explicit ``replace``; starts at 1.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Hash of the normalized steps only (not description/triggers): this is
+    # the dedup key that decides whether a re-save is a no-op or a new version.
+    content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=False)
+    source_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown", server_default=text("'unknown'")
+    )
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The skill that replaced this one, same supersession shape as memories:
+    # superseding also stamps ``deleted_at``, so a replaced row leaves every
+    # active query through the filter that already exists.
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("skills.id", ondelete="SET NULL"), nullable=True
+    )
+    # Generated from description + triggers + steps, in that order -- the same
+    # text used to build ``embedding``.
+    search_tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            f"to_tsvector('{TEXT_SEARCH_CONFIG}', "
+            "description || ' ' || recallum_immutable_array_to_string(triggers, ' ') || "
+            "' ' || recallum_immutable_array_to_string(steps, ' '))",
+            persisted=True,
+        ),
+        nullable=False,
+    )
+
+    user: Mapped[User] = relationship(back_populates="skills")
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
 
 
 class MemoryProfile(Base):

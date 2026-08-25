@@ -10,8 +10,10 @@ instructions always override recalled memory.
 
 ## Tool Names
 
-Recallum exposes eleven tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
-`update`, `merge_memories`, `list_memories`, `related_memories`, `reconfirm`, and `forget`. The
+Recallum exposes fifteen tools: `context`, `recall`, `get_memory`, `remember`, `remember_batch`,
+`update`, `merge_memories`, `list_memories`, `related_memories`, `reconfirm`, `forget`,
+`save_skill`, `match_skills`, `get_skill`, and `forget_skill`. The last four store skills --
+versioned procedures, a separate entity from memories (see "Skills vs Memories" below). The
 prefix differs by client, because
 Claude Code namespaces a plugin-bundled MCP server:
 
@@ -28,6 +30,23 @@ forms that may apply. On Claude Code, **either** the plugin prefix or the native
 prefix (installer dual-write for Desktop ToolSearch) may be present — use ToolSearch (`+recallum`
 or `select:`) before concluding tools are missing. Cursor does not provide a stable textual tool
 prefix, so use the names shown in Available Tools. Below, tools are written unprefixed.
+
+## Skills vs Memories
+
+A memory is an outcome or a lesson: what was decided, preferred, constrained, or learned. A skill
+is a repeatable procedure with concrete steps: when this situation happens, follow this sequence.
+If it is unsure which one applies, store it as a memory -- skills are for genuinely reusable
+procedures, not every fact that happens to involve a sequence of actions.
+
+Use `save_skill` when you have discovered or verified a multi-step procedure worth reusing: pass
+`name`, `description`, `triggers` (when the procedure applies), `steps` (the ordered procedure),
+and an optional `constraints` bullet list. Saving the same `name` in the same scope again with
+identical steps is a no-op (`created=false`); different steps require `replace=true`, which
+supersedes the active version and links it to what it replaced. Use `match_skills` -- not
+`recall` -- to find a procedure by description or situation; `recall` searches memories only and
+never returns skills. Use `get_skill` to fetch one skill's full triggers, steps, and constraints
+by id, and `forget_skill` to retire one that no longer applies. Never derive a skill automatically
+from a session or transcript; only save one when it is genuinely reusable and verified.
 
 ## Memory Language
 

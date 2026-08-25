@@ -61,8 +61,7 @@ async def test_hnsw_index_excludes_soft_deleted_rows(container):
         definition = (
             await connection.execute(
                 text(
-                    "SELECT indexdef FROM pg_indexes "
-                    "WHERE indexname = 'ix_memories_embedding_hnsw'"
+                    "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_memories_embedding_hnsw'"
                 )
             )
         ).scalar_one()
@@ -165,9 +164,7 @@ async def test_remember_records_the_embedding_model(container):
     """
     user_id = await _make_user_with_key(container, "provenance@example.com")
     service = container.memory_service()
-    stored = await service.remember(
-        user_id, content="provenance is recorded", category="fact"
-    )
+    stored = await service.remember(user_id, content="provenance is recorded", category="fact")
 
     repo = container.memory_repository()
     row = await repo.get_active(user_id, stored.memory.id)
@@ -207,9 +204,7 @@ async def test_supersession_links_replaced_memory_and_frees_its_content(containe
         )
         row = (
             await connection.execute(
-                text(
-                    "SELECT superseded_by, deleted_at IS NOT NULL FROM memories WHERE id = :i"
-                ),
+                text("SELECT superseded_by, deleted_at IS NOT NULL FROM memories WHERE id = :i"),
                 {"i": original.memory.id},
             )
         ).one()
@@ -284,7 +279,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0017_coding_memory_kinds"
+        assert version == "0018_learned_skills"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -305,7 +300,7 @@ async def test_migrations_applied(container):
                 text(
                     "SELECT relname, pg_get_userbyid(relowner) FROM pg_class "
                     "WHERE relname IN ('users', 'api_keys', 'memories', "
-                    "'memory_profiles', 'web_sessions') "
+                    "'memory_profiles', 'web_sessions', 'skills') "
                     "ORDER BY relname"
                 )
             )
@@ -314,17 +309,22 @@ async def test_migrations_applied(container):
             ("api_keys", "recallum"),
             ("memories", "recallum"),
             ("memory_profiles", "recallum"),
+            ("skills", "recallum"),
             ("users", "recallum"),
             ("web_sessions", "recallum"),
         ]
         columns = (
-            await connection.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'users' ORDER BY ordinal_position"
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'users' ORDER BY ordinal_position"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert columns == [
             "id",
             "email",
@@ -360,10 +360,7 @@ async def test_source_type_defaults_unknown_and_rejects_invalid(container):
     async with engine.connect() as connection:
         constraint = (
             await connection.execute(
-                text(
-                    "SELECT conname FROM pg_constraint "
-                    "WHERE conname = 'ck_memories_source_type'"
-                )
+                text("SELECT conname FROM pg_constraint WHERE conname = 'ck_memories_source_type'")
             )
         ).scalar_one()
         assert constraint == "ck_memories_source_type"
@@ -457,9 +454,7 @@ async def test_update_kind_todo_requires_ttl_in_postgres(container):
     assert updated.memory.expires_at is not None
 
 
-async def test_database_readiness_rejects_superuser_and_missing_force_rls(
-    container, pg_database
-):
+async def test_database_readiness_rejects_superuser_and_missing_force_rls(container, pg_database):
     admin_engine = create_async_engine(pg_database["admin"])
     try:
         assert await DatabaseReadiness(admin_engine).is_ready() is False
@@ -473,9 +468,7 @@ async def test_database_readiness_rejects_superuser_and_missing_force_rls(
                 assert await container.database_readiness().is_ready() is False
             finally:
                 async with admin_engine.begin() as connection:
-                    await connection.execute(
-                        text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
-                    )
+                    await connection.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
 
         assert await container.database_readiness().is_ready() is True
     finally:
@@ -566,9 +559,7 @@ async def test_concurrent_user_creation_inserts_once(container):
 
 
 async def test_deduplication_returns_existing_memory(container):
-    user_id = await _make_user_with_key(
-        container, f"dedup-{uuid.uuid4().hex[:8]}@example.com"
-    )
+    user_id = await _make_user_with_key(container, f"dedup-{uuid.uuid4().hex[:8]}@example.com")
     service = container.memory_service()
 
     first = await service.remember(user_id, content="  usamos   uv  ", category="decision")
@@ -585,9 +576,7 @@ async def test_deduplication_returns_existing_memory(container):
             text("SELECT set_config('app.current_user_id', :uid, true)"),
             {"uid": str(user_id)},
         )
-        count = (
-            await connection.execute(text("SELECT count(*) FROM memories"))
-        ).scalar_one()
+        count = (await connection.execute(text("SELECT count(*) FROM memories"))).scalar_one()
         assert count == 1
 
 
@@ -610,12 +599,10 @@ async def test_isolation_between_two_users(container):
     alice_profile = await service.get_profile(alice_id)
     bob_profile = await service.get_profile(bob_id)
     assert all(
-        item.content != "nota de bob"
-        for item in alice_profile.static + alice_profile.dynamic
+        item.content != "nota de bob" for item in alice_profile.static + alice_profile.dynamic
     )
     assert all(
-        item.content != "secreto de alice"
-        for item in bob_profile.static + bob_profile.dynamic
+        item.content != "secreto de alice" for item in bob_profile.static + bob_profile.dynamic
     )
 
     bob_forget = await service.forget(bob_id, alice_list.items[0].id)
@@ -623,9 +610,7 @@ async def test_isolation_between_two_users(container):
 
     # The table-owning runtime role still obeys FORCE RLS on memories.
     async with container.engine().connect() as connection:
-        unseen = (
-            await connection.execute(text("SELECT count(*) FROM memories"))
-        ).scalar_one()
+        unseen = (await connection.execute(text("SELECT count(*) FROM memories"))).scalar_one()
         assert unseen == 0
         assert (
             await connection.execute(text("SELECT count(*) FROM memory_profiles"))
@@ -635,9 +620,7 @@ async def test_isolation_between_two_users(container):
             text("SELECT set_config('app.current_user_id', :uid, true)"),
             {"uid": str(alice_id)},
         )
-        visible = (
-            await connection.execute(text("SELECT count(*) FROM memories"))
-        ).scalar_one()
+        visible = (await connection.execute(text("SELECT count(*) FROM memories"))).scalar_one()
         assert visible == 1
         assert (
             await connection.execute(text("SELECT count(*) FROM memory_profiles"))
@@ -705,10 +688,7 @@ async def test_profile_upsert_rejects_stale_generation_after_concurrent_forget(c
             {"memory_id": remembered.memory.id},
         )
         await connection.execute(
-            text(
-                "UPDATE users SET memory_generation = memory_generation + 1 "
-                "WHERE id = :user_id"
-            ),
+            text("UPDATE users SET memory_generation = memory_generation + 1 WHERE id = :user_id"),
             {"user_id": user_id},
         )
         stale_upsert = asyncio.create_task(
@@ -732,9 +712,7 @@ async def test_profile_upsert_rejects_stale_generation_after_concurrent_forget(c
 
 
 async def test_forget_excludes_from_all_queries(container):
-    user_id = await _make_user_with_key(
-        container, f"forget-{uuid.uuid4().hex[:8]}@example.com"
-    )
+    user_id = await _make_user_with_key(container, f"forget-{uuid.uuid4().hex[:8]}@example.com")
     service = container.memory_service()
 
     result = await service.remember(user_id, content="temporal", category="fact")

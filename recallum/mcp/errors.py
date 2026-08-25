@@ -26,6 +26,7 @@ from recallum.diagnostics import (
 )
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
+from recallum.skills import SkillValidationError
 
 logger = logging.getLogger("recallum.mcp")
 
@@ -53,7 +54,7 @@ def translates_domain_errors[F: Callable[..., Awaitable[Any]]](tool: F) -> F:
         with diagnostic_correlation(_request_correlation()):
             try:
                 return await tool(*args, **kwargs)
-            except MemoryValidationError as exc:
+            except (MemoryValidationError, SkillValidationError) as exc:
                 public_message = str(exc)
             except EmbeddingError as exc:
                 record_sanitized_failure(logger, exc, message="MCP operation failure")

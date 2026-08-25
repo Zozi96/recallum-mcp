@@ -1161,7 +1161,7 @@ class ManifestTests(unittest.TestCase):
         text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("eleven tools", text)
+        self.assertIn("fifteen tools", text)
         for term in (
             "related_memories",
             "reconfirm",
@@ -1169,6 +1169,18 @@ class ManifestTests(unittest.TestCase):
             "capture-scan",
             "stale-review",
         ):
+            with self.subTest(term=term):
+                self.assertIn(term, text)
+
+    def test_memory_skill_documents_skill_vs_memory_guidance(self) -> None:
+        text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## Skills vs Memories", text)
+        self.assertIn("outcome or a lesson", text)
+        self.assertIn("repeatable procedure with concrete steps", text)
+        self.assertIn("unsure which one applies, store it as a memory", text)
+        for term in ("save_skill", "match_skills", "get_skill", "forget_skill", "replace=true"):
             with self.subTest(term=term):
                 self.assertIn(term, text)
 

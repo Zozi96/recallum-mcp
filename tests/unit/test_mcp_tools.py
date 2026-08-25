@@ -54,6 +54,10 @@ EXPECTED_TOOLS = {
     "related_memories",
     "reconfirm",
     "forget",
+    "save_skill",
+    "match_skills",
+    "get_skill",
+    "forget_skill",
 }
 
 
@@ -428,9 +432,9 @@ async def _exploding_server(
                 telemetry=fakes["telemetry"],
                 buffer=container.telemetry_buffer(),
                 api_key_service=key_service,
-                alice_key_id=(await key_service.list_keys_for_email("alice@example.com")).keys[
-                    0
-                ].id,
+                alice_key_id=(await key_service.list_keys_for_email("alice@example.com"))
+                .keys[0]
+                .id,
                 verifier_calls=[],
                 dispatch_calls=[],
             )
@@ -462,9 +466,9 @@ async def _batch_failure_server(
                 telemetry=fakes["telemetry"],
                 buffer=container.telemetry_buffer(),
                 api_key_service=key_service,
-                alice_key_id=(await key_service.list_keys_for_email("alice@example.com")).keys[
-                    0
-                ].id,
+                alice_key_id=(await key_service.list_keys_for_email("alice@example.com"))
+                .keys[0]
+                .id,
                 verifier_calls=[],
                 dispatch_calls=[],
             )
@@ -547,8 +551,7 @@ async def test_live_error_sentinels_are_absent_from_wire_logs_and_telemetry(
         assert 2 not in diagnostic.args
         assert "2" not in diagnostic.args
         assert any(
-            event.tool_name == "list_memories" and event.failed
-            for event in info.telemetry.events
+            event.tool_name == "list_memories" and event.failed for event in info.telemetry.events
         )
 
 
@@ -616,9 +619,7 @@ async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(
 
     assert sentinel not in str(failure.value)
     log_values = [
-        repr(value)
-        for record in handler.records
-        for value in (*vars(record).values(), record.args)
+        repr(value) for record in handler.records for value in (*vars(record).values(), record.args)
     ]
     assert all(sentinel not in value for value in log_values)
     assert any(record.name == "fastmcp.server.server" for record in handler.records)
@@ -735,7 +736,7 @@ async def test_prompt_retrieval_returns_the_hygiene_guidance_text(server: Server
     assert capture_text == _capture_scan_prompt()
 
 
-async def test_discovery_announces_exactly_eleven_tools_and_three_prompts(
+async def test_discovery_announces_exactly_fifteen_tools_and_three_prompts(
     server: ServerInfo,
 ):
     async with mcp_client(server.url, server.alice_token) as client:
@@ -772,9 +773,7 @@ async def test_discovery_announces_exactly_eleven_tools_and_three_prompts(
 
 async def test_missing_token_is_rejected(server: ServerInfo):
     async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{server.url}/mcp/", json=_initialize_request()
-        )
+        response = await client.post(f"{server.url}/mcp/", json=_initialize_request())
     assert response.status_code == 401
     assert response.content == b""
     assert response.headers["www-authenticate"] == "Bearer"
@@ -820,9 +819,7 @@ async def test_every_mcp_operation_rejects_missing_invalid_and_revoked_auth(
                 if kind in {"malformed", "wrong-scheme"}:
                     assert server.verifier_calls == []
                 else:
-                    assert server.verifier_calls == [
-                        authorization.removeprefix("Bearer ").strip()
-                    ]
+                    assert server.verifier_calls == [authorization.removeprefix("Bearer ").strip()]
     assert "rcl_not-a-real-key" not in caplog.text
     assert server.alice_revoked_token not in caplog.text
     assert "rcl_not-a-real-key" not in repr(server.telemetry.events)
@@ -959,9 +956,7 @@ async def test_profile_resource_is_registered_and_context_includes_profile(serve
         resources = await client.list_resources()
         assert any(str(r.uri) == "recallum://profile" for r in resources)
         templates = await client.list_resource_templates()
-        assert any(
-            str(t.uriTemplate) == "recallum://profile/{project}" for t in templates
-        )
+        assert any(str(t.uriTemplate) == "recallum://profile/{project}" for t in templates)
         await client.call_tool(
             "remember",
             {"content": "prefer English commit messages", "category": "preference"},
@@ -998,8 +993,7 @@ async def test_profile_resource_is_registered_and_context_includes_profile(serve
         assert profile.get("available") is True
         static = profile.get("static") or []
         assert any(
-            "prefer English commit messages" in (item.get("content") or "")
-            for item in static
+            "prefer English commit messages" in (item.get("content") or "") for item in static
         )
 
 
@@ -1113,9 +1107,10 @@ async def test_remember_and_update_accept_optional_source_provenance(server: Ser
             },
         )
         assert updated.structured_content["updated"] is True
-        assert updated.structured_content["memory"]["id"] == bootstrapped.structured_content[
-            "memory"
-        ]["id"]
+        assert (
+            updated.structured_content["memory"]["id"]
+            == bootstrapped.structured_content["memory"]["id"]
+        )
         assert updated.structured_content["memory"]["source_type"] == "user"
         assert updated.structured_content["memory"]["source_ref"] == "docs/bootstrap.md"
 
@@ -1260,22 +1255,16 @@ async def test_concurrent_users_keep_contextvar_identity_isolated(server: Server
             if server.buffer.pending_count == 0:
                 break
 
-    alice_contents = {
-        item["content"] for item in alice_listing.structured_content["items"]
-    }
+    alice_contents = {item["content"] for item in alice_listing.structured_content["items"]}
     bob_contents = {item["content"] for item in bob_listing.structured_content["items"]}
     assert alice_contents == {f"{alice_sentinel} {email_sentinel} {user_id_sentinel}"}
     assert bob_contents == {f"{bob_sentinel} {email_sentinel} {user_id_sentinel}"}
 
     telemetry_text = repr(server.telemetry.events)
     recallum_logs = "\n".join(
-        record.getMessage()
-        for record in caplog.records
-        if record.name.startswith("recallum")
+        record.getMessage() for record in caplog.records if record.name.startswith("recallum")
     )
-    assert {"remember", "list_memories"} <= {
-        event.tool_name for event in server.telemetry.events
-    }
+    assert {"remember", "list_memories"} <= {event.tool_name for event in server.telemetry.events}
     for sentinel in (
         alice_sentinel,
         bob_sentinel,
@@ -1286,3 +1275,182 @@ async def test_concurrent_users_keep_contextvar_identity_isolated(server: Server
     ):
         assert sentinel not in recallum_logs
         assert sentinel not in telemetry_text
+
+
+async def test_save_skill_match_skills_get_skill_forget_skill_full_flow(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        saved = await client.call_tool(
+            "save_skill",
+            {
+                "name": "create_database_migration",
+                "description": "How to create a new Alembic migration for a schema change.",
+                "triggers": ["modifying the database schema", "adding a column"],
+                "steps": [
+                    "Write the migration file",
+                    "Run alembic upgrade head",
+                    "Verify with psql",
+                ],
+                "project": "recallum",
+            },
+        )
+        assert saved.structured_content["created"] is True
+        skill_id = saved.structured_content["skill"]["id"]
+        assert saved.structured_content["skill"]["version"] == 1
+
+        # Re-saving identical name+steps creates no second active row.
+        resaved = await client.call_tool(
+            "save_skill",
+            {
+                "name": "create_database_migration",
+                "description": "How to create a new Alembic migration for a schema change.",
+                "triggers": ["modifying the database schema", "adding a column"],
+                "steps": [
+                    "Write the migration file",
+                    "Run alembic upgrade head",
+                    "Verify with psql",
+                ],
+                "project": "recallum",
+            },
+        )
+        assert resaved.structured_content["created"] is False
+        assert resaved.structured_content["skill"]["id"] == skill_id
+
+        matched = await client.call_tool(
+            "match_skills",
+            {"query": "modifying the database schema", "project": "recallum"},
+        )
+        assert matched.structured_content["mode"] == "hybrid"
+        assert any(item["id"] == skill_id for item in matched.structured_content["results"])
+
+        fetched = await client.call_tool("get_skill", {"skill_id": skill_id})
+        assert fetched.structured_content["found"] is True
+        assert fetched.structured_content["skill"]["name"] == "create_database_migration"
+
+        forgotten = await client.call_tool("forget_skill", {"skill_id": skill_id})
+        assert forgotten.structured_content["forgotten"] is True
+
+        after = await client.call_tool("get_skill", {"skill_id": skill_id})
+        assert after.structured_content["found"] is False
+
+
+async def test_save_skill_replace_supersedes_with_a_new_version(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        first = await client.call_tool(
+            "save_skill",
+            {
+                "name": "deploy_service",
+                "description": "How to deploy the service.",
+                "triggers": ["deploying a change"],
+                "steps": ["Build the image", "Push to registry"],
+            },
+        )
+        skill_id = first.structured_content["skill"]["id"]
+
+        # Different steps without replace is rejected.
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "save_skill",
+                {
+                    "name": "deploy_service",
+                    "description": "How to deploy the service.",
+                    "triggers": ["deploying a change"],
+                    "steps": ["A totally different procedure"],
+                },
+            )
+
+        replaced = await client.call_tool(
+            "save_skill",
+            {
+                "name": "deploy_service",
+                "description": "How to deploy the service.",
+                "triggers": ["deploying a change"],
+                "steps": ["A totally different procedure"],
+                "replace": True,
+            },
+        )
+        assert replaced.structured_content["created"] is True
+        assert replaced.structured_content["skill"]["version"] == 2
+        assert replaced.structured_content["skill"]["id"] != skill_id
+
+        # The superseded version is retired, not returned.
+        old = await client.call_tool("get_skill", {"skill_id": skill_id})
+        assert old.structured_content["found"] is False
+
+
+async def test_match_skills_and_get_forget_skill_isolate_cross_user_access(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as alice:
+        saved = await alice.call_tool(
+            "save_skill",
+            {
+                "name": "alice_only_skill",
+                "description": "A procedure only Alice should see.",
+                "triggers": ["alice's situation"],
+                "steps": ["do the alice thing"],
+            },
+        )
+        skill_id = saved.structured_content["skill"]["id"]
+
+    async with mcp_client(server.url, server.bob_token) as bob:
+        matched = await bob.call_tool("match_skills", {"query": "alice's situation"})
+        assert matched.structured_content["results"] == []
+
+        fetched = await bob.call_tool("get_skill", {"skill_id": skill_id})
+        assert fetched.structured_content["found"] is False
+
+        forgotten = await bob.call_tool("forget_skill", {"skill_id": skill_id})
+        assert forgotten.structured_content["forgotten"] is False
+
+    # Alice's skill survived Bob's forget attempt.
+    async with mcp_client(server.url, server.alice_token) as alice:
+        still_there = await alice.call_tool("get_skill", {"skill_id": skill_id})
+        assert still_there.structured_content["found"] is True
+
+
+async def test_match_skills_degrades_when_embeddings_unavailable(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        await client.call_tool(
+            "save_skill",
+            {
+                "name": "handle_flaky_test",
+                "description": "How to stabilize a flaky test.",
+                "triggers": ["a test fails intermittently"],
+                "steps": ["Reproduce locally", "Isolate the race", "Add a deterministic wait"],
+            },
+        )
+        server.memory_service._embeddings.available = False
+        try:
+            matched = await client.call_tool(
+                "match_skills", {"query": "flaky test intermittent failure"}
+            )
+        finally:
+            server.memory_service._embeddings.available = True
+        assert matched.structured_content["mode"] == "degraded_textual"
+
+
+async def test_merge_memories_never_accepts_a_skill_id(server: ServerInfo):
+    """The graph and merge_memories stay memory-only; a skill id is just unknown."""
+    async with mcp_client(server.url, server.alice_token) as client:
+        saved = await client.call_tool(
+            "save_skill",
+            {
+                "name": "unmergeable_skill",
+                "description": "A skill id must never be treated as a memory id.",
+                "triggers": ["merging memories"],
+                "steps": ["do not accept skill ids"],
+            },
+        )
+        skill_id = saved.structured_content["skill"]["id"]
+        remembered = await client.call_tool(
+            "remember", {"content": "a real memory to merge with", "category": "fact"}
+        )
+        memory_id = remembered.structured_content["memory"]["id"]
+
+        result = await client.call_tool(
+            "merge_memories",
+            {
+                "source_ids": [skill_id, memory_id],
+                "content": "consolidated",
+                "category": "fact",
+            },
+        )
+        assert result.structured_content["merged"] is False
