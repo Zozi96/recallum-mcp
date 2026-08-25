@@ -350,7 +350,7 @@ async def test_migrations_applied(container):
 
 
 async def test_source_type_defaults_unknown_and_rejects_invalid(container):
-    user_id = await _make_user_with_key(container, "provenance@example.com")
+    user_id = await _make_user_with_key(container, "source-type@example.com")
     service = container.memory_service()
     stored = await service.remember(user_id, content="no provenance row", category="fact")
     assert stored.memory.source_type == "unknown"
