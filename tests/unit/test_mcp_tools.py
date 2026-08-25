@@ -1120,6 +1120,79 @@ async def test_remember_and_update_accept_optional_source_provenance(server: Ser
         assert updated.structured_content["memory"]["source_ref"] == "docs/bootstrap.md"
 
 
+async def test_remember_recall_list_and_context_accept_optional_kind(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        omitted = await client.call_tool(
+            "remember",
+            {"content": "omitted kind fact", "category": "fact"},
+        )
+        assert omitted.structured_content["memory"]["kind"] is None
+
+        classified = await client.call_tool(
+            "remember",
+            {
+                "content": "clearing the build cache fixed it",
+                "category": "fact",
+                "kind": "solution",
+            },
+        )
+        assert classified.structured_content["memory"]["kind"] == "solution"
+        memory_id = classified.structured_content["memory"]["id"]
+
+        recall = await client.call_tool(
+            "recall", {"query": "clearing the build cache", "kind": "solution"}
+        )
+        assert any(item["id"] == memory_id for item in recall.structured_content["results"])
+
+        recall_wrong_kind = await client.call_tool(
+            "recall", {"query": "clearing the build cache", "kind": "failure"}
+        )
+        assert recall_wrong_kind.structured_content["results"] == []
+
+        listing = await client.call_tool("list_memories", {"kind": "solution"})
+        assert listing.structured_content["total"] == 1
+
+        listing_unfiltered = await client.call_tool("list_memories", {})
+        assert listing_unfiltered.structured_content["total"] == 2
+
+        context = await client.call_tool("context", {"kind": "solution"})
+        payload = context.structured_content
+        flat = [item for group in payload["groups"] for item in group["items"]]
+        profile = payload.get("profile") or {}
+        profile_items = list(profile.get("static") or []) + list(profile.get("dynamic") or [])
+        # ``recall`` above may have made this row profile-dynamic (recently
+        # recalled); either place is a valid home, the profile block is not
+        # affected by the ``kind`` filter itself.
+        assert any(item["id"] == memory_id for item in flat + profile_items)
+
+        updated = await client.call_tool("update", {"memory_id": memory_id, "kind": "architecture"})
+        assert updated.structured_content["memory"]["kind"] == "architecture"
+
+
+async def test_remember_rejects_durable_todo_kind_over_mcp(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        with pytest.raises(ToolError, match="todo"):
+            await client.call_tool(
+                "remember",
+                {"content": "durable todo over mcp", "category": "fact", "kind": "todo"},
+            )
+
+
+async def test_remember_todo_with_ttl_persists_with_expiry_over_mcp(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        result = await client.call_tool(
+            "remember",
+            {
+                "content": "branch x is blocked this week (mcp)",
+                "category": "fact",
+                "kind": "todo",
+                "ttl_seconds": 3600,
+            },
+        )
+        assert result.structured_content["memory"]["kind"] == "todo"
+        assert result.structured_content["memory"]["expires_at"] is not None
+
+
 async def test_no_cross_user_access(server: ServerInfo):
     async with mcp_client(server.url, server.alice_token) as alice:
         remembered = await alice.call_tool(

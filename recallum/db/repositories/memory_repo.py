@@ -82,6 +82,15 @@ class BucketMismatchError(ValueError):
     """
 
 
+class TodoRequiresTtlError(ValueError):
+    """``kind='todo'`` would resolve without a TTL (durable working memory).
+
+    Raised inside the update/supersede transaction, where the row's current
+    ``expires_at`` is already held: whether an omitted ``ttl_seconds`` still
+    leaves the memory durable can only be known there.
+    """
+
+
 class ProfileGenerationConflict(RuntimeError):
     """A profile rebuild raced a memory mutation and lost its CAS."""
 
@@ -525,6 +534,7 @@ class MemoryRepository:
         expires_at: datetime | None = None,
         source_type: str = "unknown",
         source_ref: str | None = None,
+        kind: str | None = None,
     ) -> Memory:
         """Insert a memory. Raises IntegrityError on exact active duplicate.
 
@@ -560,6 +570,7 @@ class MemoryRepository:
                 scope=scope,
                 project=project,
                 category=category,
+                kind=kind,
                 content=content,
                 content_hash=content_hash,
                 embedding=embedding,
@@ -632,6 +643,7 @@ class MemoryRepository:
         *,
         visibility: MemoryVisibility,
         category: str | None = None,
+        kind: str | None = None,
         limit: int,
         offset: int = 0,
         stale_before: datetime | None = None,
@@ -645,7 +657,7 @@ class MemoryRepository:
         is set; the total honours the same filter as the page.
         """
         async with self._sessions.for_user(user_id) as session:
-            filters = self._filters(user_id, visibility=visibility, category=category)
+            filters = self._filters(user_id, visibility=visibility, category=category, kind=kind)
             confirmed_at = func.coalesce(Memory.reconfirmed_at, Memory.created_at)
             if stale_before is not None:
                 filters.append(confirmed_at < stale_before)
@@ -792,6 +804,7 @@ class MemoryRepository:
         embedding_model: str | None,
         visibility: MemoryVisibility,
         category: str | None = None,
+        kind: str | None = None,
         limit: int,
         trigram_min_word_similarity: float | None = None,
     ) -> CandidatePools:
@@ -816,7 +829,7 @@ class MemoryRepository:
         behind this seam would force every adapter to reimplement it.
         """
         capped = min(limit, MAX_CANDIDATES)
-        filters = self._filters(user_id, visibility=visibility, category=category)
+        filters = self._filters(user_id, visibility=visibility, category=category, kind=kind)
         async with self._sessions.for_user(user_id) as session:
             vector: list[ScoredMemory] = []
             if embedding is not None:
@@ -948,6 +961,7 @@ class MemoryRepository:
         project: str | None,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None = None,
         top_limit: int,
         candidate_limit: int,
         query: str | None,
@@ -967,6 +981,12 @@ class MemoryRepository:
         them. ``embedding`` is None when the embedding service failed before
         the call; the vector leg is skipped and the textual legs still run
         inside the same transaction.
+
+        ``kind`` narrows the ordinary importance pools (``global_top`` /
+        ``project_top``) and the focus pools only. The always-on materialized
+        profile (``dynamic_candidates``, which feeds its dynamic slice) and
+        the category totals are not a memory candidate set for retrieval and
+        stay unfiltered.
         """
         global_visibility = MemoryVisibility.global_only()
         project_visibility = MemoryVisibility.project_only(project) if project is not None else None
@@ -991,7 +1011,11 @@ class MemoryRepository:
                     await session.execute(
                         select(Memory)
                         .options(*_light())
-                        .where(*self._filters(user_id, visibility=global_visibility, category=None))
+                        .where(
+                            *self._filters(
+                                user_id, visibility=global_visibility, category=None, kind=kind
+                            )
+                        )
                         .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
                         .limit(top_limit)
                     )
@@ -1008,7 +1032,10 @@ class MemoryRepository:
                             .options(*_light())
                             .where(
                                 *self._filters(
-                                    user_id, visibility=project_visibility, category=None
+                                    user_id,
+                                    visibility=project_visibility,
+                                    category=None,
+                                    kind=kind,
                                 )
                             )
                             .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
@@ -1054,7 +1081,9 @@ class MemoryRepository:
             text: list[ScoredMemory] = []
             trigram: list[ScoredMemory] = []
             if query is not None:
-                focus_filters = self._filters(user_id, visibility=visibility, category=category)
+                focus_filters = self._filters(
+                    user_id, visibility=visibility, category=category, kind=kind
+                )
                 if embedding is not None:
                     vector = await self._vector_candidates(
                         session, embedding, embedding_model, focus_filters, capped
@@ -1162,6 +1191,7 @@ class MemoryRepository:
         source_type: str | None = None,
         source_ref: str | None = None,
         set_source_ref: bool = False,
+        kind: str | None = None,
     ) -> Memory | None:
         """Change what a memory is filed under, not what it claims.
 
@@ -1174,6 +1204,10 @@ class MemoryRepository:
         already-expired memory can still be reached -- to extend or clear its
         TTL. ``expires_at`` sets a new expiry (ignored when ``clear_expires_at``
         is set); ``clear_expires_at`` removes any expiry, reverting to durable.
+
+        Raises ``TodoRequiresTtlError`` when the resulting row (``kind``, new
+        or inherited) would be ``todo`` with no expiry -- checked against this
+        edit's own expiry change if any, else the row's already-carried one.
         """
         async with self._sessions.for_user(user_id) as session:
             stmt = (
@@ -1203,11 +1237,18 @@ class MemoryRepository:
                 memory.source_type = source_type
             if set_source_ref:
                 memory.source_ref = source_ref
+            if kind is not None:
+                memory.kind = kind
+            if memory.kind == "todo" and memory.expires_at is None:
+                raise TodoRequiresTtlError(
+                    "kind='todo' requires a TTL; declare ttl_seconds or keep an existing expiry"
+                )
             if (
                 any(value is not None for value in (importance, category, metadata, expires_at))
                 or clear_expires_at
                 or source_type is not None
                 or set_source_ref
+                or kind is not None
             ):
                 await self._increment_generation(session, user_id)
             await session.flush()
@@ -1229,6 +1270,7 @@ class MemoryRepository:
         source_type: str | None = None,
         source_ref: str | None = None,
         set_source_ref: bool = False,
+        kind: str | None = None,
     ) -> Memory | None:
         """Replace an active memory with a new one, atomically.
 
@@ -1240,7 +1282,10 @@ class MemoryRepository:
 
         Returns ``None`` when the id is unknown or owned by someone else, which
         the caller must not distinguish. Raises ``IntegrityError`` when the new
-        content already exists as a separate active memory.
+        content already exists as a separate active memory. Raises
+        ``TodoRequiresTtlError`` when the resulting ``kind`` (new or inherited)
+        would be ``todo``: a content change always starts durable (no expiry
+        carries forward), so ``todo`` can never survive a content correction.
         """
         async with self._sessions.for_user(user_id) as session:
             stmt = (
@@ -1257,11 +1302,17 @@ class MemoryRepository:
             if original is None:
                 return None
 
+            resulting_kind = kind if kind is not None else original.kind
+            if resulting_kind == "todo":
+                raise TodoRequiresTtlError(
+                    "kind='todo' requires a TTL; a content change never carries one forward"
+                )
             replacement = Memory(
                 user_id=user_id,
                 scope=original.scope,
                 project=original.project,
                 category=category if category is not None else original.category,
+                kind=resulting_kind,
                 content=content,
                 content_hash=content_hash,
                 embedding=embedding,
@@ -1364,6 +1415,7 @@ class MemoryRepository:
                 scope=rows[0].scope,
                 project=rows[0].project,
                 category=category,
+                kind=None,
                 content=content,
                 content_hash=content_hash,
                 embedding=embedding,
@@ -1704,9 +1756,17 @@ class MemoryRepository:
         *,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None = None,
     ) -> list[Any]:
-        """Translate domain visibility into PostgreSQL adapter expressions."""
+        """Translate domain visibility into PostgreSQL adapter expressions.
+
+        ``kind`` is a concrete filter, never a wildcard: a NULL (unclassified)
+        row MUST NOT match it, matching SQL's own NULL-never-equals-anything
+        semantics for ``=``.
+        """
         filters = self._visibility_filters(user_id, visibility=visibility, active_only=True)
         if category is not None:
             filters.append(Memory.category == category)
+        if kind is not None:
+            filters.append(Memory.kind == kind)
         return filters

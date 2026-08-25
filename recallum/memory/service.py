@@ -34,6 +34,7 @@ from recallum.db.repositories.memory_repo import (
     MemoryRepository,
     ProfileGenerationConflict,
     ScoredMemory,
+    TodoRequiresTtlError,
     _cap_pairs_by_degree,
 )
 from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE, record_sanitized_failure
@@ -90,6 +91,8 @@ Category = Literal["preference", "decision", "constraint", "fact"]
 CATEGORIES: tuple[str, ...] = get_args(Category)
 SOURCE_TYPES: tuple[str, ...] = ("agent", "user", "bootstrap", "unknown")
 MAX_SOURCE_REF_CHARS = 512
+Kind = Literal["failure", "solution", "architecture", "convention", "todo", "command"]
+KINDS: tuple[str, ...] = get_args(Kind)
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -116,6 +119,7 @@ class MemoryService:
         *,
         content: str,
         category: str,
+        kind: str | None = None,
         project: str | None = None,
         importance: StrictImportance = 5,
         metadata: dict[str, Any] | None = None,
@@ -128,10 +132,13 @@ class MemoryService:
 
         ``ttl_seconds`` declares short-lived working memory: the memory stops
         being served everywhere once it expires. Omit it for durable context.
+        ``kind`` is the orthogonal coding facet; ``kind='todo'`` MUST declare
+        a TTL (working memory only, no durable backlog).
         """
         normalized = self._normalize_content(content)
         normalized_project = self._normalize_project(project)
         validated_category = self._validate_category(category)
+        validated_kind = self._validate_kind(kind) if kind is not None else None
         validated_importance = self._validate_importance(importance)
         validated_metadata = self._validate_metadata(metadata)
         expires_at = self._validate_ttl(ttl_seconds)
@@ -164,29 +171,42 @@ class MemoryService:
             # existing row was durable.
             existing_source_type = getattr(existing, "source_type", None) or "unknown"
             existing_source_ref = getattr(existing, "source_ref", None)
-            refreshed = await self._repo.update_attributes(
-                user_id,
-                existing.id,
-                importance=(
-                    validated_importance if validated_importance != existing.importance else None
-                ),
-                category=(validated_category if validated_category != existing.category else None),
-                metadata=(
-                    validated_metadata
-                    if validated_metadata != dict(existing.metadata_ or {})
-                    else None
-                ),
-                expires_at=expires_at,
-                clear_expires_at=ttl_seconds is None and existing.expires_at is not None,
-                source_type=(
-                    validated_source_type
-                    if validated_source_type is not None
-                    and validated_source_type != existing_source_type
-                    else None
-                ),
-                source_ref=validated_source_ref,
-                set_source_ref=set_source_ref and validated_source_ref != existing_source_ref,
-            )
+            existing_kind = getattr(existing, "kind", None)
+            try:
+                refreshed = await self._repo.update_attributes(
+                    user_id,
+                    existing.id,
+                    importance=(
+                        validated_importance
+                        if validated_importance != existing.importance
+                        else None
+                    ),
+                    category=(
+                        validated_category if validated_category != existing.category else None
+                    ),
+                    metadata=(
+                        validated_metadata
+                        if validated_metadata != dict(existing.metadata_ or {})
+                        else None
+                    ),
+                    expires_at=expires_at,
+                    clear_expires_at=ttl_seconds is None and existing.expires_at is not None,
+                    source_type=(
+                        validated_source_type
+                        if validated_source_type is not None
+                        and validated_source_type != existing_source_type
+                        else None
+                    ),
+                    source_ref=validated_source_ref,
+                    set_source_ref=set_source_ref and validated_source_ref != existing_source_ref,
+                    kind=(
+                        validated_kind
+                        if validated_kind is not None and validated_kind != existing_kind
+                        else None
+                    ),
+                )
+            except TodoRequiresTtlError as exc:
+                raise MemoryValidationError(str(exc)) from exc
             # It IS a reconfirmation, though: the claim was just observed to
             # still hold, and readers use that stamp to judge freshness.
             reconfirmed = await self._repo.mark_reconfirmed(user_id, existing.id)
@@ -198,6 +218,11 @@ class MemoryService:
                 language_warning=language_warning,
             )
 
+        if validated_kind == "todo" and expires_at is None:
+            raise MemoryValidationError(
+                "kind='todo' requires ttl_seconds; durable todos are not supported"
+            )
+
         # Embed before persisting: a memory without a vector is never stored.
         embedding = await self._embeddings.embed(normalized)
 
@@ -207,6 +232,7 @@ class MemoryService:
                 scope=scope,
                 project=normalized_project,
                 category=validated_category,
+                kind=validated_kind,
                 content=normalized,
                 content_hash=digest,
                 embedding=embedding,
@@ -337,6 +363,7 @@ class MemoryService:
                     user_id,
                     content=item.content,
                     category=item.category,
+                    kind=item.kind,
                     project=item.project,
                     importance=item.importance,
                     metadata=item.metadata,
@@ -378,6 +405,7 @@ class MemoryService:
         *,
         content: str | None = None,
         category: str | None = None,
+        kind: str | None = None,
         importance: StrictImportance | None = None,
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
@@ -401,6 +429,11 @@ class MemoryService:
         replacement row from a correction starts durable, matching a brand
         new ``remember``.
 
+        ``kind='todo'`` MUST resolve to a non-null expiry: either this call's
+        own ``ttl_seconds``, or an expiry the row already carries. A content
+        change never carries an expiry forward, so ``kind='todo'`` there is
+        always rejected.
+
         Scope and project are deliberately not editable: moving a memory
         between projects changes its deduplication key, which is a migration
         rather than a correction. Unknown and foreign ids are indistinguishable.
@@ -412,6 +445,7 @@ class MemoryService:
         if ttl_seconds is not None and clear_expiry:
             raise MemoryValidationError("ttl_seconds and clear_expiry are mutually exclusive")
         validated_category = self._validate_category(category) if category is not None else None
+        validated_kind = self._validate_kind(kind) if kind is not None else None
         validated_importance = (
             self._validate_importance(importance) if importance is not None else None
         )
@@ -422,18 +456,22 @@ class MemoryService:
         validated_source_ref = self._validate_source_ref(source_ref) if set_source_ref else None
 
         if content is None:
-            updated = await self._repo.update_attributes(
-                user_id,
-                memory_id,
-                importance=validated_importance,
-                category=validated_category,
-                metadata=validated_metadata,
-                expires_at=expires_at,
-                clear_expires_at=clear_expiry,
-                source_type=validated_source_type,
-                source_ref=validated_source_ref,
-                set_source_ref=set_source_ref,
-            )
+            try:
+                updated = await self._repo.update_attributes(
+                    user_id,
+                    memory_id,
+                    importance=validated_importance,
+                    category=validated_category,
+                    kind=validated_kind,
+                    metadata=validated_metadata,
+                    expires_at=expires_at,
+                    clear_expires_at=clear_expiry,
+                    source_type=validated_source_type,
+                    source_ref=validated_source_ref,
+                    set_source_ref=set_source_ref,
+                )
+            except TodoRequiresTtlError as exc:
+                raise MemoryValidationError(str(exc)) from exc
             if updated is None:
                 return UpdateResult(updated=False)
             await self._rebuild_profiles_for_memory(user_id, updated)
@@ -451,6 +489,7 @@ class MemoryService:
                 embedding=embedding,
                 embedding_model=self._embeddings.model,
                 category=validated_category,
+                kind=validated_kind,
                 importance=validated_importance,
                 metadata=validated_metadata,
                 source_client=source_client,
@@ -463,6 +502,8 @@ class MemoryService:
                 "another active memory already has that content; forget it first "
                 "or update that one instead"
             ) from exc
+        except TodoRequiresTtlError as exc:
+            raise MemoryValidationError(str(exc)) from exc
         if replacement is None:
             return UpdateResult(updated=False)
         await self._rebuild_profiles_for_memory(user_id, replacement)
@@ -655,6 +696,7 @@ class MemoryService:
         project: str | None = None,
         scope: str | None = None,
         category: str | None = None,
+        kind: str | None = None,
         limit: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
         strategy: str | None = None,
@@ -665,13 +707,16 @@ class MemoryService:
         (``ceil(chars/4)`` plus a small per-hit overhead). That count is an
         estimate for server-side packing, not the client model's tokenizer.
         ``strategy`` stably reorders already-fused candidates by category
-        priority and never drops a hit that still fits the budget.
+        priority and never drops a hit that still fits the budget. ``kind``
+        narrows the candidate set to that kind; a NULL (unclassified) memory
+        never matches a concrete ``kind`` filter.
         """
         validated_strategy = validate_strategy(strategy)
         normalized_query = self._normalize_content(query)
         normalized_project = self._normalize_project(project)
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         validated_category = self._validate_category(category) if category else None
+        validated_kind = self._validate_kind(kind) if kind else None
         effective_limit = self._clamp_limit(
             limit, self._limits.recall_default_limit, self._limits.recall_max_limit
         )
@@ -693,6 +738,7 @@ class MemoryService:
             embedding_model=self._embeddings.model,
             visibility=visibility,
             category=validated_category,
+            kind=validated_kind,
             limit=candidate_limit,
             trigram_min_word_similarity=self._trigram_min_similarity(),
         )
@@ -837,6 +883,7 @@ class MemoryService:
         *,
         project: str | None = None,
         focus: str | None = None,
+        kind: str | None = None,
         max_items: StrictPositiveLimit | None = None,
         max_chars: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
@@ -847,6 +894,9 @@ class MemoryService:
         ``focus`` biases the categorized snapshot toward the task at hand:
         hybrid matches are added to importance-ranked pools -- never
         displacing the profile block -- before the remaining budget is applied.
+        ``kind`` narrows the ordinary importance pools and the focus pool
+        only; the always-on materialized profile block is not a memory
+        candidate set and stays unaffected by it.
 
         ``max_tokens`` and ``strategy`` apply only to the categorized remainder
         after the reserved profile. Token counts use the same local estimate as
@@ -862,6 +912,7 @@ class MemoryService:
         """
         validated_strategy = validate_strategy(strategy)
         normalized_project = self._normalize_project(project)
+        validated_kind = self._validate_kind(kind) if kind else None
         normalized_focus = (
             self._normalize_content(focus) if focus is not None and focus.strip() else None
         )
@@ -892,6 +943,7 @@ class MemoryService:
             project=normalized_project,
             visibility=visibility,
             category=None,
+            kind=validated_kind,
             top_limit=self._limits.context_max_items_cap + 1,
             candidate_limit=min(MAX_CANDIDATES, max(self._limits.context_focus_limit * 3, 10)),
             query=normalized_focus,
@@ -1053,6 +1105,7 @@ class MemoryService:
         scope: str | None = None,
         project: str | None = None,
         category: str | None = None,
+        kind: str | None = None,
         stale: bool | None = None,
         limit: StrictPositiveLimit | None = None,
         offset: StrictNonNegativeOffset = 0,
@@ -1064,11 +1117,13 @@ class MemoryService:
         ``stale_after_days``. ``stale=False`` keeps only fresh ones; ``None``
         does not filter. This is the consumer for the freshness signals the
         schema records: without it, finding what needs re-verification meant
-        paging everything and doing date math by hand.
+        paging everything and doing date math by hand. ``kind`` narrows to
+        that kind; a NULL (unclassified) memory never matches it.
         """
         normalized_project = self._normalize_project(project)
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         validated_category = self._validate_category(category) if category else None
+        validated_kind = self._validate_kind(kind) if kind else None
         effective_limit = self._clamp_limit(
             limit, self._limits.list_default_limit, self._limits.list_max_limit
         )
@@ -1080,6 +1135,7 @@ class MemoryService:
             user_id,
             visibility=visibility,
             category=validated_category,
+            kind=validated_kind,
             limit=effective_limit,
             offset=offset,
             stale_before=cutoff if stale else None,
@@ -1418,6 +1474,13 @@ class MemoryService:
             )
         return category  # type: ignore[return-value]
 
+    def _validate_kind(self, kind: str) -> Kind:
+        if kind not in KINDS:
+            raise MemoryValidationError(
+                f"unknown kind '{kind}'; expected one of {', '.join(KINDS)}"
+            )
+        return kind  # type: ignore[return-value]
+
     def _validate_source_type(self, source_type: str | None) -> str | None:
         if source_type is None:
             return None
@@ -1499,6 +1562,7 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         scope=memory.scope,
         project=memory.project,
         category=memory.category,
+        kind=getattr(memory, "kind", None),
         content=memory.content,
         importance=memory.importance,
         source_client=memory.source_client,

@@ -16,6 +16,7 @@ from recallum.boundary_types import StrictImportance
 
 RecallMode = Literal["hybrid", "degraded_textual"]
 SourceType = Literal["agent", "user", "bootstrap", "unknown"]
+Kind = Literal["failure", "solution", "architecture", "convention", "todo", "command"]
 
 
 class MemoryOut(BaseModel):
@@ -30,13 +31,16 @@ class MemoryOut(BaseModel):
     the claim against reality, distinct from serve counts. Counters are as of
     before the response carrying them was produced. NULL / 0 mean "no signal
     yet". ``expires_at`` is set only for short-lived working memory that
-    declared a TTL; NULL means durable, no expiry (the default).
+    declared a TTL; NULL means durable, no expiry (the default). ``kind`` is
+    the orthogonal coding facet (failure/solution/architecture/convention/
+    todo/command); NULL means unclassified.
     """
 
     id: uuid.UUID
     scope: Literal["global", "project"]
     project: str | None = None
     category: Literal["preference", "decision", "constraint", "fact"]
+    kind: Kind | None = None
     content: str
     importance: int
     source_client: str | None = None
@@ -122,6 +126,7 @@ class RememberBatchItem(BaseModel):
 
     content: str
     category: Literal["preference", "decision", "constraint", "fact"]
+    kind: Kind | None = None
     project: str | None = None
     importance: StrictImportance = 5
     metadata: dict[str, Any] | None = None

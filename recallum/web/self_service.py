@@ -25,6 +25,7 @@ from recallum.db.repositories.memory_repo import MemoryRepository
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
 from recallum.memory.schemas import (
+    Kind,
     ListResult,
     MemoryGraphResponse,
     MemoryOut,
@@ -78,6 +79,7 @@ class CreateMemoryRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     content: str
     category: Category
+    kind: Kind | None = None
     scope: Scope | None = None
     project: str | None = None
     importance: StrictImportanceInput = 5
@@ -125,6 +127,7 @@ class MemoryLocationImmutableRequest(BaseModel):
 
 class CorrectMemoryRequest(MemoryLocationImmutableRequest):
     category: Category | None = None
+    kind: Kind | None = None
     importance: StrictImportanceInput | None = None
     metadata: Metadata | None = None
     ttl_seconds: int | None = None
@@ -136,6 +139,7 @@ class CorrectMemoryRequest(MemoryLocationImmutableRequest):
 class SupersedeMemoryRequest(MemoryLocationImmutableRequest):
     content: str
     category: Category | None = None
+    kind: Kind | None = None
     importance: StrictImportanceInput | None = None
     metadata: Metadata | None = None
     source_client: str | None = None
@@ -149,6 +153,7 @@ class SearchMemoriesRequest(BaseModel):
     project: str | None = None
     scope: Scope | None = None
     category: Category | None = None
+    kind: Kind | None = None
     limit: StrictPositiveLimit | None = None
     max_tokens: StrictPositiveLimit | None = None
     strategy: Literal["coding", "debugging", "planning", "review", "architecture"] | None = None
@@ -221,6 +226,7 @@ def _memory(row: Memory) -> MemoryOut:
         scope=row.scope,
         project=row.project,
         category=row.category,
+        kind=getattr(row, "kind", None),
         content=row.content,
         importance=row.importance,
         source_client=row.source_client,
@@ -277,6 +283,7 @@ def create_self_service_router(
         project: str | None,
         scope: Scope | None,
         category: Category | None,
+        kind: Kind | None = None,
         limit: int | None,
         max_tokens: int | None = None,
         strategy: str | None = None,
@@ -287,6 +294,7 @@ def create_self_service_router(
             project=project,
             scope=scope,
             category=category,
+            kind=kind,
             limit=limit,
             max_tokens=max_tokens,
             strategy=strategy,
@@ -298,6 +306,7 @@ def create_self_service_router(
         scope: Annotated[Scope | None, Query()] = None,
         project: Annotated[str | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
+        kind: Annotated[Kind | None, Query()] = None,
         stale: Annotated[bool | None, Query()] = None,
         limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
         offset: Annotated[StrictQueryNonNegativeOffset, Query()] = 0,
@@ -307,6 +316,7 @@ def create_self_service_router(
             scope=scope,
             project=project,
             category=category,
+            kind=kind,
             stale=stale,
             limit=limit,
             offset=offset,
@@ -345,6 +355,7 @@ def create_self_service_router(
             project=body.project,
             scope=body.scope,
             category=body.category,
+            kind=body.kind,
             limit=body.limit,
             max_tokens=body.max_tokens,
             strategy=body.strategy,
@@ -388,6 +399,7 @@ def create_self_service_router(
         project: Annotated[str | None, Query()] = None,
         scope: Annotated[Scope | None, Query()] = None,
         category: Annotated[Category | None, Query()] = None,
+        kind: Annotated[Kind | None, Query()] = None,
         limit: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
         max_tokens: Annotated[StrictQueryPositiveLimit | None, Query()] = None,
         strategy: Annotated[
@@ -404,6 +416,7 @@ def create_self_service_router(
             project=project,
             scope=scope,
             category=category,
+            kind=kind,
             limit=limit,
             max_tokens=max_tokens,
             strategy=strategy,

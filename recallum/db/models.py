@@ -133,6 +133,10 @@ class Memory(Base):
             "source_type IN ('agent', 'user', 'bootstrap', 'unknown')",
             name="ck_memories_source_type",
         ),
+        CheckConstraint(
+            "kind IN ('failure', 'solution', 'architecture', 'convention', 'todo', 'command')",
+            name="ck_memories_kind",
+        ),
         Index(
             "ix_memories_user_active_created",
             "user_id",
@@ -157,6 +161,11 @@ class Memory(Base):
     scope: Mapped[str] = mapped_column(String(16), nullable=False)
     project: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Orthogonal coding facet -- what the memory is (failure, solution,
+    # architecture, convention, todo, command) -- distinct from ``category``,
+    # which is the lifecycle facet (preference/decision/constraint/fact).
+    # NULL means unclassified; existing rows stay NULL.
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=False)

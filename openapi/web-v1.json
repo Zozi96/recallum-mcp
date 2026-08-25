@@ -237,6 +237,25 @@
             ],
             "title": "Importance"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "failure",
+                  "solution",
+                  "architecture",
+                  "convention",
+                  "todo",
+                  "command"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
           "metadata": {
             "anyOf": [
               {
@@ -330,6 +349,25 @@
             "default": 5,
             "title": "Importance",
             "type": "integer"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "failure",
+                  "solution",
+                  "architecture",
+                  "convention",
+                  "todo",
+                  "command"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
           },
           "metadata": {
             "anyOf": [
@@ -939,7 +977,7 @@
         "type": "object"
       },
       "MemoryOut": {
-        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory matched a ``recall``\nquery; ``context_count`` says how often it rode along in a ``context``\nsnapshot, which tracks importance more than relevance. ``reconfirm_count``\nis the cumulative number of explicit reconfirmations -- an agent verifying\nthe claim against reality, distinct from serve counts. Counters are as of\nbefore the response carrying them was produced. NULL / 0 mean \"no signal\nyet\". ``expires_at`` is set only for short-lived working memory that\ndeclared a TTL; NULL means durable, no expiry (the default).",
+        "description": "A stored memory as returned to agents.\n\n``reconfirmed_at`` is the last time identical content was re-stored: a\nfreshness signal that the claim still held then. ``last_recalled_at`` and\n``recall_count`` say when and how often this memory matched a ``recall``\nquery; ``context_count`` says how often it rode along in a ``context``\nsnapshot, which tracks importance more than relevance. ``reconfirm_count``\nis the cumulative number of explicit reconfirmations -- an agent verifying\nthe claim against reality, distinct from serve counts. Counters are as of\nbefore the response carrying them was produced. NULL / 0 mean \"no signal\nyet\". ``expires_at`` is set only for short-lived working memory that\ndeclared a TTL; NULL means durable, no expiry (the default). ``kind`` is\nthe orthogonal coding facet (failure/solution/architecture/convention/\ntodo/command); NULL means unclassified.",
         "properties": {
           "category": {
             "enum": [
@@ -985,6 +1023,25 @@
           "importance": {
             "title": "Importance",
             "type": "integer"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "failure",
+                  "solution",
+                  "architecture",
+                  "convention",
+                  "todo",
+                  "command"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
           },
           "last_recalled_at": {
             "anyOf": [
@@ -1496,6 +1553,25 @@
             "title": "Importance",
             "type": "integer"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "failure",
+                  "solution",
+                  "architecture",
+                  "convention",
+                  "todo",
+                  "command"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
           "last_recalled_at": {
             "anyOf": [
               {
@@ -1762,6 +1838,25 @@
             ],
             "title": "Category"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "failure",
+                  "solution",
+                  "architecture",
+                  "convention",
+                  "todo",
+                  "command"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
           "limit": {
             "anyOf": [
               {
@@ -2000,6 +2095,25 @@
               }
             ],
             "title": "Importance"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "failure",
+                  "solution",
+                  "architecture",
+                  "convention",
+                  "todo",
+                  "command"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
           },
           "metadata": {
             "anyOf": [
@@ -3031,6 +3145,30 @@
           },
           {
             "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "failure",
+                    "solution",
+                    "architecture",
+                    "convention",
+                    "todo",
+                    "command"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
             "name": "stale",
             "required": false,
             "schema": {
@@ -3333,6 +3471,30 @@
                 }
               ],
               "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "failure",
+                    "solution",
+                    "architecture",
+                    "convention",
+                    "todo",
+                    "command"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
             }
           },
           {

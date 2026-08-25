@@ -1172,6 +1172,21 @@ class ManifestTests(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertIn(term, text)
 
+    def test_memory_skill_documents_the_kind_facet(self) -> None:
+        text = " ".join(
+            (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        self.assertIn("second facet orthogonal to category", text)
+        self.assertIn("never `kind` instead of `category`", text)
+        for kind in ("failure", "solution", "architecture", "convention", "todo", "command"):
+            with self.subTest(kind=kind):
+                self.assertIn(f"`{kind}`", text)
+        self.assertIn("MUST also set `ttl_seconds`", text)
+        self.assertIn("durable (TTL-less) `todo` is rejected", text)
+        self.assertIn("a `kind` filter never matches it", text)
+
     def test_memory_skill_carries_stale_resolution_and_merge_vs_update(self) -> None:
         text = " ".join(
             (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")

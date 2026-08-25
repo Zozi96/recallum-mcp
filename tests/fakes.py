@@ -25,6 +25,7 @@ from recallum.db.repositories.memory_repo import (
     GraphSnapshot,
     ProfileGenerationConflict,
     ScoredMemory,
+    TodoRequiresTtlError,
     _cap_pairs_by_degree,
     _scalable_edges_enabled,
 )
@@ -175,10 +176,15 @@ class FakeMemoryRepository:
         user_id: uuid.UUID,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None = None,
     ) -> list[Memory]:
         rows = [m for m in self._active(user_id) if visibility.includes(m)]
         if category is not None:
             rows = [m for m in rows if m.category == category]
+        # A NULL (unclassified) row must never match a concrete kind filter,
+        # matching the adapter's SQL ``=`` semantics.
+        if kind is not None:
+            rows = [m for m in rows if m.kind == kind]
         return rows
 
     async def create_memory(self, user_id: uuid.UUID, **kwargs: Any) -> Memory:
@@ -254,13 +260,14 @@ class FakeMemoryRepository:
         *,
         visibility: MemoryVisibility,
         category: str | None = None,
+        kind: str | None = None,
         limit: int,
         offset: int = 0,
         stale_before: datetime | None = None,
         fresh_since: datetime | None = None,
     ) -> tuple[Sequence[Memory], int]:
         self.last_list_offset = offset
-        rows = self._filtered(user_id, visibility, category)
+        rows = self._filtered(user_id, visibility, category, kind)
         # Mirrors the adapter's COALESCE(reconfirmed_at, created_at) filter.
         if stale_before is not None:
             rows = [m for m in rows if (m.reconfirmed_at or m.created_at) < stale_before]
@@ -282,20 +289,29 @@ class FakeMemoryRepository:
         embedding_model: str | None,
         visibility: MemoryVisibility,
         category: str | None = None,
+        kind: str | None = None,
         limit: int,
         trigram_min_word_similarity: float | None = None,
     ) -> CandidatePools:
         capped = min(limit, MAX_CANDIDATES)
         return CandidatePools(
             vector=(
-                self._vector_pool(user_id, embedding, embedding_model, visibility, category, capped)
+                self._vector_pool(
+                    user_id, embedding, embedding_model, visibility, category, kind, capped
+                )
                 if embedding is not None
                 else []
             ),
-            text=self._text_pool(user_id, query, visibility, category, capped),
+            text=self._text_pool(user_id, query, visibility, category, kind, capped),
             trigram=(
                 self._trigram_pool(
-                    user_id, query, trigram_min_word_similarity, visibility, category, capped
+                    user_id,
+                    query,
+                    trigram_min_word_similarity,
+                    visibility,
+                    category,
+                    kind,
+                    capped,
                 )
                 if trigram_min_word_similarity is not None
                 else []
@@ -309,6 +325,7 @@ class FakeMemoryRepository:
         project: str | None,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None = None,
         top_limit: int,
         candidate_limit: int,
         query: str | None,
@@ -322,15 +339,19 @@ class FakeMemoryRepository:
     ):
         from types import SimpleNamespace
 
-        global_top = await self.most_important_active(
-            user_id, visibility=MemoryVisibility.global_only(), limit=top_limit
-        )
-        project_top = (
-            await self.most_important_active(
-                user_id, visibility=MemoryVisibility.project_only(project), limit=top_limit
+        def _most_important(bucket_visibility: MemoryVisibility) -> list[Memory]:
+            # ``kind`` narrows the ordinary importance pools only (mirrors
+            # the adapter's context_snapshot); the profile/dynamic slice and
+            # totals below stay unfiltered.
+            bucket = sorted(
+                self._filtered(user_id, bucket_visibility, None, kind), key=lambda m: str(m.id)
             )
-            if project is not None
-            else []
+            bucket.sort(key=lambda m: (m.importance, m.created_at), reverse=True)
+            return bucket[:top_limit]
+
+        global_top = _most_important(MemoryVisibility.global_only())
+        project_top = (
+            _most_important(MemoryVisibility.project_only(project)) if project is not None else []
         )
         rows = self._filtered(user_id, visibility, None)
         dynamic = [
@@ -351,6 +372,7 @@ class FakeMemoryRepository:
                 embedding_model=embedding_model,
                 visibility=visibility,
                 category=category,
+                kind=kind,
                 limit=candidate_limit,
                 trigram_min_word_similarity=trigram_min_word_similarity,
             )
@@ -467,13 +489,14 @@ class FakeMemoryRepository:
         embedding_model: str | None,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
         # Mirrors the adapter's provenance rule: NULL stays eligible, a
         # positively different model never votes (its cosine would be noise).
         scored = [
             ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
-            for m in self._filtered(user_id, visibility, category)
+            for m in self._filtered(user_id, visibility, category, kind)
             if m.embedding_model in (None, embedding_model)
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
@@ -485,6 +508,7 @@ class FakeMemoryRepository:
         query: str,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
         # Models the promise the textual signal makes at the seam, not
@@ -494,7 +518,7 @@ class FakeMemoryRepository:
         # sharing more query terms outranks one sharing fewer.
         words = set(_WORD_RE.findall(query.lower())) - _STOPWORDS
         scored = []
-        for memory in self._filtered(user_id, visibility, category):
+        for memory in self._filtered(user_id, visibility, category, kind):
             tokens = set(_WORD_RE.findall(memory.content.lower())) - _STOPWORDS
             score = float(len(words & tokens))
             if score > 0:
@@ -509,10 +533,11 @@ class FakeMemoryRepository:
         min_word_similarity: float,
         visibility: MemoryVisibility,
         category: str | None,
+        kind: str | None,
         limit: int,
     ) -> Sequence[ScoredMemory]:
         scored = []
-        for memory in self._filtered(user_id, visibility, category):
+        for memory in self._filtered(user_id, visibility, category, kind):
             score = _word_similarity(query, memory.content)
             if score >= min_word_similarity:
                 scored.append(ScoredMemory(memory=memory, score=score))
@@ -587,6 +612,7 @@ class FakeMemoryRepository:
             scope=found[0].scope,
             project=found[0].project,
             category=category,
+            kind=None,
             content=content,
             content_hash=content_hash,
             embedding=embedding,
@@ -803,6 +829,7 @@ class FakeMemoryRepository:
         source_type: str | None = None,
         source_ref: str | None = None,
         set_source_ref: bool = False,
+        kind: str | None = None,
     ) -> Memory | None:
         # Deliberately not gated on ``is_expired``: this is a keyed edit by
         # id, matching the adapter, so an expired row can still be reached to
@@ -824,11 +851,18 @@ class FakeMemoryRepository:
             memory.source_type = source_type
         if set_source_ref:
             memory.source_ref = source_ref
+        if kind is not None:
+            memory.kind = kind
+        if memory.kind == "todo" and memory.expires_at is None:
+            raise TodoRequiresTtlError(
+                "kind='todo' requires a TTL; declare ttl_seconds or keep an existing expiry"
+            )
         if (
             any(value is not None for value in (importance, category, metadata, expires_at))
             or clear_expires_at
             or source_type is not None
             or set_source_ref
+            or kind is not None
         ):
             self._bump(user_id)
         return memory
@@ -849,10 +883,16 @@ class FakeMemoryRepository:
         source_type: str | None = None,
         source_ref: str | None = None,
         set_source_ref: bool = False,
+        kind: str | None = None,
     ) -> Memory | None:
         original = self.rows.get(memory_id)
         if original is None or original.user_id != user_id or original.is_deleted:
             return None
+        resulting_kind = kind if kind is not None else original.kind
+        if resulting_kind == "todo":
+            raise TodoRequiresTtlError(
+                "kind='todo' requires a TTL; a content change never carries one forward"
+            )
         for other in self._active(user_id):
             if (
                 other.id != original.id
@@ -867,6 +907,7 @@ class FakeMemoryRepository:
             scope=original.scope,
             project=original.project,
             category=category if category is not None else original.category,
+            kind=resulting_kind,
             content=content,
             content_hash=content_hash,
             embedding=embedding,

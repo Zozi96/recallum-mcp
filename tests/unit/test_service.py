@@ -1727,3 +1727,190 @@ async def test_update_changes_provenance_in_place_and_supersede_copies_unless_ov
     assert overridden.memory is not None
     assert overridden.memory.source_type == "bootstrap"
     assert overridden.memory.source_ref == "bootstrap.md"
+
+
+# ------------------------------------------------------------------
+# kind (coding-memory-kinds): orthogonal coding facet + todo/TTL rule
+# ------------------------------------------------------------------
+
+
+async def test_remember_architecture_fact_carries_both_dimensions():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER, content="the api gateway routes by header", category="fact", kind="architecture"
+    )
+    assert result.memory.category == "fact"
+    assert result.memory.kind == "architecture"
+
+
+async def test_remember_omitted_kind_stays_null_and_valid():
+    service, _, _ = make_service()
+    result = await service.remember(USER, content="no kind stated here", category="fact")
+    assert result.memory.kind is None
+
+
+async def test_remember_rejects_unknown_kind():
+    service, _, _ = make_service()
+    with pytest.raises(MemoryValidationError):
+        await service.remember(USER, content="bogus kind claim", category="fact", kind="bogus")
+
+
+async def test_remember_echoes_kind_solution():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER, content="fixed by clearing the build cache", category="fact", kind="solution"
+    )
+    assert result.memory.kind == "solution"
+
+
+async def test_remember_todo_with_ttl_persists_with_expiry():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="branch x is blocked this week",
+        category="fact",
+        kind="todo",
+        ttl_seconds=3600,
+    )
+    assert result.memory.kind == "todo"
+    assert result.memory.expires_at is not None
+
+
+async def test_remember_rejects_durable_todo():
+    service, _, _ = make_service()
+    with pytest.raises(MemoryValidationError):
+        await service.remember(USER, content="durable todo claim", category="fact", kind="todo")
+
+
+async def test_remember_batch_rejects_durable_todo_item_without_failing_the_batch():
+    service, _, _ = make_service()
+    items = [
+        RememberBatchItem(content="a valid fact", category="fact"),
+        RememberBatchItem(content="a durable todo item", category="fact", kind="todo"),
+    ]
+    result = await service.remember_batch(USER, items=items)
+    assert result.stored == 1
+    assert result.failed == 1
+    assert result.results[0].error is None
+    assert result.results[1].error is not None
+    assert "todo" in result.results[1].error
+
+
+async def test_update_rejects_durable_todo_via_attribute_edit():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="a plain fact", category="fact")
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, stored.memory.id, kind="todo")
+
+
+async def test_update_sets_todo_kind_when_ttl_seconds_supplied():
+    service, _, _ = make_service()
+    stored = await service.remember(USER, content="a plain fact", category="fact")
+    updated = await service.update(USER, stored.memory.id, kind="todo", ttl_seconds=60)
+    assert updated.memory.kind == "todo"
+    assert updated.memory.expires_at is not None
+
+
+async def test_update_kind_todo_succeeds_when_row_already_carries_an_expiry():
+    service, _, _ = make_service()
+    stored = await service.remember(
+        USER, content="already has a ttl", category="fact", ttl_seconds=120
+    )
+    updated = await service.update(USER, stored.memory.id, kind="todo")
+    assert updated.memory.kind == "todo"
+    assert updated.memory.expires_at is not None
+
+
+async def test_update_content_change_always_rejects_todo_kind():
+    service, _, _ = make_service()
+    stored = await service.remember(
+        USER, content="todo original wording", category="fact", kind="todo", ttl_seconds=60
+    )
+    # A content change never carries an expiry forward, so an inherited
+    # (not even re-stated) kind='todo' must still be rejected.
+    with pytest.raises(MemoryValidationError):
+        await service.update(USER, stored.memory.id, content="todo corrected wording")
+
+
+async def test_recall_kind_filter_excludes_other_kinds_and_null_kinds():
+    service, _, _ = make_service()
+    await service.remember(USER, content="fusion failure trace", category="fact", kind="failure")
+    await service.remember(USER, content="fusion solution notes", category="fact", kind="solution")
+    await service.remember(USER, content="fusion unclassified notes", category="fact")
+
+    result = await service.recall(USER, query="fusion", kind="failure")
+    assert {r.content for r in result.results} == {"fusion failure trace"}
+
+
+async def test_recall_without_kind_filter_includes_null_kinds():
+    service, _, _ = make_service()
+    await service.remember(USER, content="fusion failure trace", category="fact", kind="failure")
+    await service.remember(USER, content="fusion unclassified notes", category="fact")
+
+    result = await service.recall(USER, query="fusion")
+    assert {r.content for r in result.results} == {
+        "fusion failure trace",
+        "fusion unclassified notes",
+    }
+
+
+async def test_list_memories_kind_filter_excludes_null_kind():
+    service, _, _ = make_service()
+    await service.remember(USER, content="command to run tests", category="fact", kind="command")
+    await service.remember(USER, content="an unclassified fact", category="fact")
+
+    filtered = await service.list_memories(USER, kind="command", limit=10)
+    assert {item.content for item in filtered.items} == {"command to run tests"}
+
+    unfiltered = await service.list_memories(USER, limit=10)
+    assert {item.content for item in unfiltered.items} == {
+        "command to run tests",
+        "an unclassified fact",
+    }
+
+
+async def test_context_kind_filter_narrows_groups_but_not_profile():
+    service, _, _ = make_service()
+    # Preference is always profile-static regardless of kind.
+    await service.remember(
+        USER, content="always on preference", category="preference", kind="convention"
+    )
+    matching = await service.remember(
+        USER, content="a matching architecture fact", category="fact", kind="architecture"
+    )
+    await service.remember(USER, content="a different kind fact", category="fact", kind="solution")
+    await service.remember(USER, content="an unclassified fact", category="fact")
+
+    result = await service.context(USER, kind="architecture", max_items=10, max_chars=6000)
+
+    profile_contents = [item.content for item in result.profile.static]
+    assert "always on preference" in profile_contents
+
+    group_contents = [item.content for group in result.groups for item in group.items]
+    assert matching.memory.content in group_contents
+    assert "a different kind fact" not in group_contents
+    assert "an unclassified fact" not in group_contents
+
+
+async def test_all_write_and_read_paths_omit_kind_stay_backward_compatible():
+    service, _, _ = make_service()
+    remembered = await service.remember(USER, content="omit kind remember", category="fact")
+    assert remembered.memory.kind is None
+
+    batch = await service.remember_batch(
+        USER, items=[RememberBatchItem(content="omit kind batch", category="fact")]
+    )
+    assert batch.results[0].memory.kind is None
+
+    updated = await service.update(USER, remembered.memory.id, importance=7)
+    assert updated.memory is not None
+    assert updated.memory.kind is None
+
+    recalled = await service.recall(USER, query="omit kind")
+    assert all(r.kind is None for r in recalled.results)
+
+    listed = await service.list_memories(USER, limit=10)
+    assert all(item.kind is None for item in listed.items)
+
+    context = await service.context(USER)
+    assert context is not None

@@ -93,6 +93,16 @@ substantial work, run one capture scan: what newly verified context would save a
    - `fact`: verified reusable context such as architecture, terminology, ownership, workflows,
      reusable commands that were verified, integration contracts, root causes, or recurring
      gotchas.
+   Optionally also set `kind`, a second facet orthogonal to category for coding work — choose
+   both together, never `kind` instead of `category`:
+   - `failure`: a bug, root cause, or broken approach.
+   - `solution`: what fixed a failure.
+   - `architecture`: how a system or component is structured.
+   - `convention`: a naming, style, or structural rule to follow.
+   - `todo`: a short-lived task, not a backlog — MUST also set `ttl_seconds`; a durable
+     (TTL-less) `todo` is rejected.
+   - `command`: a verified reusable command or workflow.
+   Leave `kind` unset when nothing fits; unset is normal and a `kind` filter never matches it.
 7. Call `remember` once per atomic statement, or `remember_batch` when the capture scan produced
    several (it applies the same rules per item and reports each outcome independently). Make each
    statement self-contained and specific enough to use without this conversation. Do not store

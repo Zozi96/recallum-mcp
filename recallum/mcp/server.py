@@ -25,6 +25,7 @@ from recallum.memory.schemas import (
     ContextResult,
     ForgetResult,
     GetResult,
+    Kind,
     ListResult,
     MergeResult,
     RecallResult,
@@ -168,6 +169,7 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def remember(
         content: str,
         category: Literal["preference", "decision", "constraint", "fact"],
+        kind: Kind | None = None,
         project: str | None = None,
         importance: StrictImportanceInput = 5,
         metadata: dict[str, str | int | float | bool | None] | None = None,
@@ -193,12 +195,16 @@ def build_mcp_server(container: Container) -> FastMCP:
         that should silently stop being served after it expires; omit it for
         durable context. `source_type` is who asserted the claim (agent, user,
         bootstrap, or unknown); `source_ref` is a short path, commit, or file
-        id — never a transcript. Both are optional.
+        id — never a transcript. Both are optional. `kind` is an optional
+        coding facet orthogonal to `category` (failure, solution,
+        architecture, convention, todo, command); `kind='todo'` MUST also set
+        `ttl_seconds` — durable todos are rejected.
         """
         return await memory_service().remember(
             require_identity().user_id,
             content=content,
             category=category,
+            kind=kind,
             project=project,
             importance=importance,
             metadata=metadata,
@@ -236,6 +242,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         project: str | None = None,
         scope: Literal["global", "project"] | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
+        kind: Kind | None = None,
         limit: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
         strategy: Literal[
@@ -258,6 +265,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         Optional ``max_tokens`` packs by a local estimate (not the client
         model tokenizer). Optional ``strategy`` reorders fused hits by
         task-type category priority without dropping matches that still fit.
+        Optional `kind` narrows to that coding facet; a memory with no kind
+        never matches a concrete `kind` filter.
         """
         return await memory_service().recall(
             require_identity().user_id,
@@ -265,6 +274,7 @@ def build_mcp_server(container: Container) -> FastMCP:
             project=project,
             scope=scope,
             category=category,
+            kind=kind,
             limit=limit,
             max_tokens=max_tokens,
             strategy=strategy,
@@ -275,6 +285,7 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def context(
         project: str | None = None,
         focus: str | None = None,
+        kind: Kind | None = None,
         max_items: StrictPositiveLimit | None = None,
         max_chars: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
@@ -298,12 +309,15 @@ def build_mcp_server(container: Container) -> FastMCP:
 
         Optional ``max_tokens`` / ``strategy`` apply to the categorized
         remainder only (profile stays reserved). Token counts are a local
-        estimate, not the client model tokenizer.
+        estimate, not the client model tokenizer. Optional `kind` narrows the
+        categorized groups and any `focus` match to that coding facet; the
+        always-on `profile` block is unaffected by it.
         """
         return await memory_service().context(
             require_identity().user_id,
             project=project,
             focus=focus,
+            kind=kind,
             max_items=max_items,
             max_chars=max_chars,
             max_tokens=max_tokens,
@@ -388,6 +402,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         scope: Literal["global", "project"] | None = None,
         project: str | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
+        kind: Kind | None = None,
         stale: bool | None = None,
         limit: StrictPositiveLimit | None = None,
         offset: StrictNonNegativeOffset = 0,
@@ -398,13 +413,16 @@ def build_mcp_server(container: Container) -> FastMCP:
         confirmation (reconfirmed_at, else created_at) is older than the
         server's staleness threshold. Verify each against reality, then
         prefer reconfirm over identical re-remember, or update or forget it.
-        stale=false keeps only fresh memories.
+        stale=false keeps only fresh memories. Optional `kind` narrows to
+        that coding facet; a memory with no kind never matches a concrete
+        `kind` filter.
         """
         return await memory_service().list_memories(
             require_identity().user_id,
             scope=scope,
             project=project,
             category=category,
+            kind=kind,
             stale=stale,
             limit=limit,
             offset=offset,
@@ -416,6 +434,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         memory_id: uuid.UUID,
         content: str | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
+        kind: Kind | None = None,
         importance: StrictImportanceInput | None = None,
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
@@ -441,12 +460,18 @@ def build_mcp_server(container: Container) -> FastMCP:
         back to durable. Scope and project cannot be changed. Unknown ids
         return updated=false. `source_type` and `source_ref` may be set on
         the attribute path or override copied provenance on a content change.
+        `kind` may be set on the attribute path or carries forward from the
+        original on a content change; `kind='todo'` MUST resolve to a
+        non-null expiry (this call's ttl_seconds or one the row already
+        carries) — a content change never carries an expiry forward, so
+        `kind='todo'` there is always rejected.
         """
         return await memory_service().update(
             require_identity().user_id,
             memory_id,
             content=content,
             category=category,
+            kind=kind,
             importance=importance,
             metadata=metadata,
             source_client=source_client,

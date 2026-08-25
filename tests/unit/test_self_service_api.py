@@ -1017,6 +1017,67 @@ def test_reconfirm_merge_and_related_delegate_with_forwarded_params(monkeypatch)
         }
 
 
+def test_create_search_list_and_patch_accept_optional_kind():
+    container, _ = build_test_container()
+    user = _user(container, "kind@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        omitted = client.post(
+            "/api/v1/me/memories",
+            json={"content": "no kind stated", "category": "fact"},
+        )
+        assert omitted.status_code == 201
+        assert omitted.json()["memory"]["kind"] is None
+
+        created = client.post(
+            "/api/v1/me/memories",
+            json={
+                "content": "clearing the cache fixed the build",
+                "category": "fact",
+                "kind": "solution",
+            },
+        )
+        assert created.status_code == 201
+        memory = created.json()["memory"]
+        assert memory["kind"] == "solution"
+
+        searched = client.post(
+            "/api/v1/me/memories/search",
+            json={"query": "clearing the cache", "kind": "solution"},
+        )
+        assert searched.status_code == 200
+        assert any(item["id"] == memory["id"] for item in searched.json()["results"])
+
+        searched_wrong_kind = client.post(
+            "/api/v1/me/memories/search",
+            json={"query": "clearing the cache", "kind": "failure"},
+        )
+        assert searched_wrong_kind.status_code == 200
+        assert searched_wrong_kind.json()["results"] == []
+
+        listed = client.get("/api/v1/me/memories", params={"kind": "solution"})
+        assert listed.status_code == 200
+        assert listed.json()["total"] == 1
+
+        listed_unfiltered = client.get("/api/v1/me/memories")
+        assert listed_unfiltered.status_code == 200
+        assert listed_unfiltered.json()["total"] == 2
+
+        patched = client.patch(
+            f"/api/v1/me/memories/{memory['id']}",
+            json={"kind": "architecture"},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["kind"] == "architecture"
+
+        rejected = client.post(
+            "/api/v1/me/memories",
+            json={"content": "a durable todo", "category": "fact", "kind": "todo"},
+        )
+        assert rejected.status_code == 422
+
+
 def test_create_and_patch_accept_optional_source_provenance():
     container, _ = build_test_container()
     user = _user(container, "provenance@example.com")

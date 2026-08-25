@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from recallum.config import TEXT_SEARCH_CONFIG
 from recallum.db.readiness import DatabaseReadiness
 from recallum.db.repositories.memory_repo import ProfileGenerationConflict
-from recallum.memory import MemoryVisibility
+from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.limits import MemoryLimits
 from recallum.memory.schemas import RememberResult
 from recallum.memory.service import MemoryService
@@ -284,7 +284,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0016_memory_provenance"
+        assert version == "0017_coding_memory_kinds"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -385,6 +385,76 @@ async def test_source_type_defaults_unknown_and_rejects_invalid(container):
                 text("UPDATE memories SET source_type = 'nope' WHERE id = :i"),
                 {"i": stored.memory.id},
             )
+
+
+async def test_kind_check_constraint_allows_null_and_rejects_invalid(container):
+    user_id = await _make_user_with_key(container, "kind@example.com")
+    service = container.memory_service()
+    stored = await service.remember(user_id, content="no kind row", category="fact")
+    assert stored.memory.kind is None
+
+    classified = await service.remember(
+        user_id, content="an architecture claim", category="fact", kind="architecture"
+    )
+    assert classified.memory.kind == "architecture"
+
+    engine = container.engine()
+    async with engine.connect() as connection:
+        constraint = (
+            await connection.execute(
+                text("SELECT conname FROM pg_constraint WHERE conname = 'ck_memories_kind'")
+            )
+        ).scalar_one()
+        assert constraint == "ck_memories_kind"
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :u, true)"),
+            {"u": str(user_id)},
+        )
+        row = (
+            await connection.execute(
+                text("SELECT kind FROM memories WHERE id = :i"),
+                {"i": stored.memory.id},
+            )
+        ).one()
+        assert tuple(row) == (None,)
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                text("UPDATE memories SET kind = 'nope' WHERE id = :i"),
+                {"i": stored.memory.id},
+            )
+
+
+async def test_recall_kind_filter_null_never_matches_a_concrete_filter_in_postgres(container):
+    user_id = await _make_user_with_key(container, "kind-recall@example.com")
+    service = container.memory_service()
+    await service.remember(
+        user_id, content="fusion failure trace pg", category="fact", kind="failure"
+    )
+    await service.remember(user_id, content="fusion unclassified notes pg", category="fact")
+
+    filtered = await service.recall(user_id, query="fusion", kind="failure")
+    assert {r.content for r in filtered.results} == {"fusion failure trace pg"}
+
+    unfiltered = await service.recall(user_id, query="fusion")
+    assert {r.content for r in unfiltered.results} == {
+        "fusion failure trace pg",
+        "fusion unclassified notes pg",
+    }
+
+
+async def test_update_kind_todo_requires_ttl_in_postgres(container):
+    user_id = await _make_user_with_key(container, "kind-todo@example.com")
+    service = container.memory_service()
+    stored = await service.remember(user_id, content="a plain pg fact", category="fact")
+
+    with pytest.raises(MemoryValidationError):
+        await service.update(user_id, stored.memory.id, kind="todo")
+
+    updated = await service.update(user_id, stored.memory.id, kind="todo", ttl_seconds=60)
+    assert updated.memory.kind == "todo"
+    assert updated.memory.expires_at is not None
 
 
 async def test_database_readiness_rejects_superuser_and_missing_force_rls(
