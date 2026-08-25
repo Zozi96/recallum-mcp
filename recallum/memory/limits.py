@@ -92,6 +92,18 @@ class MemoryLimits(BaseModel):
     # should be a few high-signal atoms, not a session recap.
     batch_max_items: int = Field(default=10, gt=0, le=20)
 
+    # Upper bound on declared code anchors (file/symbol/module) per memory.
+    # Small on purpose: a memory points at a handful of concrete locations,
+    # not a file manifest -- Recallum does not index a repository.
+    max_anchors_per_memory: int = Field(default=8, gt=0)
+
+    # Upper bound on one anchor identifier's character length, matching
+    # ``MAX_SOURCE_REF_CHARS``. Without it an oversized identifier reaches
+    # the btree index on ``(anchor_type, identifier)`` and fails there with
+    # a generic "index row size exceeds maximum" error instead of a clear
+    # domain rejection at write time.
+    max_anchor_identifier_chars: int = Field(default=512, gt=0)
+
     # Upper bound on a declared TTL for short-lived "working memory" (e.g.
     # "branch X is blocked this week"). 365 days keeps the feature usable for
     # genuinely long-lived-but-bounded facts while ruling out a de facto

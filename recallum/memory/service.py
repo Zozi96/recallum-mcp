@@ -20,7 +20,7 @@ import re
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
 
@@ -57,6 +57,7 @@ from recallum.memory.profile_select import (
     select_profile_slices,
 )
 from recallum.memory.schemas import (
+    Anchor,
     ContextResult,
     ForgetResult,
     GetResult,
@@ -91,6 +92,8 @@ SOURCE_TYPES: tuple[str, ...] = ("agent", "user", "bootstrap", "unknown")
 MAX_SOURCE_REF_CHARS = 512
 Kind = Literal["failure", "solution", "architecture", "convention", "todo", "command"]
 KINDS: tuple[str, ...] = get_args(Kind)
+AnchorType = Literal["file", "symbol", "module"]
+ANCHOR_TYPES: tuple[str, ...] = get_args(AnchorType)
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -125,13 +128,17 @@ class MemoryService:
         ttl_seconds: int | None = None,
         source_type: str | None = None,
         source_ref: str | None = None,
+        anchors: Sequence[Mapping[str, str]] | None = None,
     ) -> RememberResult:
         """Store an atomic memory, deduplicating exact active repeats.
 
         ``ttl_seconds`` declares short-lived working memory: the memory stops
         being served everywhere once it expires. Omit it for durable context.
         ``kind`` is the orthogonal coding facet; ``kind='todo'`` MUST declare
-        a TTL (working memory only, no durable backlog).
+        a TTL (working memory only, no durable backlog). ``anchors`` are
+        optional structured code references (``{"type", "identifier"}``,
+        type one of ``file``/``symbol``/``module``); omitting them stores the
+        memory exactly as before this feature existed.
         """
         normalized = self._normalize_content(content)
         normalized_project = self._normalize_project(project)
@@ -139,6 +146,7 @@ class MemoryService:
         validated_kind = self._validate_kind(kind) if kind is not None else None
         validated_importance = self._validate_importance(importance)
         validated_metadata = self._validate_metadata(metadata)
+        validated_anchors = self._validate_anchors(anchors)
         expires_at = self._validate_ttl(ttl_seconds)
         validated_source_type = self._validate_source_type(source_type)
         set_source_ref = source_ref is not None
@@ -241,6 +249,7 @@ class MemoryService:
                 expires_at=expires_at,
                 source_type=validated_source_type or "unknown",
                 source_ref=validated_source_ref,
+                anchors=validated_anchors,
             )
         except IntegrityError:
             # Concurrent insert won the race on the partial unique index.
@@ -369,6 +378,7 @@ class MemoryService:
                     ttl_seconds=item.ttl_seconds,
                     source_type=item.source_type,
                     source_ref=item.source_ref,
+                    anchors=([a.model_dump() for a in item.anchors] if item.anchors else None),
                 )
             except MemoryValidationError as exc:
                 outcomes.append(RememberBatchItemOutcome(error=str(exc)))
@@ -695,6 +705,8 @@ class MemoryService:
         scope: str | None = None,
         category: str | None = None,
         kind: str | None = None,
+        symbol: str | None = None,
+        file: str | None = None,
         limit: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
         strategy: str | None = None,
@@ -707,7 +719,13 @@ class MemoryService:
         ``strategy`` stably reorders already-fused candidates by category
         priority and never drops a hit that still fits the budget. ``kind``
         narrows the candidate set to that kind; a NULL (unclassified) memory
-        never matches a concrete ``kind`` filter.
+        never matches a concrete ``kind`` filter. ``symbol``/``file`` restrict
+        the candidate set to memories carrying a matching code anchor,
+        applied before RRF fusion; the query text still ranks within that
+        subset. Neither filter ORs in unanchored memories -- when nothing
+        matches, the result is empty even if a semantically similar
+        unanchored memory exists, and with neither filter set, anchors play
+        no role and unanchored memories rank exactly as today.
         """
         validated_strategy = validate_strategy(strategy)
         normalized_query = self._normalize_content(query)
@@ -715,6 +733,8 @@ class MemoryService:
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         validated_category = self._validate_category(category) if category else None
         validated_kind = self._validate_kind(kind) if kind else None
+        normalized_symbol = self._normalize_identifier(symbol)
+        normalized_file = self._normalize_identifier(file)
         effective_limit = self._clamp_limit(
             limit, self._limits.recall_default_limit, self._limits.recall_max_limit
         )
@@ -737,6 +757,8 @@ class MemoryService:
             visibility=visibility,
             category=validated_category,
             kind=validated_kind,
+            symbol=normalized_symbol,
+            file=normalized_file,
             limit=candidate_limit,
             trigram_min_word_similarity=self._trigram_min_similarity(),
         )
@@ -1440,6 +1462,61 @@ class MemoryService:
             )
         return kind  # type: ignore[return-value]
 
+    def _validate_anchors(
+        self, anchors: Sequence[Mapping[str, str]] | None
+    ) -> list[dict[str, str]]:
+        """Validate, normalize, dedupe and cap declared code anchors.
+
+        Normalization is NFC + strip only -- unlike content/project, internal
+        whitespace is left alone, since an identifier or a file path is
+        verbatim data, not prose. Case is never folded: exported Python/Go
+        symbols are case-sensitive. An unrecognized ``type``, an over-length
+        identifier, or exceeding the per-memory cap all reject the whole
+        write before anything persists. Two anchors that normalize to the
+        same ``(type, identifier)`` collapse to one, first-seen order kept --
+        otherwise they would hit ``uq_memory_anchors_identifier`` and surface
+        as a raw ``IntegrityError`` instead of a clear rejection here; the
+        cap is enforced after dedup, not before, so harmless repeats never
+        cost the caller their real anchor budget.
+        """
+        if not anchors:
+            return []
+        validated: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for anchor in anchors:
+            anchor_type = anchor.get("type")
+            identifier = anchor.get("identifier")
+            if anchor_type not in ANCHOR_TYPES:
+                raise MemoryValidationError(
+                    f"unknown anchor type '{anchor_type}'; "
+                    f"expected one of {', '.join(ANCHOR_TYPES)}"
+                )
+            if not isinstance(identifier, str) or not identifier.strip():
+                raise MemoryValidationError("anchor identifier must be a non-empty string")
+            normalized_identifier = unicodedata.normalize("NFC", identifier).strip()
+            if len(normalized_identifier) > self._limits.max_anchor_identifier_chars:
+                raise MemoryValidationError(
+                    f"anchor identifier exceeds "
+                    f"{self._limits.max_anchor_identifier_chars} characters"
+                )
+            key = (anchor_type, normalized_identifier)
+            if key in seen:
+                continue
+            seen.add(key)
+            validated.append({"type": anchor_type, "identifier": normalized_identifier})
+        if len(validated) > self._limits.max_anchors_per_memory:
+            raise MemoryValidationError(
+                f"anchors exceed {self._limits.max_anchors_per_memory} per memory"
+            )
+        return validated
+
+    def _normalize_identifier(self, identifier: str | None) -> str | None:
+        """NFC + strip, no whitespace collapse, no case fold -- see ``_validate_anchors``."""
+        if identifier is None:
+            return None
+        normalized = unicodedata.normalize("NFC", identifier).strip()
+        return normalized or None
+
     def _validate_source_type(self, source_type: str | None) -> str | None:
         if source_type is None:
             return None
@@ -1535,4 +1612,8 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         recall_count=memory.recall_count,
         context_count=memory.context_count,
         reconfirm_count=memory.reconfirm_count,
+        anchors=[
+            Anchor(type=a.anchor_type, identifier=a.identifier)
+            for a in (getattr(memory, "anchors", None) or [])
+        ],
     )

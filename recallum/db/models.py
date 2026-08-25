@@ -24,6 +24,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -231,6 +232,12 @@ class Memory(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="memories")
+    # ``selectin`` so every read path (list/search/get) gets anchors for free,
+    # without touching each repository call site individually; async-safe,
+    # unlike the default lazy loader.
+    anchors: Mapped[list[MemoryAnchor]] = relationship(
+        back_populates="memory", cascade="all, delete-orphan", lazy="selectin"
+    )
 
     @property
     def is_deleted(self) -> bool:
@@ -239,6 +246,40 @@ class Memory(Base):
     @property
     def is_expired(self) -> bool:
         return self.expires_at is not None and self.expires_at <= datetime.now(UTC)
+
+
+class MemoryAnchor(Base):
+    """A structured code reference on a memory: a file, symbol, or module.
+
+    Optional and capped at ``MemoryLimits.max_anchors_per_memory`` (8) per
+    memory. The ``recall`` filter matches ``anchor_type``/``identifier`` by
+    exact, NFC+strip-normalized equality -- never a prefix, a graph walk, or
+    a repository parse; Recallum does not build a code graph. This table
+    carries no ``user_id`` of its own -- reachability is scoped to the owning
+    memory's user via an RLS policy that checks ownership through ``memories``
+    by subquery, the same isolation guarantee as a direct ``user_id`` column
+    without duplicating it.
+    """
+
+    __tablename__ = "memory_anchors"
+    __table_args__ = (
+        CheckConstraint(
+            "anchor_type IN ('file', 'symbol', 'module')", name="ck_memory_anchors_type"
+        ),
+        UniqueConstraint(
+            "memory_id", "anchor_type", "identifier", name="uq_memory_anchors_identifier"
+        ),
+        Index("ix_memory_anchors_type_identifier", "anchor_type", "identifier"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    memory_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
+    )
+    anchor_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    identifier: Mapped[str] = mapped_column(Text, nullable=False)
+
+    memory: Mapped[Memory] = relationship(back_populates="anchors")
 
 
 class Skill(Base):

@@ -279,7 +279,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0018_learned_skills"
+        assert version == "0019_memory_code_anchors"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -423,6 +423,223 @@ async def test_kind_check_constraint_allows_null_and_rejects_invalid(container):
             )
 
 
+async def test_memory_anchor_round_trips_symbol_and_file_in_postgres(container):
+    """Anchors persist through the real ``memory_anchors`` child table."""
+    user_id = await _make_user_with_key(container, "anchor-roundtrip@example.com")
+    service = container.memory_service()
+    stored = await service.remember(
+        user_id,
+        content="PaymentService.capture retries once on gateway timeout",
+        category="fact",
+        anchors=[
+            {"type": "symbol", "identifier": "PaymentService.capture"},
+            {"type": "file", "identifier": "src/domain/users.py"},
+        ],
+    )
+    assert {(a.type, a.identifier) for a in stored.memory.anchors} == {
+        ("symbol", "PaymentService.capture"),
+        ("file", "src/domain/users.py"),
+    }
+
+    fetched = await service.get(user_id, stored.memory.id)
+    assert fetched.found is True
+    assert {(a.type, a.identifier) for a in fetched.memory.anchors} == {
+        ("symbol", "PaymentService.capture"),
+        ("file", "src/domain/users.py"),
+    }
+
+    engine = container.engine()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :u, true)"),
+            {"u": str(user_id)},
+        )
+        rows = (
+            await connection.execute(
+                text(
+                    "SELECT anchor_type, identifier FROM memory_anchors "
+                    "WHERE memory_id = :i ORDER BY anchor_type"
+                ),
+                {"i": stored.memory.id},
+            )
+        ).all()
+        assert {tuple(row) for row in rows} == {
+            ("file", "src/domain/users.py"),
+            ("symbol", "PaymentService.capture"),
+        }
+
+
+async def test_memory_anchor_rejects_unknown_type_at_the_check_constraint(container):
+    """Defense in depth: the DB CHECK rejects an invalid ``anchor_type`` too."""
+    user_id = await _make_user_with_key(container, "anchor-check@example.com")
+    service = container.memory_service()
+    stored = await service.remember(user_id, content="a plain anchor-free fact", category="fact")
+
+    engine = container.engine()
+    async with engine.connect() as connection:
+        constraint = (
+            await connection.execute(
+                text("SELECT conname FROM pg_constraint WHERE conname = 'ck_memory_anchors_type'")
+            )
+        ).scalar_one()
+        assert constraint == "ck_memory_anchors_type"
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :u, true)"),
+            {"u": str(user_id)},
+        )
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                text(
+                    "INSERT INTO memory_anchors (id, memory_id, anchor_type, identifier) "
+                    "VALUES (gen_random_uuid(), :m, 'bogus', 'x')"
+                ),
+                {"m": stored.memory.id},
+            )
+
+
+async def test_memory_anchor_cascade_deletes_with_its_memory(container):
+    """ON DELETE CASCADE: hard-deleting the memory removes its anchor rows too."""
+    user_id = await _make_user_with_key(container, "anchor-cascade@example.com")
+    service = container.memory_service()
+    stored = await service.remember(
+        user_id,
+        content="cascade target claim",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+
+    engine = container.engine()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :u, true)"),
+            {"u": str(user_id)},
+        )
+        before = (
+            await connection.execute(
+                text("SELECT count(*) FROM memory_anchors WHERE memory_id = :i"),
+                {"i": stored.memory.id},
+            )
+        ).scalar_one()
+        assert before == 1
+        await connection.execute(
+            text("DELETE FROM memories WHERE id = :i"), {"i": stored.memory.id}
+        )
+        after = (
+            await connection.execute(
+                text("SELECT count(*) FROM memory_anchors WHERE memory_id = :i"),
+                {"i": stored.memory.id},
+            )
+        ).scalar_one()
+        assert after == 0
+
+
+async def test_memory_anchor_unreachable_across_users(container):
+    """RLS on ``memory_anchors`` (subquery against ``memories``) blocks a foreign read."""
+    alice_id = await _make_user_with_key(
+        container, f"anchor-alice-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    bob_id = await _make_user_with_key(container, f"anchor-bob-{uuid.uuid4().hex[:8]}@example.com")
+    service = container.memory_service()
+    alice_memory = await service.remember(
+        alice_id,
+        content="alice's anchored claim",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+
+    # Bob's own recall by the same symbol must not surface Alice's memory.
+    bob_recall = await service.recall(
+        bob_id, query="PaymentService.capture", symbol="PaymentService.capture"
+    )
+    assert bob_recall.results == []
+
+    # Direct SQL under Bob's RLS context sees zero rows, even by memory_id.
+    engine = container.engine()
+    async with engine.connect() as connection:
+        unseen = (
+            await connection.execute(text("SELECT count(*) FROM memory_anchors"))
+        ).scalar_one()
+        assert unseen == 0
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :u, true)"),
+            {"u": str(bob_id)},
+        )
+        foreign = (
+            await connection.execute(
+                text("SELECT count(*) FROM memory_anchors WHERE memory_id = :i"),
+                {"i": alice_memory.memory.id},
+            )
+        ).scalar_one()
+        assert foreign == 0
+
+
+async def test_recall_symbol_filter_excludes_unanchored_similar_memory_in_postgres(container):
+    """Proves the SQL EXISTS pre-filter positively, not just against the fake:
+    an anchored memory is returned while the same user's semantically similar
+    but unanchored memory is excluded -- the filter is never OR'd away."""
+    user_id = await _make_user_with_key(
+        container, f"anchor-positive-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    anchored = await service.remember(
+        user_id,
+        content="PaymentService.capture retries once on gateway timeout",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+    unanchored = await service.remember(
+        user_id,
+        content="PaymentService.capture also appears here unanchored",
+        category="fact",
+    )
+
+    result = await service.recall(
+        user_id, query="PaymentService.capture", symbol="PaymentService.capture"
+    )
+    result_ids = {r.id for r in result.results}
+    assert anchored.memory.id in result_ids
+    assert unanchored.memory.id not in result_ids
+
+    unfiltered = await service.recall(user_id, query="PaymentService.capture")
+    unfiltered_ids = {r.id for r in unfiltered.results}
+    assert anchored.memory.id in unfiltered_ids
+    assert unanchored.memory.id in unfiltered_ids
+
+
+async def test_update_content_change_keeps_anchor_reachable_via_recall_symbol_in_postgres(
+    container,
+):
+    """Security review fix 1: correcting an anchored memory must not drop it
+    from ``recall(symbol=...)`` -- exercises the real ``supersede`` + selectin
+    path where the anchor-loss bug and the DetachedInstanceError both lived."""
+    user_id = await _make_user_with_key(
+        container, f"anchor-update-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    stored = await service.remember(
+        user_id,
+        content="PaymentService.capture retries once on gateway timeout",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+
+    updated = await service.update(
+        user_id, stored.memory.id, content="PaymentService.capture retries twice on timeout pg"
+    )
+    assert updated.memory is not None
+    assert {(a.type, a.identifier) for a in updated.memory.anchors} == {
+        ("symbol", "PaymentService.capture")
+    }
+
+    result = await service.recall(
+        user_id, query="PaymentService.capture", symbol="PaymentService.capture"
+    )
+    assert {r.id for r in result.results} == {updated.memory.id}
+
+
 async def test_recall_kind_filter_null_never_matches_a_concrete_filter_in_postgres(container):
     user_id = await _make_user_with_key(container, "kind-recall@example.com")
     service = container.memory_service()
@@ -459,7 +676,7 @@ async def test_database_readiness_rejects_superuser_and_missing_force_rls(contai
     try:
         assert await DatabaseReadiness(admin_engine).is_ready() is False
 
-        for table in ("memories", "memory_profiles"):
+        for table in ("memories", "memory_profiles", "memory_anchors", "skills"):
             try:
                 async with admin_engine.begin() as connection:
                     await connection.execute(

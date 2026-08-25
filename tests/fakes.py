@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from recallum.config import EMBEDDING_DIMENSIONS, Settings
 from recallum.container import Container, create_container
-from recallum.db.models import ApiKey, Memory, Skill, User, WebSession
+from recallum.db.models import ApiKey, Memory, MemoryAnchor, Skill, User, WebSession
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
     BucketMismatchError,
@@ -178,6 +178,8 @@ class FakeMemoryRepository:
         visibility: MemoryVisibility,
         category: str | None,
         kind: str | None = None,
+        symbol: str | None = None,
+        file: str | None = None,
     ) -> list[Memory]:
         rows = [m for m in self._active(user_id) if visibility.includes(m)]
         if category is not None:
@@ -186,7 +188,20 @@ class FakeMemoryRepository:
         # matching the adapter's SQL ``=`` semantics.
         if kind is not None:
             rows = [m for m in rows if m.kind == kind]
+        # Mirrors the adapter's EXISTS predicate: a memory qualifies only if
+        # it carries a matching anchor; unanchored rows never sneak back in.
+        if symbol is not None:
+            rows = [m for m in rows if self._has_anchor(m, "symbol", symbol)]
+        if file is not None:
+            rows = [m for m in rows if self._has_anchor(m, "file", file)]
         return rows
+
+    @staticmethod
+    def _has_anchor(memory: Memory, anchor_type: str, identifier: str) -> bool:
+        return any(
+            a.anchor_type == anchor_type and a.identifier == identifier
+            for a in (memory.anchors or ())
+        )
 
     async def create_memory(self, user_id: uuid.UUID, **kwargs: Any) -> Memory:
         scope = kwargs["scope"]
@@ -216,6 +231,7 @@ class FakeMemoryRepository:
             ):
                 raise IntegrityError("create_memory", {}, Exception("duplicate key"))
         metadata = kwargs.pop("metadata", {})
+        anchors = kwargs.pop("anchors", None) or ()
         memory = Memory(
             id=kwargs.pop("memory_id", None) or uuid.uuid4(),
             user_id=user_id,
@@ -231,6 +247,10 @@ class FakeMemoryRepository:
             reconfirm_count=0,
             source_type=kwargs.pop("source_type", "unknown"),
             source_ref=kwargs.pop("source_ref", None),
+            anchors=[
+                MemoryAnchor(anchor_type=anchor["type"], identifier=anchor["identifier"])
+                for anchor in anchors
+            ],
             **kwargs,
         )
         self.rows[memory.id] = memory
@@ -291,6 +311,8 @@ class FakeMemoryRepository:
         visibility: MemoryVisibility,
         category: str | None = None,
         kind: str | None = None,
+        symbol: str | None = None,
+        file: str | None = None,
         limit: int,
         trigram_min_word_similarity: float | None = None,
     ) -> CandidatePools:
@@ -298,12 +320,20 @@ class FakeMemoryRepository:
         return CandidatePools(
             vector=(
                 self._vector_pool(
-                    user_id, embedding, embedding_model, visibility, category, kind, capped
+                    user_id,
+                    embedding,
+                    embedding_model,
+                    visibility,
+                    category,
+                    kind,
+                    capped,
+                    symbol,
+                    file,
                 )
                 if embedding is not None
                 else []
             ),
-            text=self._text_pool(user_id, query, visibility, category, kind, capped),
+            text=self._text_pool(user_id, query, visibility, category, kind, capped, symbol, file),
             trigram=(
                 self._trigram_pool(
                     user_id,
@@ -313,6 +343,8 @@ class FakeMemoryRepository:
                     category,
                     kind,
                     capped,
+                    symbol,
+                    file,
                 )
                 if trigram_min_word_similarity is not None
                 else []
@@ -492,12 +524,14 @@ class FakeMemoryRepository:
         category: str | None,
         kind: str | None,
         limit: int,
+        symbol: str | None = None,
+        file: str | None = None,
     ) -> Sequence[ScoredMemory]:
         # Mirrors the adapter's provenance rule: NULL stays eligible, a
         # positively different model never votes (its cosine would be noise).
         scored = [
             ScoredMemory(memory=m, score=_cosine(m.embedding, embedding))
-            for m in self._filtered(user_id, visibility, category, kind)
+            for m in self._filtered(user_id, visibility, category, kind, symbol, file)
             if m.embedding_model in (None, embedding_model)
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
@@ -511,6 +545,8 @@ class FakeMemoryRepository:
         category: str | None,
         kind: str | None,
         limit: int,
+        symbol: str | None = None,
+        file: str | None = None,
     ) -> Sequence[ScoredMemory]:
         # Models the promise the textual signal makes at the seam, not
         # Postgres' implementation of it: whole-word matching ("cat" must not
@@ -519,7 +555,7 @@ class FakeMemoryRepository:
         # sharing more query terms outranks one sharing fewer.
         words = set(_WORD_RE.findall(query.lower())) - _STOPWORDS
         scored = []
-        for memory in self._filtered(user_id, visibility, category, kind):
+        for memory in self._filtered(user_id, visibility, category, kind, symbol, file):
             tokens = set(_WORD_RE.findall(memory.content.lower())) - _STOPWORDS
             score = float(len(words & tokens))
             if score > 0:
@@ -536,9 +572,11 @@ class FakeMemoryRepository:
         category: str | None,
         kind: str | None,
         limit: int,
+        symbol: str | None = None,
+        file: str | None = None,
     ) -> Sequence[ScoredMemory]:
         scored = []
-        for memory in self._filtered(user_id, visibility, category, kind):
+        for memory in self._filtered(user_id, visibility, category, kind, symbol, file):
             score = _word_similarity(query, memory.content)
             if score >= min_word_similarity:
                 scored.append(ScoredMemory(memory=memory, score=score))
@@ -929,6 +967,12 @@ class FakeMemoryRepository:
             recall_count=0,
             context_count=0,
             reconfirm_count=0,
+            # Mirrors the adapter: a correction keeps the original's anchors,
+            # so ``recall(symbol=...)`` still finds the corrected memory.
+            anchors=[
+                MemoryAnchor(anchor_type=a.anchor_type, identifier=a.identifier)
+                for a in (original.anchors or ())
+            ],
         )
         self.rows[replacement.id] = replacement
         original.deleted_at = datetime.now(UTC)

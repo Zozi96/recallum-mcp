@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
 
 from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
-from recallum.db.models import Memory, MemoryProfile, User
+from recallum.db.models import Memory, MemoryAnchor, MemoryProfile, User
 from recallum.db.session import SessionProvider
 from recallum.memory import MemoryVisibility
 
@@ -535,11 +535,15 @@ class MemoryRepository:
         source_type: str = "unknown",
         source_ref: str | None = None,
         kind: str | None = None,
+        anchors: Sequence[Mapping[str, str]] | None = None,
     ) -> Memory:
         """Insert a memory. Raises IntegrityError on exact active duplicate.
 
         ``expires_at`` is None by default -- durable, no expiry -- and only
         set when the caller declared a TTL for short-lived working memory.
+        ``anchors`` are pre-validated ``{"type", "identifier"}`` mappings;
+        cascading the relationship inserts them in the same flush as the
+        memory itself.
 
         The partial unique dedup index is keyed on ``deleted_at IS NULL``
         only -- a Postgres index predicate must be immutable, so it cannot
@@ -581,6 +585,10 @@ class MemoryRepository:
                 source_ref=source_ref,
                 metadata_=metadata,
                 expires_at=expires_at,
+                anchors=[
+                    MemoryAnchor(anchor_type=anchor["type"], identifier=anchor["identifier"])
+                    for anchor in (anchors or ())
+                ],
             )
             if memory_id is not None:
                 memory.id = memory_id
@@ -805,6 +813,8 @@ class MemoryRepository:
         visibility: MemoryVisibility,
         category: str | None = None,
         kind: str | None = None,
+        symbol: str | None = None,
+        file: str | None = None,
         limit: int,
         trigram_min_word_similarity: float | None = None,
     ) -> CandidatePools:
@@ -827,9 +837,14 @@ class MemoryRepository:
         skips its query entirely. Fusing the pools is deliberately left to
         the caller: it is pure computation over ranked lists, and pushing it
         behind this seam would force every adapter to reimplement it.
+        ``symbol``/``file`` restrict every pool to memories carrying a
+        matching anchor, applied before the ranked queries run -- the same
+        pre-fusion candidate-set restriction ``category``/``kind`` already get.
         """
         capped = min(limit, MAX_CANDIDATES)
-        filters = self._filters(user_id, visibility=visibility, category=category, kind=kind)
+        filters = self._filters(
+            user_id, visibility=visibility, category=category, kind=kind, symbol=symbol, file=file
+        )
         async with self._sessions.for_user(user_id) as session:
             vector: list[ScoredMemory] = []
             if embedding is not None:
@@ -1326,6 +1341,18 @@ class MemoryRepository:
                 ),
                 source_ref=(source_ref if set_source_ref else original.source_ref),
                 metadata_=(metadata if metadata is not None else dict(original.metadata_ or {})),
+                # A content change is a correction, not a fresh declaration --
+                # the replacement keeps the original's anchors so a correction
+                # never silently drops it from ``recall(symbol=...)``. New
+                # ``MemoryAnchor`` rows (not the original's, which stay tied
+                # to the retired row) so the relationship is loaded at
+                # construction, not lazily re-fetched after this session
+                # closes -- ``original.anchors`` is already in-session via
+                # ``selectin``, so this needs no extra query.
+                anchors=[
+                    MemoryAnchor(anchor_type=a.anchor_type, identifier=a.identifier)
+                    for a in original.anchors
+                ],
             )
             session.add(replacement)
             # Retire the original first so it leaves the partial unique index
@@ -1382,6 +1409,10 @@ class MemoryRepository:
         active row still raises ``IntegrityError`` and rolls everything back.
         ``importance=None`` inherits the loudest source. Unknown, foreign and
         already-retired ids are indistinguishable: ``None``, nothing changed.
+        Anchors are deliberately not carried forward: union-vs-cap-8 and
+        duplicate-collision semantics across several sources are unspecified
+        by this feature, so the consolidated memory starts anchor-free and
+        the caller re-declares any anchors it still needs via ``update``.
         """
         unique_ids = list(dict.fromkeys(source_ids))
         async with self._sessions.for_user(user_id) as session:
@@ -1427,6 +1458,15 @@ class MemoryRepository:
                 source_type="unknown",
                 source_ref=None,
                 metadata_=metadata,
+                # Deliberately not carried forward -- see the docstring: a
+                # merge of several sources leaves union/cap-8/duplicate
+                # semantics unspecified, so the consolidated row starts
+                # anchor-free rather than guessing. The empty list is still
+                # set explicitly so the relationship is loaded at
+                # construction, not lazily re-fetched after this session
+                # closes (same reason as the DetachedInstanceError fix in
+                # ``supersede``).
+                anchors=[],
             )
             session.add(replacement)
             await session.flush()
@@ -1757,16 +1797,38 @@ class MemoryRepository:
         visibility: MemoryVisibility,
         category: str | None,
         kind: str | None = None,
+        symbol: str | None = None,
+        file: str | None = None,
     ) -> list[Any]:
         """Translate domain visibility into PostgreSQL adapter expressions.
 
         ``kind`` is a concrete filter, never a wildcard: a NULL (unclassified)
         row MUST NOT match it, matching SQL's own NULL-never-equals-anything
-        semantics for ``=``.
+        semantics for ``=``. ``symbol``/``file`` restrict the candidate set to
+        memories carrying a matching anchor, applied here so every caller of
+        this seam (search, list, context) inherits it uniformly; a memory
+        with no matching anchor is excluded even if it would otherwise match
+        every other filter -- unanchored hits are never OR'd back in.
         """
         filters = self._visibility_filters(user_id, visibility=visibility, active_only=True)
         if category is not None:
             filters.append(Memory.category == category)
         if kind is not None:
             filters.append(Memory.kind == kind)
+        if symbol is not None:
+            filters.append(self._has_anchor(anchor_type="symbol", identifier=symbol))
+        if file is not None:
+            filters.append(self._has_anchor(anchor_type="file", identifier=file))
         return filters
+
+    def _has_anchor(self, *, anchor_type: str, identifier: str) -> Any:
+        """EXISTS predicate: the memory carries this exact, normalized anchor."""
+        return (
+            select(MemoryAnchor.id)
+            .where(
+                MemoryAnchor.memory_id == Memory.id,
+                MemoryAnchor.anchor_type == anchor_type,
+                MemoryAnchor.identifier == identifier,
+            )
+            .exists()
+        )

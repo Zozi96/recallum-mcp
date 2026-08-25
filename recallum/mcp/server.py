@@ -22,6 +22,7 @@ from recallum.boundary_types import (
 )
 from recallum.mcp.errors import translates_domain_errors
 from recallum.memory.schemas import (
+    Anchor,
     ContextResult,
     ForgetResult,
     GetResult,
@@ -186,6 +187,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         ttl_seconds: int | None = None,
         source_type: SourceType | None = None,
         source_ref: str | None = None,
+        anchors: list[Anchor] | None = None,
     ) -> RememberResult:
         """Store one atomic memory, including verified reusable project context.
 
@@ -207,7 +209,11 @@ def build_mcp_server(container: Container) -> FastMCP:
         id — never a transcript. Both are optional. `kind` is an optional
         coding facet orthogonal to `category` (failure, solution,
         architecture, convention, todo, command); `kind='todo'` MUST also set
-        `ttl_seconds` — durable todos are rejected.
+        `ttl_seconds` — durable todos are rejected. `anchors` optionally
+        declares structured code references (`{type, identifier}`, type one
+        of file/symbol/module) so `recall` can later filter by `symbol` or
+        `file`; Recallum does not parse a repository or build a code graph,
+        so an identifier is stored verbatim, exactly as given.
         """
         return await memory_service().remember(
             require_identity().user_id,
@@ -221,6 +227,7 @@ def build_mcp_server(container: Container) -> FastMCP:
             ttl_seconds=ttl_seconds,
             source_type=source_type,
             source_ref=source_ref,
+            anchors=[a.model_dump() for a in anchors] if anchors else None,
         )
 
     @mcp.tool
@@ -252,6 +259,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         scope: Literal["global", "project"] | None = None,
         category: Literal["preference", "decision", "constraint", "fact"] | None = None,
         kind: Kind | None = None,
+        symbol: str | None = None,
+        file: str | None = None,
         limit: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
         strategy: Literal[
@@ -275,7 +284,12 @@ def build_mcp_server(container: Container) -> FastMCP:
         model tokenizer). Optional ``strategy`` reorders fused hits by
         task-type category priority without dropping matches that still fit.
         Optional `kind` narrows to that coding facet; a memory with no kind
-        never matches a concrete `kind` filter.
+        never matches a concrete `kind` filter. Optional `symbol`/`file`
+        restrict the candidate set to memories carrying a matching code
+        anchor (exact match, normalized) before results are ranked; when
+        nothing matches, the result is empty even if a semantically similar
+        unanchored memory exists — pair with a query-text-only call to also
+        reach content that merely mentions the identifier.
         """
         return await memory_service().recall(
             require_identity().user_id,
@@ -284,6 +298,8 @@ def build_mcp_server(container: Container) -> FastMCP:
             scope=scope,
             category=category,
             kind=kind,
+            symbol=symbol,
+            file=file,
             limit=limit,
             max_tokens=max_tokens,
             strategy=strategy,

@@ -25,6 +25,7 @@ from recallum.db.repositories.memory_repo import MemoryRepository
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
 from recallum.memory.schemas import (
+    Anchor,
     Kind,
     ListResult,
     MemoryGraphResponse,
@@ -240,6 +241,10 @@ def _memory(row: Memory) -> MemoryOut:
         recall_count=row.recall_count,
         context_count=row.context_count,
         reconfirm_count=row.reconfirm_count,
+        anchors=[
+            Anchor(type=a.anchor_type, identifier=a.identifier)
+            for a in (getattr(row, "anchors", None) or [])
+        ],
     )
 
 

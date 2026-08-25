@@ -12,9 +12,9 @@ from pydantic import ValidationError
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError
-from recallum.memory import MemoryValidationError
+from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.limits import MemoryLimits
-from recallum.memory.schemas import MemoryOut, RememberBatchItem
+from recallum.memory.schemas import Anchor, MemoryOut, RememberBatchItem
 from recallum.memory.service import MAX_SOURCE_REF_CHARS, MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
 
@@ -1914,3 +1914,263 @@ async def test_all_write_and_read_paths_omit_kind_stay_backward_compatible():
 
     context = await service.context(USER)
     assert context is not None
+
+
+# ----------------------------------------------------------------------
+# code anchors (task 3.1, memory-code-anchors)
+# ----------------------------------------------------------------------
+
+
+async def test_remember_symbol_anchor_persists_and_reads_expose_it():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="PaymentService.capture retries once on gateway timeout",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+    assert result.memory.anchors == [Anchor(type="symbol", identifier="PaymentService.capture")]
+
+    fetched = await service.get(USER, result.memory.id)
+    assert fetched.found is True
+    assert fetched.memory.anchors == [Anchor(type="symbol", identifier="PaymentService.capture")]
+
+
+async def test_remember_without_anchors_behaves_as_today():
+    service, _, _ = make_service()
+    result = await service.remember(USER, content="no anchors stated here", category="fact")
+    assert result.memory.anchors == []
+
+
+async def test_remember_file_anchor_round_trips():
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="the user model lives here",
+        category="fact",
+        anchors=[{"type": "file", "identifier": "src/domain/users.py"}],
+    )
+    assert result.memory.anchors == [Anchor(type="file", identifier="src/domain/users.py")]
+
+
+async def test_remember_rejects_unknown_anchor_type():
+    service, _, _ = make_service()
+    with pytest.raises(MemoryValidationError):
+        await service.remember(
+            USER,
+            content="bogus anchor type claim",
+            category="fact",
+            anchors=[{"type": "bogus", "identifier": "x"}],
+        )
+
+
+async def test_remember_rejects_more_than_eight_anchors():
+    service, _, _ = make_service()
+    anchors = [{"type": "symbol", "identifier": f"Symbol{i}"} for i in range(9)]
+    with pytest.raises(MemoryValidationError):
+        await service.remember(
+            USER, content="too many anchors claim", category="fact", anchors=anchors
+        )
+
+
+async def test_remember_batch_item_rejects_more_than_eight_anchors_without_failing_the_batch():
+    service, _, _ = make_service()
+    over_cap = [{"type": "symbol", "identifier": f"Symbol{i}"} for i in range(9)]
+    items = [
+        RememberBatchItem(content="a valid fact", category="fact"),
+        RememberBatchItem(
+            content="an over-cap anchors item",
+            category="fact",
+            anchors=[Anchor(type="symbol", identifier=a["identifier"]) for a in over_cap],
+        ),
+    ]
+    result = await service.remember_batch(USER, items=items)
+    assert result.stored == 1
+    assert result.failed == 1
+    assert result.results[0].error is None
+    assert result.results[1].error is not None
+    assert "anchors" in result.results[1].error
+
+
+async def test_remember_batch_item_rejects_unknown_anchor_type_without_failing_the_batch():
+    service, _, _ = make_service()
+    items = [
+        RememberBatchItem(content="a valid fact", category="fact"),
+        RememberBatchItem(
+            content="an unknown anchor type item",
+            category="fact",
+            anchors=[Anchor(type="symbol", identifier="Whatever")],
+        ),
+    ]
+    # Force an invalid type past the schema layer, mirroring how a raw caller
+    # could bypass pydantic's Literal at the service boundary.
+    items[1].anchors[0].type = "bogus"  # type: ignore[assignment]
+    result = await service.remember_batch(USER, items=items)
+    assert result.stored == 1
+    assert result.failed == 1
+    assert "unknown anchor type" in (result.results[1].error or "")
+
+
+async def test_remember_anchor_normalization_nfc_and_strip_without_case_fold():
+    service, _, _ = make_service()
+    decomposed = "src/domain/café.py"  # NFD: e + combining acute accent
+    result = await service.remember(
+        USER,
+        content="unicode file anchor claim",
+        category="fact",
+        anchors=[
+            {"type": "file", "identifier": f"  {decomposed}  "},
+            {"type": "symbol", "identifier": "  PaymentService.Capture  "},
+        ],
+    )
+    anchors = {a.type: a.identifier for a in result.memory.anchors}
+    assert anchors["file"] == "src/domain/café.py"  # NFC: single precomposed e-acute
+    # Stripped, but case is never folded -- exported symbols are case-sensitive.
+    assert anchors["symbol"] == "PaymentService.Capture"
+
+
+async def test_recall_symbol_filter_returns_only_anchored_memories():
+    service, _, _ = make_service()
+    anchored = await service.remember(
+        USER,
+        content="PaymentService.capture retries once on gateway timeout",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+    await service.remember(
+        USER, content="PaymentService.capture also appears here unanchored", category="fact"
+    )
+
+    result = await service.recall(
+        USER, query="PaymentService.capture", symbol="PaymentService.capture"
+    )
+    assert {r.id for r in result.results} == {anchored.memory.id}
+
+
+async def test_recall_symbol_filter_is_empty_when_no_anchor_matches_despite_similar_unanchored():
+    service, _, _ = make_service()
+    await service.remember(
+        USER,
+        content="charge processing calls PaymentService.capture internally",
+        category="fact",
+    )
+
+    result = await service.recall(
+        USER, query="PaymentService.capture", symbol="PaymentService.capture"
+    )
+    assert result.results == []
+
+
+async def test_recall_file_filter_returns_only_matching_anchored_memories():
+    service, _, _ = make_service()
+    anchored = await service.remember(
+        USER,
+        content="user model definitions",
+        category="fact",
+        anchors=[{"type": "file", "identifier": "src/domain/users.py"}],
+    )
+    await service.remember(USER, content="user model definitions elsewhere", category="fact")
+
+    result = await service.recall(USER, query="user model", file="src/domain/users.py")
+    assert {r.id for r in result.results} == {anchored.memory.id}
+
+
+async def test_recall_without_anchor_filter_still_finds_content_mentions_via_fts_and_trigram():
+    service, repo, _ = make_service()
+    stored = await service.remember(
+        USER,
+        content="PaymentService.capture failed twice under load",
+        category="fact",
+    )
+
+    result = await service.recall(USER, query="PaymentService.capture")
+    assert stored.memory.id in {r.id for r in result.results}
+
+    pools = await repo.search_candidates(
+        USER,
+        query="PaymentService.capture",
+        embedding=None,
+        embedding_model=None,
+        visibility=MemoryVisibility("all"),
+        limit=10,
+        trigram_min_word_similarity=0.4,
+    )
+    assert stored.memory.id in {r.memory.id for r in pools.text}
+    assert stored.memory.id in {r.memory.id for r in pools.trigram}
+
+
+
+async def test_update_content_change_keeps_anchors_reachable_via_recall_symbol():
+    """Security review fix 1: a correction must not silently drop an anchor."""
+    service, _, _ = make_service()
+    stored = await service.remember(
+        USER,
+        content="PaymentService.capture retries once on gateway timeout",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": "PaymentService.capture"}],
+    )
+
+    updated = await service.update(
+        USER, stored.memory.id, content="PaymentService.capture retries twice on timeout"
+    )
+    assert updated.memory is not None
+    assert updated.memory.anchors == [Anchor(type="symbol", identifier="PaymentService.capture")]
+
+    result = await service.recall(
+        USER, query="PaymentService.capture", symbol="PaymentService.capture"
+    )
+    assert {r.id for r in result.results} == {updated.memory.id}
+
+
+async def test_remember_dedupes_identical_anchors_preserving_first_seen_order():
+    """Security review fix 3: a duplicate pair must not hit the unique index."""
+    service, _, _ = make_service()
+    result = await service.remember(
+        USER,
+        content="duplicated anchor claim",
+        category="fact",
+        anchors=[
+            {"type": "symbol", "identifier": "PaymentService.capture"},
+            {"type": "file", "identifier": "src/domain/users.py"},
+            {"type": "symbol", "identifier": "PaymentService.capture"},
+        ],
+    )
+    assert result.memory.anchors == [
+        Anchor(type="symbol", identifier="PaymentService.capture"),
+        Anchor(type="file", identifier="src/domain/users.py"),
+    ]
+
+
+async def test_remember_cap_applies_after_dedup_not_before():
+    """Security review fix 3: harmless repeats must not cost the real budget."""
+    service, _, _ = make_service()
+    anchors = [{"type": "symbol", "identifier": "PaymentService.capture"}] * 9
+    result = await service.remember(
+        USER, content="nine repeats of one anchor", category="fact", anchors=anchors
+    )
+    assert result.memory.anchors == [Anchor(type="symbol", identifier="PaymentService.capture")]
+
+
+async def test_remember_rejects_over_length_anchor_identifier():
+    """Security review fix 4: an oversized identifier must reject cleanly."""
+    service, _, _ = make_service()
+    too_long = "x" * 513
+    with pytest.raises(MemoryValidationError, match="exceeds"):
+        await service.remember(
+            USER,
+            content="oversized identifier claim",
+            category="fact",
+            anchors=[{"type": "symbol", "identifier": too_long}],
+        )
+
+
+async def test_remember_accepts_anchor_identifier_at_the_length_cap():
+    service, _, _ = make_service()
+    at_cap = "x" * 512
+    result = await service.remember(
+        USER,
+        content="identifier exactly at the cap",
+        category="fact",
+        anchors=[{"type": "symbol", "identifier": at_cap}],
+    )
+    assert result.memory.anchors == [Anchor(type="symbol", identifier=at_cap)]

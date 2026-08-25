@@ -18,6 +18,21 @@ RecallMode = Literal["hybrid", "degraded_textual"]
 SourceType = Literal["agent", "user", "bootstrap", "unknown"]
 Kind = Literal["failure", "solution", "architecture", "convention", "todo", "command"]
 
+AnchorType = Literal["file", "symbol", "module"]
+
+
+class Anchor(BaseModel):
+    """A structured code reference on a memory: a file, symbol, or module.
+
+    ``identifier`` is stored verbatim after NFC normalization and stripping;
+    case is never folded, since exported Python/Go symbols are case-sensitive.
+    Used both to declare anchors on write and to read them back -- the shape
+    is identical either way.
+    """
+
+    type: AnchorType
+    identifier: str
+
 
 class MemoryOut(BaseModel):
     """A stored memory as returned to agents.
@@ -33,7 +48,8 @@ class MemoryOut(BaseModel):
     yet". ``expires_at`` is set only for short-lived working memory that
     declared a TTL; NULL means durable, no expiry (the default). ``kind`` is
     the orthogonal coding facet (failure/solution/architecture/convention/
-    todo/command); NULL means unclassified.
+    todo/command); NULL means unclassified. ``anchors`` are optional
+    structured code references (file/symbol/module); an empty list is normal.
     """
 
     id: uuid.UUID
@@ -54,6 +70,7 @@ class MemoryOut(BaseModel):
     recall_count: int = 0
     context_count: int = 0
     reconfirm_count: int = 0
+    anchors: list[Anchor] = Field(default_factory=list)
 
 
 class SimilarMemory(BaseModel):
@@ -133,6 +150,7 @@ class RememberBatchItem(BaseModel):
     ttl_seconds: int | None = None
     source_type: SourceType | None = None
     source_ref: str | None = None
+    anchors: list[Anchor] | None = None
 
 
 class RememberBatchItemOutcome(BaseModel):
