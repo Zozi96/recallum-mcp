@@ -427,6 +427,29 @@ cap trims the corpus, the report says so explicitly instead of truncating
 silently — rerun with a higher `--limit` for a complete sweep of a larger
 corpus.
 
+## Project-memory bootstrap
+
+`recallum-admin bootstrap` cheaply seeds candidate memories from a fixed,
+bounded allowlist of well-known project files -- README, AGENTS.md,
+CLAUDE.md, pyproject.toml, package.json, Dockerfile, docker-compose.yml, plus
+the mere presence of `src/`, `tests/`, `docs/`, `migrations/` -- instead of
+walking the whole repository or requiring an LLM. Parsing is deterministic
+(`tomllib`/`json` plus a couple of markdown heuristics), and candidates are
+capped at 10, preferring structured files (pyproject.toml, package.json) over
+prose. It never dumps a whole file into a candidate.
+
+```bash
+docker compose exec recallum uv run --no-sync recallum-admin bootstrap \
+  --email user@example.com --project my-project --path /path/to/repo
+```
+
+Dry-run is the default: candidates are printed for review, and nothing is
+stored. Add `--apply` to persist them through the same `remember_batch` path
+an agent uses, which gives exact-content dedup, the similar advisory and user
+isolation for free -- re-running bootstrap over unchanged files is safe and
+creates no duplicates. When the cap trims the candidate list, the report says
+so explicitly instead of truncating silently.
+
 ## Working memory (TTL)
 
 `remember`, `remember_batch` items, and `update` accept an optional

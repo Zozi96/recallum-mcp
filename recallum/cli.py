@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from recallum.auth.api_keys import UserNotFoundError
+from recallum.bootstrap import MAX_CANDIDATES, scan_project
 from recallum.config import get_settings
 from recallum.container import (
     Container,
@@ -25,6 +26,8 @@ from recallum.container import (
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.evaluation import read_dataset, render_report, run_eval
 from recallum.hygiene import DEFAULT_MAX_MEMORIES, build_hygiene_report, render_hygiene_report
+from recallum.memory import MemoryValidationError
+from recallum.memory.schemas import RememberBatchItem
 from recallum.memory.service import MemoryService
 
 
@@ -152,6 +155,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reembed.add_argument(
         "--batch-size", type=int, default=50, help="Rows fetched per batch (default 50)"
+    )
+
+    bootstrap = subparsers.add_parser(
+        "bootstrap",
+        help=(
+            "Scan a bounded allowlist of well-known project files "
+            "(README, AGENTS.md, pyproject.toml, ...) for candidate memories. "
+            "Prints candidates by default; --apply persists them"
+        ),
+    )
+    bootstrap.add_argument("--email", required=True, help="User the candidates belong to")
+    bootstrap.add_argument("--project", required=True, help="Canonical project key")
+    bootstrap.add_argument("--path", required=True, type=Path, help="Project directory to scan")
+    bootstrap.add_argument(
+        "--apply",
+        action="store_true",
+        help="Persist candidates via remember_batch instead of printing them (default: dry-run)",
     )
 
     return parser
@@ -302,6 +322,58 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
                 file=sys.stderr,
             )
             return 1
+        return 0
+
+    if args.command == "bootstrap":
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        if not args.path.is_dir():
+            print(f"error: path '{args.path}' is not a directory", file=sys.stderr)
+            return 1
+        scan = scan_project(args.path)
+        if not scan.candidates:
+            print("no candidates found")
+            return 0
+        if not args.apply:
+            for candidate in scan.candidates:
+                print(f"[{candidate.category}] ({candidate.source_ref}) {candidate.content}")
+            if scan.omitted:
+                print(
+                    f"note: {scan.omitted} lower-priority candidate(s) omitted "
+                    f"(cap is {MAX_CANDIDATES})",
+                    file=sys.stderr,
+                )
+            return 0
+        items = [
+            RememberBatchItem(
+                content=candidate.content,
+                category=candidate.category,
+                project=args.project,
+                source_type="bootstrap",
+                source_ref=candidate.source_ref,
+            )
+            for candidate in scan.candidates
+        ]
+        try:
+            result = await container.memory_service().remember_batch(user.id, items=items)
+        except MemoryValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for candidate, outcome in zip(scan.candidates, result.results, strict=True):
+            if outcome.error is not None:
+                print(f"error: ({candidate.source_ref}) {outcome.error}", file=sys.stderr)
+                continue
+            status = "created" if outcome.created else "deduplicated"
+            print(f"{status}: [{candidate.category}] ({candidate.source_ref}) {candidate.content}")
+        print(f"stored={result.stored} deduplicated={result.deduplicated} failed={result.failed}")
+        if scan.omitted:
+            print(
+                f"note: {scan.omitted} lower-priority candidate(s) omitted "
+                f"(cap is {MAX_CANDIDATES})",
+                file=sys.stderr,
+            )
         return 0
 
     return 2  # pragma: no cover - argparse enforces known commands

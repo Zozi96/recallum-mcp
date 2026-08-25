@@ -10,7 +10,7 @@ import pytest
 from recallum.auth.api_keys import hash_token
 from recallum.cli import _run, build_parser
 from recallum.evaluation import EvalReport
-from tests.fakes import build_test_container
+from tests.fakes import FakeEmbeddingClient, build_test_container
 
 
 def parse(argv: list[str]):
@@ -280,3 +280,288 @@ async def test_eval_usage_weight_reaches_service_limits_and_report_tunables(
     assert captured["service"]._limits.recall_usage_weight == 0.3
     out = capsys.readouterr().out
     assert "tunables: recall_usage_weight=0.3" in out
+
+
+def test_bootstrap_requires_project_even_in_dry_run(tmp_path):
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["bootstrap", "--email", "a@b.c", "--path", str(tmp_path)])
+    assert exc_info.value.code == 2
+
+
+def test_bootstrap_requires_project_with_apply(tmp_path):
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(
+            ["bootstrap", "--email", "a@b.c", "--path", str(tmp_path), "--apply"]
+        )
+    assert exc_info.value.code == 2
+
+
+async def test_bootstrap_unknown_email_exits_1(tmp_path, capsys):
+    container, _ = build_test_container()
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "ghost@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+            ]
+        ),
+        container,
+    )
+
+    assert code == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+async def test_bootstrap_nonexistent_path_exits_1(tmp_path, capsys):
+    container, _ = build_test_container()
+    await _run(parse(["create-user", "--email", "path@example.com"]), container)
+    capsys.readouterr()
+    missing = tmp_path / "does-not-exist"
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "path@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(missing),
+            ]
+        ),
+        container,
+    )
+
+    assert code == 1
+    assert "not a directory" in capsys.readouterr().err
+
+
+async def test_bootstrap_no_candidates_prints_message_and_exits_0(tmp_path, capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "empty@example.com"]), container)
+    capsys.readouterr()
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "empty@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    assert capsys.readouterr().out == "no candidates found\n"
+    assert fakes["memories"].rows == {}
+
+
+async def test_bootstrap_dry_run_succeeds_without_llm(tmp_path, capsys):
+    """Scenario: Sin LLM -- dry-run scan produces candidates with Ollama down."""
+    container, fakes = build_test_container(embedder=FakeEmbeddingClient(available=False))
+    await _run(parse(["create-user", "--email", "nollm@example.com"]), container)
+    capsys.readouterr()
+    _write_bootstrap_fixture(tmp_path)
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "nollm@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "pyproject.toml" in out
+    assert fakes["memories"].rows == {}
+
+
+def _write_bootstrap_fixture(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nrequires-python = ">=3.11"\ndependencies = ["fastapi"]\n'
+    )
+    (tmp_path / "AGENTS.md").write_text("# Agents\n")
+
+
+async def test_bootstrap_dry_run_creates_zero_memories_and_exits_0(tmp_path, capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "dry@example.com"]), container)
+    capsys.readouterr()
+    _write_bootstrap_fixture(tmp_path)
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "dry@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "pyproject.toml" in out
+    assert "AGENTS.md" in out
+    assert fakes["memories"].rows == {}
+
+
+async def test_bootstrap_apply_persists_via_remember_batch(tmp_path, capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "apply@example.com"]), container)
+    capsys.readouterr()
+    user = next(iter(fakes["users"].users.values()))
+    _write_bootstrap_fixture(tmp_path)
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "apply@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+                "--apply",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "created:" in out
+    stored = [m for m in fakes["memories"].rows.values() if m.user_id == user.id]
+    assert len(stored) >= 2
+    assert all(m.source_type == "bootstrap" for m in stored)
+    assert all(m.project == "demo" for m in stored)
+    assert {m.source_ref for m in stored} == {"pyproject.toml", "AGENTS.md"}
+
+
+async def test_bootstrap_apply_second_pass_creates_no_duplicates(tmp_path, capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "twice@example.com"]), container)
+    capsys.readouterr()
+    user = next(iter(fakes["users"].users.values()))
+    _write_bootstrap_fixture(tmp_path)
+    args = parse(
+        [
+            "bootstrap",
+            "--email",
+            "twice@example.com",
+            "--project",
+            "demo",
+            "--path",
+            str(tmp_path),
+            "--apply",
+        ]
+    )
+
+    assert await _run(args, container) == 0
+    capsys.readouterr()
+    first_count = len([m for m in fakes["memories"].rows.values() if m.user_id == user.id])
+
+    assert await _run(args, container) == 0
+    second_out = capsys.readouterr().out
+    second_count = len([m for m in fakes["memories"].rows.values() if m.user_id == user.id])
+
+    assert second_count == first_count
+    assert "deduplicated:" in second_out
+    assert "created:" not in second_out
+
+
+async def test_bootstrap_apply_invisible_to_other_user(tmp_path, capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "owner@example.com"]), container)
+    await _run(parse(["create-user", "--email", "other@example.com"]), container)
+    capsys.readouterr()
+    owner = next(u for u in fakes["users"].users.values() if u.email == "owner@example.com")
+    other = next(u for u in fakes["users"].users.values() if u.email == "other@example.com")
+    _write_bootstrap_fixture(tmp_path)
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "owner@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+                "--apply",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    owner_rows = [m for m in fakes["memories"].rows.values() if m.user_id == owner.id]
+    other_rows = [m for m in fakes["memories"].rows.values() if m.user_id == other.id]
+    assert owner_rows
+    assert other_rows == []
+
+
+async def test_bootstrap_cap_truncation_reports_note_to_operator(tmp_path, capsys):
+    container, _ = build_test_container()
+    await _run(parse(["create-user", "--email", "cap@example.com"]), container)
+    capsys.readouterr()
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nrequires-python = ">=3.12"\ndependencies = ["fastapi", "sqlalchemy"]\n'
+    )
+    (tmp_path / "package.json").write_text(
+        '{"engines": {"node": ">=20"}, "dependencies": {"react": "^18", "next": "^14"}}'
+    )
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12\n")
+    (tmp_path / "docker-compose.yml").write_text("services:\n  app:\n    build: .\n")
+    for name in ("src", "tests", "docs", "migrations"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "AGENTS.md").write_text("# Agents\n")
+    (tmp_path / "CLAUDE.md").write_text("# Claude\n")
+    (tmp_path / "README.md").write_text("# Demo\n\nRequires: something.\n")
+
+    code = await _run(
+        parse(
+            [
+                "bootstrap",
+                "--email",
+                "cap@example.com",
+                "--project",
+                "demo",
+                "--path",
+                str(tmp_path),
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "omitted" in err
+    assert "cap is 10" in err
