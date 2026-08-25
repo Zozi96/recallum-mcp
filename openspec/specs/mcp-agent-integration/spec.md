@@ -210,15 +210,15 @@ El sistema MUST rechazar cuerpos MCP mayores al límite configurado antes de mat
 - **THEN** el sistema responde `429` con `Retry-After` sin consultar repetidamente la base de datos durante la ventana indicada
 
 ### Requirement: Documentación pública alineada con la superficie MCP
-La documentación de entrada del repositorio (como mínimo el README principal y cualquier guía de clientes que enumere herramientas MCP) MUST listar exactamente las mismas herramientas que el servidor anuncia: `remember`, `remember_batch`, `recall`, `context`, `get_memory`, `list_memories`, `update`, `merge_memories`, `related_memories`, `reconfirm` y `forget`. MUST NOT afirmar un conteo u omisión que contradiga ese conjunto.
+La documentación de entrada del repositorio (como mínimo el README principal y cualquier guía de clientes que enumere herramientas MCP) MUST listar exactamente las mismas herramientas que el servidor anuncia: `remember`, `remember_batch`, `recall`, `context`, `get_memory`, `list_memories`, `update`, `merge_memories`, `related_memories`, `reconfirm`, `forget`, `save_skill`, `match_skills`, `get_skill` y `forget_skill`. MUST NOT afirmar un conteo u omisión que contradiga ese conjunto.
 
 #### Scenario: README enumera la superficie
 - **WHEN** un operador lee el README del servicio MCP
-- **THEN** aparecen las once herramientas por nombre, sin afirmar que son nueve ni omitir `related_memories` o `reconfirm`
+- **THEN** aparecen las quince herramientas por nombre, sin afirmar que son once ni omitir `related_memories`, `reconfirm` o las cuatro herramientas de skill
 
 #### Scenario: Guía de clientes coherente
 - **WHEN** una guía de cliente documentada enumera herramientas MCP
-- **THEN** usa el mismo conjunto de once nombres que el anuncio del servidor
+- **THEN** usa el mismo conjunto de quince nombres que el anuncio del servidor
 
 ### Requirement: Argumentos opcionales de presupuesto y estrategia
 Las herramientas `recall` y `context` MUST aceptar `max_tokens` y `strategy` opcionales con la semántica del presupuesto de recuperación. Omitirlos MUST ser válido y MUST preservar el contrato actual. El sistema MUST NOT exigir un identificador de usuario en esos argumentos.
