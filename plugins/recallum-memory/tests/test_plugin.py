@@ -252,6 +252,14 @@ elif args[:2] == ["plugin", "install"]:
         # configured separately through /plugin configure.
         entry.setdefault("options", {})["mcp_url"] = url
         _save(data)
+elif args[:2] == ["plugin", "uninstall"]:
+    # The real `claude plugin uninstall` drops the plugin's pluginSecrets
+    # entry from the user credentials file.
+    creds_path = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+    if creds_path.exists():
+        creds = json.loads(creds_path.read_text(encoding="utf-8") or "{}")
+        creds.get("pluginSecrets", {}).pop("recallum-memory@recallum-local", None)
+        creds_path.write_text(json.dumps(creds), encoding="utf-8")
 """
 
 FAKE_GROK = """#!/usr/bin/env python3
@@ -2131,6 +2139,23 @@ class ClaudeInstallerTests(InstallerTestCase):
             # `claude plugin uninstall` has no --scope flag.
             self.assertNotIn("--scope", planned[uninstall])
             self.assertTrue(any(".claude.json" in line for line in planned))
+
+    def test_force_reinstall_restores_pluginsecrets_wiped_by_uninstall(self) -> None:
+        # `claude plugin uninstall` deletes the plugin's pluginSecrets entry,
+        # including the api_token persist_api_key stored earlier in this same
+        # run. A --force-mcp reinstall must re-store it before credential
+        # verification, or the run aborts and later targets (Grok, Cursor,
+        # Antigravity) never get a chance to install.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root, claude_plugin="installed")
+            result = self._run_claude(env, "--force-mcp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            creds = json.loads((root / ".claude" / ".credentials.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                creds["pluginSecrets"]["recallum-memory@recallum-local"]["api_token"],
+                "not-printed",
+            )
 
     def test_matching_marketplace_is_updated_before_plugin_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

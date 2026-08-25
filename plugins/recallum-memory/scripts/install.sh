@@ -1137,6 +1137,12 @@ PY
   run_action claude plugin install "recallum-memory@recallum-local" \
     --scope "$claude_scope" \
     --config "mcp_url=$url"
+  if [[ "$plugin_state" == "installed" ]] && ((store_api_key)) && [[ -n "$resolved_api_key" ]]; then
+    # `claude plugin uninstall` drops the plugin's pluginSecrets entry, including
+    # the api_token persist_api_key stored earlier in this run. Re-store it before
+    # verification so a --force-mcp reinstall does not end without credentials.
+    store_claude_plugin_secret "$resolved_api_key"
+  fi
   verify_claude_plugin_config
   verify_claude_credential
   ensure_claude_native_mcp
