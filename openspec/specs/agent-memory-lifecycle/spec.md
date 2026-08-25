@@ -3,7 +3,9 @@
 ## Purpose
 
 Definir el ciclo de vida privado de memorias atómicas, desde su guardado y enumeración hasta su borrado explícito.
+
 ## Requirements
+
 ### Requirement: Guardado de memorias atómicas
 El sistema MUST permitir que un usuario autenticado guarde una memoria atómica con contenido, categoría, ámbito, proyecto opcional, importancia y metadata limitada.
 
@@ -145,7 +147,6 @@ reverificada.
 - **WHEN** una memoria se corrige con nuevo contenido o se fusiona con otras, generando una memoria de reemplazo
 - **THEN** la memoria de reemplazo se crea con el contador de reconfirmaciones en cero, sin heredar el de las memorias que reemplaza
 
-
 ### Requirement: Reconciliación guiada ante similares
 Cuando `remember` o `remember_batch` reportan similares, la guía del sistema (skill, prompts o documentación de agente) MUST distinguir: reexpresiones o refinamientos del mismo claim → `merge_memories`; hecho incorrecto u obsoleto → `update` del incorrecto; contradicción entre claims vigentes → `update` o `forget` del incorrecto tras verificación humana/agente, NEVER un merge que “resuelva” la contradicción. El servidor MUST NOT auto-merge ni auto-olvidar por el aviso de similares.
 
@@ -212,3 +213,66 @@ por una nueva calculada desde ese momento, incluso si la memoria existente era d
 #### Scenario: Reafirmar con TTL renueva la expiración
 - **WHEN** una memoria activa (con o sin expiración previa) se vuelve a guardar con `remember`, el mismo contenido normalizado y un nuevo `ttl_seconds`
 - **THEN** el sistema reemplaza cualquier expiración previa por una nueva calculada desde ese momento
+
+### Requirement: Procedencia estructurada opcional
+Cada memoria MUST poder llevar `source_type` (`agent`, `user`, `bootstrap`, `unknown`) y un `source_ref` opcional (texto corto: ruta, commit, identificador de archivo o equivalente). Ausencia de ambos MUST interpretarse como `unknown` / nulo. `source_ref` MUST NOT usarse para almacenar transcripts, prompts ni logs. El sistema MUST NOT introducir un nivel de almacenamiento de conversación RAW.
+
+#### Scenario: Guardar con procedencia
+- **WHEN** un usuario llama `remember` con `source_type=agent` y `source_ref` apuntando a un archivo del repo
+- **THEN** las lecturas posteriores incluyen esos campos
+
+#### Scenario: Filas existentes
+- **WHEN** se lee una memoria creada antes de este change
+- **THEN** `source_type` es `unknown` y `source_ref` es nulo
+
+#### Scenario: Rechazo de transcript
+- **WHEN** `source_ref` o el contenido intentan persistir una conversación completa
+- **THEN** siguen aplicando las reglas ya existentes de contenido atómico; este change no añade un almacén de conversaciones
+
+### Requirement: Trazabilidad sólo por supersesión
+El único enlace padre/hijo entre memorias MUST seguir siendo `superseded_by` (update/merge) y la historia recuperable con `get_memory(include_history=true)`. El sistema MUST NOT crear tablas por nivel (CORE/CONTEXT/FACT/RAW) ni un grafo `derived_from` adicional.
+
+#### Scenario: Corrección
+- **WHEN** una memoria se sustituye con `update` de contenido
+- **THEN** la fila retirada apunta a la reemplazo y la historia la enumera, como hoy
+
+#### Scenario: Sin niveles de pirámide
+- **WHEN** un cliente solicita un “nivel” CORE o RAW
+- **THEN** no existe tal dimensión de almacenamiento; el perfil materializado sigue siendo la proyección de alta densidad ya especificada
+
+### Requirement: Kind opcional orthogonal a categoría
+Una memoria MUST poder llevar un `kind` opcional entre `failure`, `solution`, `architecture`, `convention`, `todo` y `command`. `kind` MUST NOT reemplazar `category` (`preference`, `decision`, `constraint`, `fact`). El sistema MUST NOT persistir niveles de pirámide RAW/FACT/CONTEXT/CORE como `kind` ni como `category`. Filas existentes MUST tener `kind` nulo (sin clasificar).
+
+#### Scenario: Hecho de arquitectura
+- **WHEN** un usuario guarda `category=fact` y `kind=architecture`
+- **THEN** la memoria se persiste con ambas dimensiones y las lecturas las exponen
+
+#### Scenario: Sin kind
+- **WHEN** `remember` omite `kind`
+- **THEN** la memoria se guarda con `kind` nulo y sigue siendo válida
+
+#### Scenario: Kind desconocido
+- **WHEN** `kind` no está en el enumerado permitido
+- **THEN** el sistema rechaza la operación sin persistir
+
+### Requirement: TODO es memoria de trabajo
+Una memoria con `kind=todo` MUST declarar un TTL (`ttl_seconds`). El sistema MUST rechazar un `todo` durable. Al expirar, el TODO deja de servirse como cualquier otra memoria expirada.
+
+#### Scenario: Todo con TTL
+- **WHEN** se guarda `kind=todo` con `ttl_seconds` válido
+- **THEN** la memoria se persiste con expiración
+
+#### Scenario: Todo durable rechazado
+- **WHEN** se guarda `kind=todo` sin `ttl_seconds`
+- **THEN** el sistema rechaza la operación
+
+### Requirement: Anclas de código opcionales
+Una memoria MUST poder asociarse a cero o más anclas, cada una con tipo `file`, `symbol` o `module` y un identificador verbatim. El sistema MUST NOT exigir anclas para guardar una memoria. El sistema MUST NOT construir ni almacenar un grafo de llamadas, ASTs ni repositorios indexados como condición de este requisito.
+
+#### Scenario: Decisión anclada a un símbolo
+- **WHEN** un usuario guarda una memoria con ancla `symbol=PaymentService.capture`
+- **THEN** la memoria queda asociada a ese identificador y las lecturas lo exponen
+
+#### Scenario: Sin anclas
+- **WHEN** `remember` omite anclas
+- **THEN** la memoria se guarda igual que hoy

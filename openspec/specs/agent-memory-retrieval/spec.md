@@ -3,7 +3,9 @@
 ## Purpose
 
 Definir la recuperación híbrida, filtrada y compacta de memorias privadas para agentes.
+
 ## Requirements
+
 ### Requirement: Búsqueda híbrida de memorias
 El sistema MUST recuperar memorias mediante señales vectoriales y textuales, aplicando aislamiento de usuario antes de ordenar los resultados.
 
@@ -189,3 +191,59 @@ La fusión de `recall` MAY incorporar un voto derivado de la última confirmaci�
 #### Scenario: Frescura uniforme no aporta señal
 - **WHEN** todas las memorias candidatas comparten el mismo instante de confirmación
 - **THEN** el voto de frescura no altera el orden resultante de la fusión
+
+### Requirement: Presupuesto de tokens además de ítems
+El sistema MUST permitir que `recall` y `context` acepten un límite opcional de tokens estimados (`max_tokens`) además de los límites de ítems (y, en `context`, de caracteres) ya existentes. Cuando `max_tokens` está ausente, el empaquetado MUST coincidir con el comportamiento actual. Cuando está presente, el sistema MUST dejar de añadir memorias al resultado en cuanto la siguiente memoria completa excedería el presupuesto de tokens, sin omitir una memoria ya empezada a mitad de su contenido en `recall` (en `context` sigue aplicando el recorte marcado `content_truncated` sólo bajo las reglas de caracteres ya especificadas). La estimación de tokens MUST ser determinista, local y sin llamada a un modelo.
+
+#### Scenario: Recall limitado por tokens
+- **WHEN** un usuario llama `recall` con `max_tokens` menor que el tamaño combinado de los candidatos que cabrían en `limit`
+- **THEN** el resultado contiene un prefijo del ranking que cabe en el presupuesto y no incluye la siguiente memoria que lo excedería
+
+#### Scenario: Sin max_tokens
+- **WHEN** `recall` o `context` se invocan sin `max_tokens`
+- **THEN** el recorte sigue siendo únicamente por `limit` / `max_items` / `max_chars` como hasta ahora
+
+#### Scenario: Estimación sin modelo
+- **WHEN** se empaqueta un resultado
+- **THEN** no se invoca Ollama ni ningún otro modelo para contar tokens
+
+### Requirement: Estrategia de empaquetado por tipo de tarea
+El sistema MUST aceptar un `strategy` opcional entre `coding`, `debugging`, `planning`, `review` y `architecture`. La estrategia MUST aplicarse sólo después de la recuperación híbrida existente: reordena los candidatos ya fusionados para llenar el presupuesto con las categorías (y, si existe, `kind`) prioritarias de esa estrategia, sin excluir un candidato de otra categoría si aún cabe presupuesto. Ausencia de `strategy` MUST conservar el orden actual (fusión RRF para `recall`; orden de categorías de `context`).
+
+#### Scenario: Debugging prioriza hechos de fallo
+- **WHEN** `recall` se llama con `strategy=debugging` y hay candidatos tanto `fact` como `preference`
+- **THEN** los hechos relevantes al query se empaquetan antes que las preferencias, siempre que ambos hayan sido recuperados por la fusión
+
+#### Scenario: Estrategia no filtra el corpus
+- **WHEN** la única memoria que coincide con la consulta es una `preference` y `strategy=debugging`
+- **THEN** esa preferencia puede aparecer en el resultado
+
+#### Scenario: Estrategia desconocida
+- **WHEN** `strategy` no es uno de los valores permitidos
+- **THEN** el sistema rechaza la operación sin recuperar
+
+### Requirement: Filtro opcional por kind
+`recall`, `list_memories` y `context` MUST aceptar un filtro opcional `kind`. Cuando está presente, el sistema MUST restringir el conjunto candidato a memorias con ese `kind`. Las memorias con `kind` nulo MUST NO coincidir con un filtro concreto. Ausencia del filtro MUST incluir todos los kinds.
+
+#### Scenario: Recall de fallos
+- **WHEN** `recall` se llama con `kind=failure`
+- **THEN** el resultado no incluye memorias de otro kind ni las de kind nulo
+
+#### Scenario: Sin filtro
+- **WHEN** `recall` se llama sin `kind`
+- **THEN** participan memorias de cualquier kind, incluidas las nulas
+
+### Requirement: Filtro por símbolo o archivo
+`recall` MUST aceptar `symbol` y/o `file` opcionales. Cuando están presentes, el conjunto candidato MUST restringirse a memorias que tengan un ancla coincidente (igualdad normalizada: trim, NFC) **antes** de fusionar señales. El texto de la consulta MUST seguir pudiendo usarse sobre ese subconjunto. Ausencia de filtro MUST no exigir anclas.
+
+#### Scenario: Recall por símbolo
+- **WHEN** `recall` se llama con `symbol=PaymentService.capture`
+- **THEN** el resultado sólo incluye memorias ancladas a ese símbolo (del usuario, activas)
+
+#### Scenario: Símbolo sin memorias
+- **WHEN** no hay anclas coincidentes
+- **THEN** el resultado está vacío aunque existan memorias semánticamente similares sin ancla
+
+#### Scenario: Consulta libre sigue funcionando
+- **WHEN** `recall` se llama con query `PaymentService.capture` sin filtro `symbol`
+- **THEN** las piernas FTS y trigram existentes pueden devolver memorias que mencionan el identificador en el contenido, tengan o no ancla

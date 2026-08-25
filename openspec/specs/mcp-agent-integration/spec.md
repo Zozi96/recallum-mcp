@@ -3,7 +3,9 @@
 ## Purpose
 
 Definir la integración MCP autenticada y operable para clientes locales y remotos.
+
 ## Requirements
+
 ### Requirement: Acceso MCP mediante HTTPS
 El sistema MUST exponer las herramientas de memoria mediante FastMCP sobre Streamable HTTP detrás de Traefik en el endpoint canónico `/mcp/` y MUST soportar clientes en la misma máquina y clientes remotos. La ruta heredada `/mcp` MUST NOT ser el endpoint configurado de ningún cliente soportado.
 
@@ -39,11 +41,11 @@ El sistema MUST exigir una API key en toda petición HTTP dirigida al transporte
 - **THEN** la key puede ser aceptada sólo dentro de la ventana documentada y se rechaza en la primera petición posterior a su expiración
 
 ### Requirement: Conjunto mínimo de herramientas
-El sistema MUST publicar las capacidades de guardado individual y por lotes, recuperación, contexto con foco opcional, lectura por identificador, enumeración, corrección, consolidación, vecinos temáticos, reconfirmación y borrado mediante las herramientas `remember`, `remember_batch`, `recall`, `context`, `get_memory`, `list_memories`, `update`, `merge_memories`, `related_memories`, `reconfirm` y `forget`. El sistema MUST NOT publicar el grafo temático completo como herramienta MCP.
+El sistema MUST publicar las capacidades de guardado individual y por lotes, recuperación, contexto con foco opcional, lectura por identificador, enumeración, corrección, consolidación, vecinos temáticos, reconfirmación y borrado mediante las herramientas `remember`, `remember_batch`, `recall`, `context`, `get_memory`, `list_memories`, `update`, `merge_memories`, `related_memories`, `reconfirm` y `forget`, y las capacidades de procedimiento mediante `save_skill`, `match_skills`, `get_skill` y `forget_skill`. El sistema MUST NOT publicar el grafo temático completo como herramienta MCP.
 
 #### Scenario: Descubrimiento de herramientas
 - **WHEN** un cliente autenticado solicita la lista de herramientas MCP
-- **THEN** el sistema anuncia exactamente esas once herramientas con esquemas de entrada y salida validados
+- **THEN** el sistema anuncia exactamente esas quince herramientas con esquemas de entrada y salida validados
 
 #### Scenario: Contexto con foco
 - **WHEN** un cliente inspecciona el esquema de `context`
@@ -64,6 +66,14 @@ El sistema MUST publicar las capacidades de guardado individual y por lotes, rec
 #### Scenario: Reconfirmación de identificador desconocido o ajeno
 - **WHEN** un cliente llama `reconfirm` con un identificador desconocido, ajeno o retirado
 - **THEN** la respuesta indica `reconfirmed=false` sin revelar si pertenece a otro usuario
+
+#### Scenario: Skill propio
+- **WHEN** un cliente autenticado llama `get_skill` con el identificador de un skill activo propio
+- **THEN** recibe el skill completo
+
+#### Scenario: Skill desconocido o ajeno
+- **WHEN** un cliente llama `get_skill` o `forget_skill` con un identificador desconocido, ajeno o retirado
+- **THEN** la respuesta indica no encontrado o no olvidado, sin revelar si pertenece a otro usuario
 
 ### Requirement: Prompts MCP del ciclo de memoria
 El servidor MCP MUST publicar exactamente tres prompts allowlisteados: `session-start`, `capture-scan` y `stale-review`. `session-start` MUST orientar bootstrap con `context` (proyecto y foco cuando la tarea se conoce). `capture-scan` MUST orientar captura final atómica en inglés vía `remember_batch`, sin secretos ni recaps, y MUST recordar leer `similar` y reconciliar (merge vs update) antes de dar por cerrada la captura. `stale-review` MUST orientar enumerar `list_memories(stale=true)` y resolver cada ítem verificado con `get_memory` más exactamente uno de `reconfirm`, `update`, `forget` o `merge_memories`.
@@ -209,3 +219,47 @@ La documentación de entrada del repositorio (como mínimo el README principal y
 #### Scenario: Guía de clientes coherente
 - **WHEN** una guía de cliente documentada enumera herramientas MCP
 - **THEN** usa el mismo conjunto de once nombres que el anuncio del servidor
+
+### Requirement: Argumentos opcionales de presupuesto y estrategia
+Las herramientas `recall` y `context` MUST aceptar `max_tokens` y `strategy` opcionales con la semántica del presupuesto de recuperación. Omitirlos MUST ser válido y MUST preservar el contrato actual. El sistema MUST NOT exigir un identificador de usuario en esos argumentos.
+
+#### Scenario: Recall con presupuesto
+- **WHEN** un cliente autenticado llama `recall` con `query`, `max_tokens` y `strategy`
+- **THEN** el servidor aplica el empaquetado correspondiente y devuelve el resultado habitual (`query`, `mode`, `results`)
+
+#### Scenario: Compatibilidad hacia atrás
+- **WHEN** un cliente llama `recall` o `context` sin `max_tokens` ni `strategy`
+- **THEN** la llamada es válida y el comportamiento coincide con el contrato previo a este change
+
+### Requirement: Campos de procedencia en tools de escritura y lectura
+`remember` y cada ítem de `remember_batch` MUST aceptar `source_type` y `source_ref` opcionales. Las representaciones de memoria devueltas por las tools de lectura MUST incluir esos campos. Omitirlos MUST ser válido.
+
+#### Scenario: Remember con source_type
+- **WHEN** un cliente autenticado llama `remember` con `source_type=bootstrap`
+- **THEN** la memoria creada o deduplicada expone `source_type=bootstrap`
+
+#### Scenario: Omitidos
+- **WHEN** un cliente llama `remember` sin esos campos
+- **THEN** la llamada es válida y `source_type` queda en `unknown`
+
+### Requirement: Kind en tools
+`remember`, ítems de `remember_batch`, `update` (atributos), `recall`, `list_memories` y `context` MUST aceptar `kind` opcional. Las representaciones de memoria MUST incluir `kind` (nulo cuando no está clasificado). El conjunto de tools MUST permanecer el mismo; no se añade una tool nueva.
+
+#### Scenario: Remember con kind
+- **WHEN** un cliente llama `remember` con `kind=solution`
+- **THEN** la respuesta incluye `kind=solution`
+
+#### Scenario: Compatibilidad
+- **WHEN** un cliente omite `kind` en todas las tools
+- **THEN** las llamadas siguen siendo válidas
+
+### Requirement: Anclas en remember y recall
+`remember` y cada ítem de `remember_batch` MUST aceptar una lista opcional de anclas `{type, identifier}`. `recall` MUST aceptar `symbol` y `file` opcionales. El número de tools MCP MUST no cambiar por este change.
+
+#### Scenario: Remember con ancla
+- **WHEN** un cliente llama `remember` con una ancla `file=src/domain/users.py`
+- **THEN** la memoria persistida incluye esa ancla
+
+#### Scenario: Recall filtrado
+- **WHEN** un cliente llama `recall` con `symbol` y `query`
+- **THEN** la búsqueda se restringe a memorias ancladas a ese símbolo
