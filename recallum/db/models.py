@@ -129,6 +129,10 @@ class Memory(Base):
         ),
         CheckConstraint("importance BETWEEN 0 AND 10", name="ck_memories_importance"),
         CheckConstraint("(scope = 'project') = (project IS NOT NULL)", name="ck_memories_project"),
+        CheckConstraint(
+            "source_type IN ('agent', 'user', 'bootstrap', 'unknown')",
+            name="ck_memories_source_type",
+        ),
         Index(
             "ix_memories_user_active_created",
             "user_id",
@@ -164,6 +168,10 @@ class Memory(Base):
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     importance: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=5)
     source_client: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown", server_default=text("'unknown'")
+    )
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
     )

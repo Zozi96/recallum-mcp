@@ -33,6 +33,7 @@ from recallum.memory.schemas import (
     RememberBatchItem,
     RememberBatchResult,
     RememberResult,
+    SourceType,
     UpdateResult,
 )
 from recallum.telemetry.middleware import UsageTelemetryMiddleware
@@ -172,6 +173,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         metadata: dict[str, str | int | float | bool | None] | None = None,
         source_client: str | None = None,
         ttl_seconds: int | None = None,
+        source_type: SourceType | None = None,
+        source_ref: str | None = None,
     ) -> RememberResult:
         """Store one atomic memory, including verified reusable project context.
 
@@ -188,7 +191,9 @@ def build_mcp_server(container: Container) -> FastMCP:
         says so — advisory only, the write still succeeds; reword and update
         it when that happens. `ttl_seconds` is for short-lived working memory
         that should silently stop being served after it expires; omit it for
-        durable context.
+        durable context. `source_type` is who asserted the claim (agent, user,
+        bootstrap, or unknown); `source_ref` is a short path, commit, or file
+        id — never a transcript. Both are optional.
         """
         return await memory_service().remember(
             require_identity().user_id,
@@ -199,6 +204,8 @@ def build_mcp_server(container: Container) -> FastMCP:
             metadata=metadata,
             source_client=source_client,
             ttl_seconds=ttl_seconds,
+            source_type=source_type,
+            source_ref=source_ref,
         )
 
     @mcp.tool
@@ -414,6 +421,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         source_client: str | None = None,
         ttl_seconds: int | None = None,
         clear_expiry: bool = False,
+        source_type: SourceType | None = None,
+        source_ref: str | None = None,
     ) -> UpdateResult:
         """Correct a memory, or replace one whose fact has changed.
 
@@ -430,7 +439,8 @@ def build_mcp_server(container: Container) -> FastMCP:
         and clear_expiry only apply then (not alongside content) and manage a
         short-lived working memory's expiry — set a fresh one, or clear it
         back to durable. Scope and project cannot be changed. Unknown ids
-        return updated=false.
+        return updated=false. `source_type` and `source_ref` may be set on
+        the attribute path or override copied provenance on a content change.
         """
         return await memory_service().update(
             require_identity().user_id,
@@ -442,6 +452,8 @@ def build_mcp_server(container: Container) -> FastMCP:
             source_client=source_client,
             ttl_seconds=ttl_seconds,
             clear_expiry=clear_expiry,
+            source_type=source_type,
+            source_ref=source_ref,
         )
 
     @mcp.tool

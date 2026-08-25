@@ -14,8 +14,8 @@ from recallum.db.repositories.memory_repo import ScoredMemory
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError
 from recallum.memory.limits import MemoryLimits
-from recallum.memory.schemas import RememberBatchItem
-from recallum.memory.service import MemoryService
+from recallum.memory.schemas import MemoryOut, RememberBatchItem
+from recallum.memory.service import MAX_SOURCE_REF_CHARS, MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
 
 
@@ -1587,3 +1587,143 @@ async def test_update_rejects_ttl_seconds_alongside_content():
         await service.update(
             USER, stored.memory.id, content="new content", ttl_seconds=60
         )
+
+
+# -- structured provenance -------------------------------------------------
+
+
+def test_memory_out_defaults_source_provenance():
+    out = MemoryOut(
+        id=uuid.uuid4(),
+        scope="global",
+        category="fact",
+        content="legacy row",
+        importance=5,
+        created_at=datetime.now(UTC),
+    )
+    assert out.source_type == "unknown"
+    assert out.source_ref is None
+
+
+async def test_remember_round_trips_source_type_and_source_ref():
+    service, _, _ = make_service()
+    stored = await service.remember(
+        USER,
+        content="asserted by an agent",
+        category="fact",
+        source_type="agent",
+        source_ref="recallum/memory/service.py",
+    )
+    assert stored.memory.source_type == "agent"
+    assert stored.memory.source_ref == "recallum/memory/service.py"
+
+    omitted = await service.remember(USER, content="no provenance given", category="fact")
+    assert omitted.memory.source_type == "unknown"
+    assert omitted.memory.source_ref is None
+
+
+async def test_remember_rejects_invalid_source_type_and_overlong_source_ref():
+    service, _, _ = make_service()
+    with pytest.raises(MemoryValidationError, match="source_type"):
+        await service.remember(
+            USER, content="bad type", category="fact", source_type="nope"
+        )
+    with pytest.raises(MemoryValidationError, match="source_ref exceeds"):
+        await service.remember(
+            USER,
+            content="too long ref",
+            category="fact",
+            source_type="user",
+            source_ref="x" * (MAX_SOURCE_REF_CHARS + 1),
+        )
+
+
+async def test_remember_batch_item_carries_per_item_provenance():
+    service, _, _ = make_service()
+    result = await service.remember_batch(
+        USER,
+        items=[
+            RememberBatchItem(
+                content="from agent",
+                category="fact",
+                source_type="agent",
+                source_ref="commit:abc123",
+            ),
+            RememberBatchItem(content="omitted provenance", category="fact"),
+        ],
+    )
+    assert result.failed == 0
+    assert result.results[0].memory is not None
+    assert result.results[0].memory.source_type == "agent"
+    assert result.results[0].memory.source_ref == "commit:abc123"
+    assert result.results[1].memory is not None
+    assert result.results[1].memory.source_type == "unknown"
+    assert result.results[1].memory.source_ref is None
+
+
+async def test_remember_restatement_updates_or_keeps_provenance():
+    service, _, _ = make_service()
+    first = await service.remember(
+        USER,
+        content="same claim",
+        category="fact",
+        source_type="agent",
+        source_ref="path.py",
+    )
+    omitted = await service.remember(USER, content="same claim", category="fact")
+    assert omitted.created is False
+    assert omitted.memory.id == first.memory.id
+    assert omitted.memory.source_type == "agent"
+    assert omitted.memory.source_ref == "path.py"
+
+    bootstrapped = await service.remember(
+        USER, content="same claim", category="fact", source_type="bootstrap"
+    )
+    assert bootstrapped.created is False
+    assert bootstrapped.memory.id == first.memory.id
+    assert bootstrapped.memory.source_type == "bootstrap"
+    assert bootstrapped.memory.source_ref == "path.py"
+
+
+async def test_update_changes_provenance_in_place_and_supersede_copies_unless_overridden():
+    service, _, _ = make_service()
+    stored = await service.remember(
+        USER,
+        content="original claim",
+        category="fact",
+        source_type="agent",
+        source_ref="src/a.py",
+    )
+
+    patched = await service.update(
+        USER, stored.memory.id, source_type="user", source_ref="src/b.py"
+    )
+    assert patched.updated is True
+    assert patched.superseded_id is None
+    assert patched.memory is not None
+    assert patched.memory.id == stored.memory.id
+    assert patched.memory.source_type == "user"
+    assert patched.memory.source_ref == "src/b.py"
+
+    cleared = await service.update(USER, stored.memory.id, source_ref="  ")
+    assert cleared.memory is not None
+    assert cleared.memory.id == stored.memory.id
+    assert cleared.memory.source_type == "user"
+    assert cleared.memory.source_ref is None
+
+    copied = await service.update(USER, stored.memory.id, content="replaced claim")
+    assert copied.memory is not None
+    assert copied.memory.id != stored.memory.id
+    assert copied.memory.source_type == "user"
+    assert copied.memory.source_ref is None
+
+    overridden = await service.update(
+        USER,
+        copied.memory.id,
+        content="replaced again",
+        source_type="bootstrap",
+        source_ref="bootstrap.md",
+    )
+    assert overridden.memory is not None
+    assert overridden.memory.source_type == "bootstrap"
+    assert overridden.memory.source_ref == "bootstrap.md"

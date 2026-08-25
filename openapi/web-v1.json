@@ -267,6 +267,34 @@
             ],
             "title": "Metadata"
           },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "agent",
+                  "user",
+                  "bootstrap",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          },
           "ttl_seconds": {
             "anyOf": [
               {
@@ -369,6 +397,34 @@
               }
             ],
             "title": "Source Client"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "agent",
+                  "user",
+                  "bootstrap",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
           },
           "ttl_seconds": {
             "anyOf": [
@@ -998,6 +1054,28 @@
               }
             ],
             "title": "Source Client"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "source_type": {
+            "default": "unknown",
+            "enum": [
+              "agent",
+              "user",
+              "bootstrap",
+              "unknown"
+            ],
+            "title": "Source Type",
+            "type": "string"
           }
         },
         "required": [
@@ -1490,6 +1568,28 @@
               }
             ],
             "title": "Source Client"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "source_type": {
+            "default": "unknown",
+            "enum": [
+              "agent",
+              "user",
+              "bootstrap",
+              "unknown"
+            ],
+            "title": "Source Type",
+            "type": "string"
           }
         },
         "required": [
@@ -1673,6 +1773,17 @@
             ],
             "title": "Limit"
           },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
           "project": {
             "anyOf": [
               {
@@ -1703,6 +1814,24 @@
               }
             ],
             "title": "Scope"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "enum": [
+                  "coding",
+                  "debugging",
+                  "planning",
+                  "review",
+                  "architecture"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
           }
         },
         "required": [
@@ -1912,6 +2041,34 @@
               }
             ],
             "title": "Source Client"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ref"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "agent",
+                  "user",
+                  "bootstrap",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
           }
         },
         "required": [
@@ -3192,6 +3349,45 @@
                 }
               ],
               "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_tokens",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Tokens"
+            }
+          },
+          {
+            "in": "query",
+            "name": "strategy",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "coding",
+                    "debugging",
+                    "planning",
+                    "review",
+                    "architecture"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Strategy"
             }
           }
         ],

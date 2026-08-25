@@ -88,6 +88,8 @@ RRF_K = 60
 
 Category = Literal["preference", "decision", "constraint", "fact"]
 CATEGORIES: tuple[str, ...] = get_args(Category)
+SOURCE_TYPES: tuple[str, ...] = ("agent", "user", "bootstrap", "unknown")
+MAX_SOURCE_REF_CHARS = 512
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -119,6 +121,8 @@ class MemoryService:
         metadata: dict[str, Any] | None = None,
         source_client: str | None = None,
         ttl_seconds: int | None = None,
+        source_type: str | None = None,
+        source_ref: str | None = None,
     ) -> RememberResult:
         """Store an atomic memory, deduplicating exact active repeats.
 
@@ -131,6 +135,9 @@ class MemoryService:
         validated_importance = self._validate_importance(importance)
         validated_metadata = self._validate_metadata(metadata)
         expires_at = self._validate_ttl(ttl_seconds)
+        validated_source_type = self._validate_source_type(source_type)
+        set_source_ref = source_ref is not None
+        validated_source_ref = self._validate_source_ref(source_ref) if set_source_ref else None
         scope = "project" if normalized_project is not None else "global"
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         language_warning = self._language_warning(normalized)
@@ -155,6 +162,8 @@ class MemoryService:
             # silently vanish on an expiry nobody renewed), and passing
             # ttl_seconds always refreshes the expiry from now, even when the
             # existing row was durable.
+            existing_source_type = getattr(existing, "source_type", None) or "unknown"
+            existing_source_ref = getattr(existing, "source_ref", None)
             refreshed = await self._repo.update_attributes(
                 user_id,
                 existing.id,
@@ -169,6 +178,14 @@ class MemoryService:
                 ),
                 expires_at=expires_at,
                 clear_expires_at=ttl_seconds is None and existing.expires_at is not None,
+                source_type=(
+                    validated_source_type
+                    if validated_source_type is not None
+                    and validated_source_type != existing_source_type
+                    else None
+                ),
+                source_ref=validated_source_ref,
+                set_source_ref=set_source_ref and validated_source_ref != existing_source_ref,
             )
             # It IS a reconfirmation, though: the claim was just observed to
             # still hold, and readers use that stamp to judge freshness.
@@ -198,6 +215,8 @@ class MemoryService:
                 source_client=source_client,
                 metadata=validated_metadata,
                 expires_at=expires_at,
+                source_type=validated_source_type or "unknown",
+                source_ref=validated_source_ref,
             )
         except IntegrityError:
             # Concurrent insert won the race on the partial unique index.
@@ -323,6 +342,8 @@ class MemoryService:
                     metadata=item.metadata,
                     source_client=source_client,
                     ttl_seconds=item.ttl_seconds,
+                    source_type=item.source_type,
+                    source_ref=item.source_ref,
                 )
             except MemoryValidationError as exc:
                 outcomes.append(RememberBatchItemOutcome(error=str(exc)))
@@ -362,6 +383,8 @@ class MemoryService:
         source_client: str | None = None,
         ttl_seconds: int | None = None,
         clear_expiry: bool = False,
+        source_type: str | None = None,
+        source_ref: str | None = None,
     ) -> UpdateResult:
         """Correct a memory, superseding it when the claim itself changed.
 
@@ -394,6 +417,9 @@ class MemoryService:
         )
         validated_metadata = self._validate_metadata(metadata) if metadata is not None else None
         expires_at = self._validate_ttl(ttl_seconds)
+        validated_source_type = self._validate_source_type(source_type)
+        set_source_ref = source_ref is not None
+        validated_source_ref = self._validate_source_ref(source_ref) if set_source_ref else None
 
         if content is None:
             updated = await self._repo.update_attributes(
@@ -404,6 +430,9 @@ class MemoryService:
                 metadata=validated_metadata,
                 expires_at=expires_at,
                 clear_expires_at=clear_expiry,
+                source_type=validated_source_type,
+                source_ref=validated_source_ref,
+                set_source_ref=set_source_ref,
             )
             if updated is None:
                 return UpdateResult(updated=False)
@@ -425,6 +454,9 @@ class MemoryService:
                 importance=validated_importance,
                 metadata=validated_metadata,
                 source_client=source_client,
+                source_type=validated_source_type,
+                source_ref=validated_source_ref,
+                set_source_ref=set_source_ref,
             )
         except IntegrityError as exc:
             raise MemoryValidationError(
@@ -1386,6 +1418,29 @@ class MemoryService:
             )
         return category  # type: ignore[return-value]
 
+    def _validate_source_type(self, source_type: str | None) -> str | None:
+        if source_type is None:
+            return None
+        if source_type not in SOURCE_TYPES:
+            raise MemoryValidationError(
+                f"unknown source_type '{source_type}'; expected one of {', '.join(SOURCE_TYPES)}"
+            )
+        return source_type
+
+    def _validate_source_ref(self, source_ref: str | None) -> str | None:
+        if source_ref is None:
+            return None
+        if not isinstance(source_ref, str):
+            raise MemoryValidationError("source_ref must be a string")
+        normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", source_ref)).strip()
+        if not normalized:
+            return None
+        if len(normalized) > MAX_SOURCE_REF_CHARS:
+            raise MemoryValidationError(
+                f"source_ref exceeds {MAX_SOURCE_REF_CHARS} characters"
+            )
+        return normalized
+
     def _validate_importance(self, importance: int) -> int:
         if not isinstance(importance, int) or isinstance(importance, bool):
             raise MemoryValidationError("importance must be an integer")
@@ -1447,6 +1502,8 @@ def _to_memory_out(memory: Memory) -> MemoryOut:
         content=memory.content,
         importance=memory.importance,
         source_client=memory.source_client,
+        source_type=getattr(memory, "source_type", None) or "unknown",
+        source_ref=getattr(memory, "source_ref", None),
         metadata=dict(memory.metadata_ or {}),
         created_at=memory.created_at,
         expires_at=memory.expires_at,

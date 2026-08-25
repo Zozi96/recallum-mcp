@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from recallum.boundary_types import StrictImportance
 
 RecallMode = Literal["hybrid", "degraded_textual"]
+SourceType = Literal["agent", "user", "bootstrap", "unknown"]
 
 
 class MemoryOut(BaseModel):
@@ -39,6 +40,8 @@ class MemoryOut(BaseModel):
     content: str
     importance: int
     source_client: str | None = None
+    source_type: SourceType = "unknown"
+    source_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     expires_at: datetime | None = None
@@ -123,6 +126,8 @@ class RememberBatchItem(BaseModel):
     importance: StrictImportance = 5
     metadata: dict[str, Any] | None = None
     ttl_seconds: int | None = None
+    source_type: SourceType | None = None
+    source_ref: str | None = None
 
 
 class RememberBatchItemOutcome(BaseModel):

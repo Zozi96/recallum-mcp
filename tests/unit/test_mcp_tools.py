@@ -749,8 +749,17 @@ async def test_discovery_announces_exactly_eleven_tools_and_three_prompts(
         "stale-review",
     }
     remember = next(tool for tool in tools if tool.name == "remember")
+    update = next(tool for tool in tools if tool.name == "update")
     assert "Ask before storing secrets" in remember.description
     assert "never infer consent" in remember.description
+    remember_props = set((remember.inputSchema or {}).get("properties", {}))
+    update_props = set((update.inputSchema or {}).get("properties", {}))
+    assert {"source_type", "source_ref"} <= remember_props
+    assert {"source_type", "source_ref"} <= update_props
+    remember_required = set((remember.inputSchema or {}).get("required") or [])
+    update_required = set((update.inputSchema or {}).get("required") or [])
+    assert not {"source_type", "source_ref"} & remember_required
+    assert not {"source_type", "source_ref"} & update_required
     for tool in tools:
         schema = tool.inputSchema or {}
         properties = set(schema.get("properties", {}))
@@ -1071,6 +1080,44 @@ async def test_valid_token_full_flow(server: ServerInfo):
     assert recall_event.project == "recallum"
     assert recall_event.result_count == 1
     assert recall_event.degraded is False
+
+
+async def test_remember_and_update_accept_optional_source_provenance(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        omitted = await client.call_tool(
+            "remember",
+            {"content": "omitted provenance fact", "category": "fact"},
+        )
+        assert omitted.structured_content["created"] is True
+        omitted_memory = omitted.structured_content["memory"]
+        assert omitted_memory["source_type"] == "unknown"
+        assert omitted_memory["source_ref"] is None
+
+        bootstrapped = await client.call_tool(
+            "remember",
+            {
+                "content": "bootstrapped fact",
+                "category": "fact",
+                "source_type": "bootstrap",
+                "source_ref": "docs/bootstrap.md",
+            },
+        )
+        assert bootstrapped.structured_content["memory"]["source_type"] == "bootstrap"
+        assert bootstrapped.structured_content["memory"]["source_ref"] == "docs/bootstrap.md"
+
+        updated = await client.call_tool(
+            "update",
+            {
+                "memory_id": bootstrapped.structured_content["memory"]["id"],
+                "source_type": "user",
+            },
+        )
+        assert updated.structured_content["updated"] is True
+        assert updated.structured_content["memory"]["id"] == bootstrapped.structured_content[
+            "memory"
+        ]["id"]
+        assert updated.structured_content["memory"]["source_type"] == "user"
+        assert updated.structured_content["memory"]["source_ref"] == "docs/bootstrap.md"
 
 
 async def test_no_cross_user_access(server: ServerInfo):

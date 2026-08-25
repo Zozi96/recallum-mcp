@@ -222,6 +222,8 @@ class FakeMemoryRepository:
             recall_count=0,
             context_count=0,
             reconfirm_count=0,
+            source_type=kwargs.pop("source_type", "unknown"),
+            source_ref=kwargs.pop("source_ref", None),
             **kwargs,
         )
         self.rows[memory.id] = memory
@@ -593,6 +595,8 @@ class FakeMemoryRepository:
                 importance if importance is not None else max(row.importance for row in found)
             ),
             source_client=source_client,
+            source_type="unknown",
+            source_ref=None,
             metadata_=metadata,
             created_at=datetime.now(UTC),
             deleted_at=None,
@@ -796,6 +800,9 @@ class FakeMemoryRepository:
         metadata: dict[str, Any] | None,
         expires_at: datetime | None = None,
         clear_expires_at: bool = False,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        set_source_ref: bool = False,
     ) -> Memory | None:
         # Deliberately not gated on ``is_expired``: this is a keyed edit by
         # id, matching the adapter, so an expired row can still be reached to
@@ -813,9 +820,15 @@ class FakeMemoryRepository:
             memory.expires_at = None
         elif expires_at is not None:
             memory.expires_at = expires_at
+        if source_type is not None:
+            memory.source_type = source_type
+        if set_source_ref:
+            memory.source_ref = source_ref
         if (
             any(value is not None for value in (importance, category, metadata, expires_at))
             or clear_expires_at
+            or source_type is not None
+            or set_source_ref
         ):
             self._bump(user_id)
         return memory
@@ -833,6 +846,9 @@ class FakeMemoryRepository:
         importance: int | None,
         metadata: dict[str, Any] | None,
         source_client: str | None,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        set_source_ref: bool = False,
     ) -> Memory | None:
         original = self.rows.get(memory_id)
         if original is None or original.user_id != user_id or original.is_deleted:
@@ -857,6 +873,12 @@ class FakeMemoryRepository:
             embedding_model=embedding_model,
             importance=importance if importance is not None else original.importance,
             source_client=(source_client if source_client is not None else original.source_client),
+            source_type=(
+                source_type
+                if source_type is not None
+                else getattr(original, "source_type", None) or "unknown"
+            ),
+            source_ref=(source_ref if set_source_ref else getattr(original, "source_ref", None)),
             metadata_=metadata if metadata is not None else dict(original.metadata_ or {}),
             created_at=datetime.now(UTC),
             deleted_at=None,

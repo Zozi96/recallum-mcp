@@ -523,6 +523,8 @@ class MemoryRepository:
         metadata: dict[str, Any],
         memory_id: uuid.UUID | None = None,
         expires_at: datetime | None = None,
+        source_type: str = "unknown",
+        source_ref: str | None = None,
     ) -> Memory:
         """Insert a memory. Raises IntegrityError on exact active duplicate.
 
@@ -564,6 +566,8 @@ class MemoryRepository:
                 embedding_model=embedding_model,
                 importance=importance,
                 source_client=source_client,
+                source_type=source_type,
+                source_ref=source_ref,
                 metadata_=metadata,
                 expires_at=expires_at,
             )
@@ -1155,6 +1159,9 @@ class MemoryRepository:
         metadata: dict[str, Any] | None,
         expires_at: datetime | None = None,
         clear_expires_at: bool = False,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        set_source_ref: bool = False,
     ) -> Memory | None:
         """Change what a memory is filed under, not what it claims.
 
@@ -1192,9 +1199,16 @@ class MemoryRepository:
                 memory.expires_at = None
             elif expires_at is not None:
                 memory.expires_at = expires_at
-            if any(
-                value is not None for value in (importance, category, metadata, expires_at)
-            ) or clear_expires_at:
+            if source_type is not None:
+                memory.source_type = source_type
+            if set_source_ref:
+                memory.source_ref = source_ref
+            if (
+                any(value is not None for value in (importance, category, metadata, expires_at))
+                or clear_expires_at
+                or source_type is not None
+                or set_source_ref
+            ):
                 await self._increment_generation(session, user_id)
             await session.flush()
             return memory
@@ -1212,6 +1226,9 @@ class MemoryRepository:
         importance: int | None,
         metadata: dict[str, Any] | None,
         source_client: str | None,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        set_source_ref: bool = False,
     ) -> Memory | None:
         """Replace an active memory with a new one, atomically.
 
@@ -1253,6 +1270,10 @@ class MemoryRepository:
                 source_client=(
                     source_client if source_client is not None else original.source_client
                 ),
+                source_type=(
+                    source_type if source_type is not None else original.source_type
+                ),
+                source_ref=(source_ref if set_source_ref else original.source_ref),
                 metadata_=(metadata if metadata is not None else dict(original.metadata_ or {})),
             )
             session.add(replacement)
@@ -1351,6 +1372,8 @@ class MemoryRepository:
                     importance if importance is not None else max(row.importance for row in rows)
                 ),
                 source_client=source_client,
+                source_type="unknown",
+                source_ref=None,
                 metadata_=metadata,
             )
             session.add(replacement)

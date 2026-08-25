@@ -35,6 +35,7 @@ from recallum.memory.schemas import (
     ReconfirmResult,
     RelatedMemoriesResult,
     RememberResult,
+    SourceType,
 )
 from recallum.memory.service import MemoryService
 from recallum.telemetry.repository import TelemetryRepository
@@ -83,6 +84,8 @@ class CreateMemoryRequest(BaseModel):
     metadata: Metadata | None = None
     source_client: str | None = None
     ttl_seconds: int | None = None
+    source_type: SourceType | None = None
+    source_ref: str | None = None
 
     @model_validator(mode="after")
     def validate_scope(self):
@@ -126,6 +129,8 @@ class CorrectMemoryRequest(MemoryLocationImmutableRequest):
     metadata: Metadata | None = None
     ttl_seconds: int | None = None
     clear_expiry: bool = False
+    source_type: SourceType | None = None
+    source_ref: str | None = None
 
 
 class SupersedeMemoryRequest(MemoryLocationImmutableRequest):
@@ -134,6 +139,8 @@ class SupersedeMemoryRequest(MemoryLocationImmutableRequest):
     importance: StrictImportanceInput | None = None
     metadata: Metadata | None = None
     source_client: str | None = None
+    source_type: SourceType | None = None
+    source_ref: str | None = None
 
 
 class SearchMemoriesRequest(BaseModel):
@@ -217,6 +224,8 @@ def _memory(row: Memory) -> MemoryOut:
         content=row.content,
         importance=row.importance,
         source_client=row.source_client,
+        source_type=getattr(row, "source_type", None) or "unknown",
+        source_ref=getattr(row, "source_ref", None),
         metadata=dict(row.metadata_ or {}),
         created_at=row.created_at,
         expires_at=row.expires_at,

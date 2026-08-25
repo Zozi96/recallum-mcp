@@ -1015,3 +1015,47 @@ def test_reconfirm_merge_and_related_delegate_with_forwarded_params(monkeypatch)
             "metadata": {"k": "v"},
             "source_client": "test",
         }
+
+
+def test_create_and_patch_accept_optional_source_provenance():
+    container, _ = build_test_container()
+    user = _user(container, "provenance@example.com")
+    app = create_app(Settings(), container)
+    with TestClient(app, base_url="https://recallum.test") as client:
+        _login(client, user.email)
+        omitted = client.post(
+            "/api/v1/me/memories",
+            json={"content": "no provenance", "category": "fact"},
+        )
+        assert omitted.status_code == 201
+        omitted_memory = omitted.json()["memory"]
+        assert omitted_memory["source_type"] == "unknown"
+        assert omitted_memory["source_ref"] is None
+
+        created = client.post(
+            "/api/v1/me/memories",
+            json={
+                "content": "agent asserted",
+                "category": "fact",
+                "source_type": "agent",
+                "source_ref": "src/app.py",
+            },
+        )
+        assert created.status_code == 201
+        memory = created.json()["memory"]
+        assert memory["source_type"] == "agent"
+        assert memory["source_ref"] == "src/app.py"
+
+        patched = client.patch(
+            f"/api/v1/me/memories/{memory['id']}",
+            json={"source_type": "user", "source_ref": "src/web.py"},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["id"] == memory["id"]
+        assert patched.json()["source_type"] == "user"
+        assert patched.json()["source_ref"] == "src/web.py"
+
+        fetched = client.get(f"/api/v1/me/memories/{memory['id']}")
+        assert fetched.status_code == 200
+        assert fetched.json()["source_type"] == "user"
+        assert fetched.json()["source_ref"] == "src/web.py"

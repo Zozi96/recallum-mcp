@@ -15,6 +15,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from recallum.config import TEXT_SEARCH_CONFIG
@@ -283,7 +284,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0015_memory_expiry"
+        assert version == "0016_memory_provenance"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -346,6 +347,44 @@ async def test_migrations_applied(container):
     readiness = container.database_readiness()
     assert isinstance(readiness, DatabaseReadiness)
     assert await readiness.is_ready() is True
+
+
+async def test_source_type_defaults_unknown_and_rejects_invalid(container):
+    user_id = await _make_user_with_key(container, "provenance@example.com")
+    service = container.memory_service()
+    stored = await service.remember(user_id, content="no provenance row", category="fact")
+    assert stored.memory.source_type == "unknown"
+    assert stored.memory.source_ref is None
+
+    engine = container.engine()
+    async with engine.connect() as connection:
+        constraint = (
+            await connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conname = 'ck_memories_source_type'"
+                )
+            )
+        ).scalar_one()
+        assert constraint == "ck_memories_source_type"
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :u, true)"),
+            {"u": str(user_id)},
+        )
+        row = (
+            await connection.execute(
+                text("SELECT source_type, source_ref FROM memories WHERE id = :i"),
+                {"i": stored.memory.id},
+            )
+        ).one()
+        assert tuple(row) == ("unknown", None)
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                text("UPDATE memories SET source_type = 'nope' WHERE id = :i"),
+                {"i": stored.memory.id},
+            )
 
 
 async def test_database_readiness_rejects_superuser_and_missing_force_rls(
