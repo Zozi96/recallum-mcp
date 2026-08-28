@@ -670,16 +670,6 @@ def _devin(
         result["native_mcp"] = safe
         auth = safe["auth"]
         _auth_problem("Devin CLI", auth, token_env, problems)
-        if auth.startswith("Bearer ${"):
-            # Devin-specific: environment-variable expansion in mcp_config.json
-            # headers is not documented, so a ${VAR} placeholder is likely sent
-            # to the server literally and cannot authenticate. Flag it regardless
-            # of `_auth_problem`'s unset-variable outcome.
-            problems.append(
-                "auth: Devin CLI header is an unexpanded ${...} "
-                "placeholder -- Devin does not document environment-variable "
-                "expansion in mcp_config.json, so the API key must be written literally"
-            )
         _record_permission(safe, config_path, auth, problems, client="Devin CLI")
         _endpoint_problem("Devin CLI", server.get("url"), problems, "url")
     return result

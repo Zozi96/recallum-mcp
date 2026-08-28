@@ -162,18 +162,23 @@ listed by `agy plugin list`. If `agy` is not on `PATH`, that last sub-check is s
 
 Devin uses the MCP server `recallum` over Streamable HTTP at `https://<host>/mcp/`.
 
-The installer writes the user-scope MCP config:
+The installer writes the user-scope MCP config with a bearer reference that Devin resolves from the
+environment at connect time. It also persists the key to `~/.config/recallum/env` (mode `600`):
 
 ```bash
 export RECALLUM_API_KEY=rcl_YOUR_API_KEY
 plugins/recallum-memory/scripts/install.sh --target devin --url https://recallum.example.com/mcp/
 ```
 
+The resulting `~/.config/devin/mcp_config.json` contains no secret; the bearer is `Bearer
+${RECALLUM_API_KEY}` and is expanded by Devin when it connects.
+
 Or add the server manually with the Devin CLI:
 
 ```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
 devin mcp add -s user recallum https://recallum.example.com/mcp/ \
-  --header "Authorization: Bearer rcl_YOUR_API_KEY"
+  --header "Authorization: Bearer ${RECALLUM_API_KEY}"
 ```
 
 Equivalently, write `~/.config/devin/mcp_config.json` by hand:
@@ -184,7 +189,7 @@ Equivalently, write `~/.config/devin/mcp_config.json` by hand:
     "recallum": {
       "url": "https://recallum.example.com/mcp/",
       "headers": {
-        "Authorization": "Bearer rcl_YOUR_API_KEY"
+        "Authorization": "Bearer ${RECALLUM_API_KEY}"
       }
     }
   }
@@ -206,9 +211,9 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py
 ```
 
 It reports a `Devin CLI` client: whether the `recallum` server entry is present in
-`~/.config/devin/mcp_config.json`, its `url`, the Authorization header (and whether it is an
-unexpanded `${...}` placeholder, which is wrong for Devin because environment-variable expansion
-in `mcp_config.json` headers is not documented), and the config file's permission mode.
+`~/.config/devin/mcp_config.json`, its `url`, the Authorization header (`Bearer ${RECALLUM_API_KEY}`
+redacted; the variable is checked and reported as set or unset), and the config file's permission
+mode.
 
 ## Agent usage guidance
 
@@ -241,6 +246,6 @@ discovery over assuming a specific prefix string when working in Antigravity CLI
 | Tool call fails with "authentication required" | Missing `Authorization: Bearer` header |
 | Tool call fails with "invalid or revoked API key" | Key typo or revoked — issue a new one |
 | Grok MCP target is `${user_config.mcp_url}` | Grok does not expand Claude userConfig; run `install.sh --target grok` |
-| Devin tool calls fail with "authentication required" | Devin does not document `${RECALLUM_API_KEY}` expansion in `mcp_config.json`; write the literal Bearer token or re-run `install.sh --target devin` |
+| Devin tool calls fail with "authentication required" | `RECALLUM_API_KEY` is not exported in the shell that launched Devin; run `install.sh --target devin` to persist it to `~/.config/recallum/env` and source that file before launching Devin |
 | `recall` returns `mode: degraded_textual` | Ollama unreachable; check `readyz` and the ollama service |
 | Client times out | MCP endpoint is `/mcp/` (trailing slash); HTTPS only via Traefik |

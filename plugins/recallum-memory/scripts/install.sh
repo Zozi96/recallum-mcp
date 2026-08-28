@@ -17,7 +17,7 @@ Options:
                             (default: auto)
                             auto installs into every detected CLI
                             both requires Codex and Claude Code (not Grok/Cursor/Devin/Antigravity)
-  --token-env-var NAME      Codex, Grok, and Cursor: bearer-token environment variable
+  --token-env-var NAME      Codex, Grok, Cursor, and Devin: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
   --remote                  Register the private GitHub repository instead of the local checkout
@@ -41,7 +41,7 @@ API key handling (default: store when a key is available or can be prompted):
   Persistence:
     Claude Code  ~/.claude/.credentials.json → pluginSecrets
                  (same store as /plugin configure; works for GUI launches)
-    Codex/Grok/Cursor
+    Codex/Grok/Cursor/Devin
                  ~/.config/recallum/env  (export of the token env var)
                  and, on Linux, ~/.config/environment.d/99-recallum.conf
                  so desktop sessions also see the variable
@@ -68,6 +68,11 @@ API key handling (default: store when a key is available or can be prompted):
                URL + Bearer (literal when a key is stored), and if a plugin cache
                already exists, patches its mcp.json the same way and moves Claude's
                .mcp.json aside so Cursor does not load unresolved user_config URLs.
+  Devin CLI    writes ~/.config/devin/mcp_config.json with a Bearer resolved from
+               $token_env_var at connection time. Tools appear as mcp__recallum__*.
+               Devin plugins are closed beta, so the installer does not run
+               `devin plugins install`; install the recallum-memory skill manually
+               if your build supports plugins.
 EOF
 }
 
@@ -463,7 +468,7 @@ store_env_key_files() {
   if ((install_claude)) || [[ "$token_env_var" == "RECALLUM_API_KEY" ]]; then
     names+=("RECALLUM_API_KEY")
   fi
-  if ((install_codex || install_grok || install_cursor)); then
+  if ((install_codex || install_grok || install_cursor || install_devin)); then
     local found=0
     local n
     if ((${#names[@]} > 0)); then
@@ -578,7 +583,7 @@ persist_api_key() {
   if ((install_claude)); then
     store_claude_plugin_secret "$resolved_api_key"
   fi
-  if ((install_codex || install_grok || install_claude || install_cursor)); then
+  if ((install_codex || install_grok || install_claude || install_cursor || install_devin)); then
     store_env_key_files "$resolved_api_key"
   fi
   api_key_stored=1
@@ -1751,51 +1756,31 @@ PY
 }
 
 # Devin CLI. No plugin install in this installer (Devin plugins are closed beta);
-# this only writes the user-scope MCP config. Devin does not document environment-
-# variable expansion in mcp_config.json headers, so the API key is written literally
-# when available. A --no-store-api-key placeholder is accepted but warned about.
-# Mirrors the Antigravity literal-bearer safety model: mode 0600 and a retained
-# backup of any pre-existing file.
+# this only writes the user-scope MCP config. Devin expands ${VAR} in
+# mcp_config.json headers at connect time, so the bearer is written as an
+# environment-variable reference and resolved at runtime. The config itself
+# holds no secret, but it is still written at mode 0600 because it may contain
+# other servers' secrets. Unrelated mcpServers entries are preserved.
 install_for_devin() {
   local devin_mcp="${XDG_CONFIG_HOME:-$HOME/.config}/devin/mcp_config.json"
-  local key_path=""
-
-  # Unconditional, and before the python3 child is forked: the child inherits
-  # this umask, so every file it creates is born private even on the paths
-  # where no key is resolved (--no-store-api-key, declined prompt).
-  umask 077
-  if [[ -n "${resolved_api_key-}" ]]; then
-    key_path="$tmp_dir/devin-api-key"
-    printf '%s' "$resolved_api_key" >"$key_path"
-    chmod 600 "$key_path"
-  fi
 
   if ((dry_run)); then
-    if [[ -n "$key_path" ]]; then
-      echo "dry-run: write $devin_mcp server recallum (url=$url, literal Bearer, mode 600, backup retained)"
-    else
-      echo "dry-run: write $devin_mcp server recallum (url=$url, Bearer \${$token_env_var})"
-    fi
+    echo "dry-run: write $devin_mcp server recallum (url=$url, Bearer \${$token_env_var})"
     return 0
   fi
 
-  python3 - "$devin_mcp" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+  python3 - "$devin_mcp" "$url" "$token_env_var" <<'PY'
 import json
 import os
-import shutil
 import sys
-import time
 from pathlib import Path
 
 mcp_path = Path(sys.argv[1])
 url = sys.argv[2]
 token_env = sys.argv[3]
-key_path = sys.argv[4]
-key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
-# Devin's env-var expansion in mcp_config.json headers is not documented, so the
-# placeholder form is inert; it is still written so the entry is well-formed and
-# the doctor can flag it.
-auth = f"Bearer {key}" if key else f"Bearer ${{{token_env}}}"
+# Devin expands ${VAR} in mcp_config.json headers at connect time. The bearer
+# is therefore an env reference resolved at runtime; the config holds no secret.
+auth = f"Bearer ${{{token_env}}}"
 
 mcp_path.parent.mkdir(parents=True, exist_ok=True)
 existed = mcp_path.is_file()
@@ -1816,33 +1801,21 @@ if servers.get("recallum") == entry:
     print(f"Devin MCP server 'recallum' in {mcp_path} already matches; leaving it unchanged.")
     raise SystemExit(0)
 
-if existed:
-    stamp = f"{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
-    backup = mcp_path.with_name(f"{mcp_path.name}.bak-{stamp}")
-    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with open(fd, "wb") as handle, open(mcp_path, "rb") as source:
-        shutil.copyfileobj(source, handle)
-    print(
-        f"Backed up the previous {mcp_path.name} to {backup.name} (mode 600). "
-        "That backup contains your Recallum API key in cleartext -- delete it "
-        "once the new config is verified."
-    )
-
+# A pre-existing literal Bearer from an old install is simply replaced by the
+# env reference, which is the desired migration. No backup is written because
+# the config file itself now contains no secret.
 servers["recallum"] = entry
 tmp = mcp_path.with_name(mcp_path.name + ".tmp")
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-with open(fd, "w", encoding="utf-8") as handle:
-    handle.write(json.dumps(data, indent=2) + "\n")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 os.chmod(tmp, 0o600)
 tmp.replace(mcp_path)
 os.chmod(mcp_path, 0o600)
 print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
 PY
-  [[ -z "$key_path" ]] || rm -f -- "$key_path"
 
   if [[ -z "${resolved_api_key-}" ]]; then
-    echo "warning: no API key stored for Devin; it does not expand \${$token_env_var} in" >&2
-    echo "         mcp_config.json, so re-run without --no-store-api-key or pass --api-key-file." >&2
+    echo "warning: no API key stored; export $token_env_var (or re-run without --no-store-api-key" >&2
+    echo "         or with --api-key-file) so Devin can resolve the bearer." >&2
   fi
 }
 
@@ -2026,11 +1999,16 @@ if ((install_cursor)); then
   echo "        MCP config was written to ~/.cursor/mcp.json (mode 600)."
 fi
 if ((install_devin)); then
-  echo "Devin: recallum server written to ~/.config/devin/mcp_config.json (mode 600, literal Bearer)."
-  echo "       Tools appear as mcp__recallum__*. If Devin supports plugins, install the"
-  echo "       recallum-memory skill manually; hook dispatch via the plugin is expected"
-  echo "       but unconfirmed, so the hook wiring in .devin/hooks.v1.json is optional."
-  echo "       Restart Devin so MCP reloads."
+  if ((env_file_stored)); then
+    echo "Devin: token env file written; export $token_env_var before launching Devin."
+  else
+    echo "Devin: export $token_env_var before launching Devin."
+  fi
+  echo "       recallum server written to ~/.config/devin/mcp_config.json (mode 600,"
+  echo "       bearer resolved from \${$token_env_var}). Tools appear as mcp__recallum__*."
+  echo "       If Devin supports plugins, install the recallum-memory skill manually;"
+  echo "       hook dispatch via the plugin is expected but unconfirmed, so the hook"
+  echo "       wiring in .devin/hooks.v1.json is optional. Restart Devin so MCP reloads."
 fi
 if ((install_antigravity)); then
   echo "Antigravity: plugin installed with 'agy plugin install' and the recallum server written to"

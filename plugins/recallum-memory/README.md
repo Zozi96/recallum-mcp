@@ -117,8 +117,9 @@ export RECALLUM_API_KEY=rcl_YOUR_API_KEY
 plugins/recallum-memory/scripts/install.sh --target devin --url https://recallum.example.com/mcp/
 ```
 
-The installer writes the `recallum` server with a literal Bearer token (mode 600)
-and preserves any pre-existing `mcpServers` entries. Devin plugins are closed beta, so
+The installer writes the `recallum` server with `Authorization: Bearer ${RECALLUM_API_KEY}`
+(mode 600) and preserves any pre-existing `mcpServers` entries. The key is persisted to
+`~/.config/recallum/env`; the MCP config itself contains no secret. Devin plugins are closed beta, so
 `install.sh` does **not** run `devin plugins install`; if your Devin build supports
 plugins, install the recallum-memory skill manually and optionally wire
 `.devin/hooks.v1.json` for `SessionStart`. Hook dispatch through the plugin is expected
@@ -165,7 +166,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
 | `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent` and `devin`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
-| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex and Grok read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into userConfig storage, because `.mcp.json` reads `${user_config.api_token}` and never the environment |
+| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex, Grok, and Devin read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into userConfig storage, because `.mcp.json` reads `${user_config.api_token}` and never the environment |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |
 | `--force-mcp` | off | Replace an existing setup: a differing Codex/Grok MCP definition, or an already-installed Claude Code plugin |

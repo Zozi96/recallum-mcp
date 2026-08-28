@@ -203,8 +203,9 @@ also not yet determined — no prefix constant exists in the shared hook code.
 
 ## Setup — Devin
 
-Devin CLI does **not** document environment-variable expansion in `mcp_config.json` headers, so the
-API key is written to disk in cleartext — read the whole section before running the installer.
+Devin CLI expands `${VAR}` in `mcp_config.json` headers at connect time, so the config file itself
+holds no secret. The installer persists the key to `~/.config/recallum/env` (mode `600`) and writes
+`~/.config/devin/mcp_config.json` at mode `0600` with an environment-variable bearer reference.
 
 1. Confirm `devin` is on `PATH` (`devin --version`).
 2. Run the installer:
@@ -214,14 +215,14 @@ API key is written to disk in cleartext — read the whole section before runnin
    plugins/recallum-memory/scripts/install.sh --target devin --url https://recallum.example.com/mcp/
    ```
 
-   This writes `~/.config/devin/mcp_config.json` at mode `0600` with a **literal, cleartext**
-   bearer token under `mcpServers.recallum` (`url` plus `headers.Authorization: Bearer <literal>`).
-   A `${RECALLUM_API_KEY}`-style placeholder will **not** be expanded by Devin. `--target both`
-   does not cover Devin CLI; use `--target devin` explicitly.
-3. **Cleartext key warning:** the bearer token is written literally into
-   `~/.config/devin/mcp_config.json` — a `${RECALLUM_API_KEY}`-style placeholder will **not** be
-   expanded by Devin. The installer's backup of the prior config also holds the key in cleartext.
-   Treat both files as sensitive; never commit either one.
+   This writes `~/.config/devin/mcp_config.json` with `mcpServers.recallum` using
+   `headers.Authorization: Bearer ${RECALLUM_API_KEY}`. Devin resolves the variable at connect time.
+   The actual key lives in `~/.config/recallum/env`, not in the MCP config. `--target both` does not
+   cover Devin CLI; use `--target devin` explicitly.
+3. **Env-var note:** ensure `RECALLUM_API_KEY` is exported in the shell (or desktop session) that
+   launches Devin. The installer writes `~/.config/recallum/env` for shell use and
+   `~/.config/environment.d/99-recallum.conf` on Linux for GUI sessions; source the file or re-login
+   so Devin can resolve the bearer.
 4. Install the plugin (Devin plugins are closed beta; a local path requires `--local`):
 
    ```bash
@@ -237,9 +238,9 @@ API key is written to disk in cleartext — read the whole section before runnin
    python3 plugins/recallum-memory/scripts/recallum_doctor.py
    ```
 
-   It reports the `Devin CLI` client: server presence, `url`, the `Authorization` header (flagging
-   any unexpanded `${...}` placeholder as wrong for this client), and the config file's permission
-   mode. Never print or echo the key.
+   It reports the `Devin CLI` client: server presence, `url`, the `Authorization` header
+   (`Bearer ${RECALLUM_API_KEY}` redacted; the variable is checked and reported as set or unset),
+   and the config file's permission mode. Never print or echo the key.
 6. Restart Devin so the MCP server, hooks, and tool catalog reload. Tools appear as `mcp__recallum__*`
    (same prefix as Codex; no `search_tool` or `ToolSearch` lookup step).
 
@@ -308,9 +309,10 @@ echo the key while doing so.
   and that `~/.grok/config.toml` has `Authorization = "Bearer ${RECALLUM_API_KEY}"` (unexpanded).
   A plugin-only MCP entry showing `url = "${user_config.mcp_url}"` is broken on Grok — re-run
   `scripts/install.sh --target grok` (or `--force-mcp` if a stale definition exists).
-- Authentication failure on Devin CLI: re-run `install.sh --target devin` so
-  `~/.config/devin/mcp_config.json` contains a literal Bearer (not a `${...}` placeholder). Do not
-  ask for the value in chat and do not read it back.
+- Authentication failure on Devin CLI: verify `RECALLUM_API_KEY` is exported in the shell that
+  launched Devin and that `~/.config/devin/mcp_config.json` has `Authorization: Bearer
+  ${RECALLUM_API_KEY}`. Re-run `install.sh --target devin` to persist the key to
+  `~/.config/recallum/env` if needed. Do not ask for the value in chat and do not read it back.
 - Connection failure: verify the URL and service readiness independently, then retry discovery.
 - Hook absent or blocked (Codex): use `/hooks` to inspect the path and trust state; never bypass the
   trust review.
