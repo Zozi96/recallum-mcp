@@ -51,23 +51,21 @@ API key handling (default: store when a key is available or can be prompted):
 
   Codex        registers the MCP server against --token-env-var, and resolves that
                environment variable at connection time.
-  Claude Code  keeps the plugin for hooks/skills (plugin .mcp.json still uses
-               ${user_config.api_token} / pluginSecrets). The installer ALSO dual-writes
-               a native user MCP server `recallum` into ~/.claude.json so Claude
-               Desktop (which often fails to register plugin-bundled HTTP MCP into
-               ToolSearch) still gets tools under mcp__recallum__*. Auth on that
-               native entry is a literal Bearer when a key is stored this run, or
-               Bearer ${token-env-var} with --no-store-api-key.
+  Claude Code  keeps the plugin for hooks/skills (pluginSecrets / userConfig).
+               The plugin does not ship .mcp.json; Claude MCP is native
+               ~/.claude.json server `recallum` only (installer writes it).
+               Tools appear as mcp__recallum__*. Auth is a literal Bearer when
+               a key is stored this run, or Bearer ${token-env-var} with
+               --no-store-api-key.
   Grok Build   registers the MCP server in ~/.grok/config.toml against
-               --token-env-var (same env-var pattern as Codex). Claude-style
-               ${user_config.*} placeholders in the plugin .mcp.json are not
-               resolved by Grok, so the native config entry is required and
-               takes precedence over the plugin-bundled server.
+               --token-env-var (same env-var pattern as Codex). The plugin
+               does not ship .mcp.json; Grok never resolved Claude ${user_config.*}.
   Cursor       registers the marketplace via cursor-agent/agent (plugin install is
                still done in the Cursor UI) and writes ~/.cursor/mcp.json with a real
                URL + Bearer (literal when a key is stored). Native ~/.cursor/mcp.json
                is the only Cursor MCP; if a plugin cache exists, empty its mcp.json
-               (no URL/Bearer) and still move Claude .mcp.json aside.
+               (no URL/Bearer) and still hide leftover Claude .mcp.json from old
+               snapshot installs (the plugin no longer ships that file).
   Devin CLI    writes ~/.config/devin/mcp_config.json with a Bearer resolved from
                $token_env_var at connection time. Tools appear as mcp__recallum__*.
                Devin plugins are closed beta, so the installer does not run
@@ -362,8 +360,8 @@ resolve_api_key() {
 
   # Prefer the installer's default token env var name, then the custom
   # --token-env-var used by Codex/Grok. Either way this is only an
-  # installer-time source: it gets persisted into userConfig storage below,
-  # since Claude Code's .mcp.json reads ${user_config.api_token}, not env.
+  # installer-time source: persisted into pluginSecrets / userConfig below
+  # (and a literal Bearer in native ~/.claude.json when a key is stored).
   if [[ -n "${RECALLUM_API_KEY-}" ]]; then
     resolved_api_key=$RECALLUM_API_KEY
     echo "Using existing RECALLUM_API_KEY from the environment (value not printed)."
@@ -736,9 +734,8 @@ claude_settings_file() {
 # failure is silent and confusing: Claude Code falls back to loading the plugin
 # inline from the repository checkout, so hooks and skills keep working, but the
 # loaded plugin id becomes `recallum-memory@inline` and no longer matches the
-# `pluginConfigs` key `recallum-memory@recallum-local`. `${user_config.mcp_url}`
-# in .mcp.json then stays unresolved and the bundled MCP server disappears --
-# the SessionStart hook keeps telling the agent to call tools that do not exist.
+# `pluginConfigs` key `recallum-memory@recallum-local`. Hooks and skills keep
+# working from the inline load, but userConfig options will not apply.
 verify_claude_marketplace_persisted() {
   if ((dry_run)); then return 0; fi
   python3 - "$(claude_settings_file)" "$marketplace_name" <<'PY'
@@ -785,8 +782,7 @@ actual = options.get("mcp_url")
 if actual != expected:
     raise SystemExit(
         f"error: pluginConfigs['{plugin_id}'].options.mcp_url is {actual!r}, expected {expected!r}\n"
-        f"       in {path}. Without it, ${{user_config.mcp_url}} in .mcp.json cannot resolve and\n"
-        "       Claude Code starts with the Recallum hooks but no Recallum MCP tools.\n"
+        f"       in {path}. Without it, plugin userConfig mcp_url is wrong.\n"
         "       Repair with:\n"
         f"         claude plugin install {plugin_id} --scope {scope} --config mcp_url={expected}"
     )
@@ -794,9 +790,9 @@ PY
 }
 
 # Claude stores user-scoped MCP servers in ~/.claude.json (HOME), not under
-# CLAUDE_CONFIG_DIR. Claude Desktop registers these (codegraph, richai, …) while
-# plugin-bundled HTTP MCP with ${user_config.*} is often absent from the Desktop
-# deferred tool catalog. Dual-write keeps hooks on the plugin and tools on native.
+# CLAUDE_CONFIG_DIR. The plugin does not ship .mcp.json; native
+# mcpServers.recallum is the only Claude MCP (Desktop ToolSearch).
+# Dual-write keeps hooks on the plugin and tools on native.
 claude_user_mcp_file() {
   printf '%s\n' "${HOME}/.claude.json"
 }
@@ -939,23 +935,18 @@ print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
 PY
 }
 
-# Plugin-bundled `.mcp.json` resolves `Bearer ${user_config.api_token}` only --
-# it does not read RECALLUM_API_KEY (unlike Codex and Grok, Claude Code cannot
-# follow an env var at connection time for that file; expansion is single-pass
-# ${VAR} / ${VAR:-default} only). The key must already be in userConfig storage
-# for the plugin path: pluginConfigs options.api_token or pluginSecrets
-# api_token. persist_api_key/store_claude_plugin_secret above should have put
-# it there whenever a key was resolved and --no-store-api-key was not passed.
-#
-# The native ~/.claude.json entry (ensure_claude_native_mcp) can use a literal
-# Bearer or Bearer ${ENV} and is what Claude Desktop needs for ToolSearch.
+# pluginSecrets / userConfig api_token (plugin path) plus native ~/.claude.json
+# Bearer. RECALLUM_API_KEY in the shell does not authenticate native MCP unless
+# it was persisted this run or --no-store-api-key left Bearer ${ENV}.
+# persist_api_key/store_claude_plugin_secret above should have put it in
+# pluginSecrets whenever a key was resolved and --no-store-api-key was not passed.
 #
 # If RECALLUM_API_KEY is set in this shell but nothing landed in storage
-# (typically --no-store-api-key), that env var will NOT authenticate the
-# *plugin* path -- .mcp.json never reads it -- so this fails loudly instead of
-# giving false confidence. If nothing is set anywhere, this only warns: the
-# install itself is valid, and the key is read at Claude Code launch, not
-# now, so an empty environment here is not proof of a broken install.
+# (typically --no-store-api-key), that env var will NOT authenticate -- so this
+# fails loudly instead of giving false confidence. If nothing is set anywhere,
+# this only warns: the install itself is valid, and the key is read at Claude
+# Code launch, not now, so an empty environment here is not proof of a broken
+# install.
 verify_claude_credential() {
   if ((dry_run)); then return 0; fi
   local env_set=0
@@ -987,9 +978,11 @@ if str(options.get("api_token") or "").strip() or secret:
 if env_set:
     sys.stderr.write(
         f"""error: RECALLUM_API_KEY is set in this shell, but no api_token is stored
-       for Claude Code, and .mcp.json only reads ${{user_config.api_token}} --
-       it does not read the environment. Claude Code will register the server,
-       start the hooks, and then fail every tool call authentication in silence.
+       for Claude Code (pluginSecrets / userConfig), and native MCP reads
+       the dual-written ~/.claude.json Bearer -- it does not read the
+       environment unless --no-store-api-key left Bearer ${{ENV}}.
+       Claude Code will register the server, start the hooks, and then fail
+       every tool call authentication in silence.
        Settings file:     {path}
        Credentials file:  {creds_path}  (pluginSecrets['{plugin_id}'].api_token)
        Fix with one of:
@@ -1000,9 +993,9 @@ if env_set:
     raise SystemExit(1)
 sys.stderr.write(
     f"""warning: no Recallum credential can resolve for Claude Code.
-         No api_token is stored, so .mcp.json sends the literal "Bearer ":
-         Claude Code registers the server, starts the hooks, and then fails
-         every tool call authentication in silence.
+         No api_token is stored, so native MCP / pluginSecrets cannot
+         authenticate: Claude Code registers the server, starts the hooks,
+         and then fails every tool call authentication in silence.
          Settings file:     {path}
          Credentials file:  {creds_path}  (pluginSecrets['{plugin_id}'].api_token)
          Fix with one of:
@@ -1088,8 +1081,8 @@ PY
     exit 1
   }
 
-  # Plugin path: marketplace + plugin userConfig (hooks/skills + plugin .mcp.json).
-  # Native path: ~/.claude.json mcpServers.recallum for Claude Desktop ToolSearch.
+  # Plugin path: marketplace + plugin userConfig (hooks/skills; no bundled .mcp.json).
+  # Native path: ~/.claude.json mcpServers.recallum (the only Claude MCP).
   # Only the non-sensitive endpoint is passed on the command line for plugin
   # install. The API key stays out of argv (pluginSecrets + native file merge).
   claude plugin list --json >"$tmp_dir/claude-plugins.json"
@@ -1120,7 +1113,7 @@ PY
       echo "error: Claude Code still records plugin 'recallum-memory' as installed, but marketplace" >&2
       echo "       '$marketplace_name' is no longer registered. Claude Code then loads the plugin" >&2
       echo "       inline from this checkout: hooks and skills keep working, userConfig no longer" >&2
-      echo "       resolves, and the bundled Recallum MCP server is dropped without an error." >&2
+      echo "       resolves (native ~/.claude.json MCP is unaffected)." >&2
       echo "       Rerun with --force-mcp to re-register the marketplace and reinstall the plugin." >&2
       exit 1
     fi
@@ -1716,7 +1709,8 @@ print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
 
 # If a plugin cache already exists, empty its mcp.json so Cursor cannot
 # register a second MCP server from a marketplace copy of placeholders.
-# Move Claude's .mcp.json aside so Cursor does not try user_config URLs.
+# Hide leftover Claude .mcp.json from old snapshot installs (the plugin no
+# longer ships that file) so Cursor does not auto-load "Recallum (plugin)".
 cache_root = Path.home() / ".cursor/plugins/cache/recallum-local/recallum-memory"
 if not cache_root.is_dir():
     raise SystemExit(0)

@@ -71,19 +71,22 @@ use the same URL and behavior.
 
 ## Cursor
 
-Cursor's native marketplace is rooted at `.cursor-plugin/marketplace.json`; the plugin manifest
-uses `.cursor-plugin/plugin.json`, shared skills, a Cursor session hook, and the `recallum` MCP
-server. Add the marketplace with the current Cursor CLI:
+Cursor MCP is native `~/.cursor/mcp.json` only (installer `--target cursor`, literal Bearer,
+mode 600). The plugin does not register MCP and does not ship `.mcp.json`. Add the marketplace
+with the current Cursor CLI:
 
 ```bash
 agent plugin marketplace add https://github.com/Zozi96/recallum-mcp.git
 ```
 
-Then run `/add-plugin` in Cursor or enable `recallum-memory` from Settings. Provide the required
-`RECALLUM_MCP_URL` (with the exact `/mcp/` path) and `RECALLUM_API_KEY` variables there rather than
-putting a literal key in a checked-in config or relying on a shell-only export. Restart Cursor and
-verify that the `recallum` server remains enabled without displaying the key. For a one-off local
-CLI test, use `agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory`.
+On another host: `git pull`; `install.sh --target cursor --url https://<host>/mcp/`; in Cursor
+update marketplace `recallum-local` and plugin `recallum-memory`; fully quit Cursor. Settings →
+Tools & MCP must show only `recallum` enabled. Do not print MCP JSON. No Recallum server deploy.
+
+Then enable `recallum-memory` from Settings → Plugins. Restart Cursor and verify `recallum` without
+displaying the key. For a one-off local CLI test, use
+`agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory` (skills/hooks/rules only; MCP
+still comes from `~/.cursor/mcp.json`).
 
 Cursor's `sessionStart` hook returns context through top-level `additional_context`, but delivery
 is best-effort and it cannot run before every prompt. The always-applied rule carries the exact
@@ -92,9 +95,9 @@ textual prefix.
 
 ## Claude Code
 
-Claude Code keeps the plugin for hooks/skills (`.mcp.json` + `${user_config.*}`) and the installer
-**also** dual-writes a native user MCP server into `~/.claude.json` (`mcpServers.recallum`) so
-Claude Desktop ToolSearch can find tools under `mcp__recallum__*`.
+Claude Code keeps the plugin for hooks/skills only. MCP is the native user server the installer
+writes into `~/.claude.json` (`mcpServers.recallum`), which Desktop ToolSearch finds as
+`mcp__recallum__*`. The plugin does not ship `.mcp.json`.
 
 ```bash
 plugins/recallum-memory/scripts/install.sh --target claude --url https://recallum.example.com/mcp/

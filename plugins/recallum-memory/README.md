@@ -61,10 +61,9 @@ grok mcp add --transport http recallum https://recallum.example.com/mcp/ \
 grok mcp doctor recallum    # handshake OK, tools discovered
 ```
 
-Why the MCP step is separate: Grok does not resolve Claude-style `${user_config.*}` in
-`.mcp.json`. The installer (and the `mcp add` above) write a real URL plus
-`Bearer ${RECALLUM_API_KEY}` into config.toml. That entry takes precedence over any unresolved
-plugin placeholder with the same server name.
+Why the MCP step is separate: Grok does not resolve Claude-style `${user_config.*}`
+placeholders. The installer (and the `mcp add` above) write a real URL plus
+`Bearer ${RECALLUM_API_KEY}` into config.toml. The plugin does not ship `.mcp.json`.
 
 After install, start a **new** Grok session. Tools appear as `recallum__*` via `search_tool` /
 `use_tool`.
@@ -87,7 +86,9 @@ That:
    (Cursor desktop does not expand shell `${ENV}`, and plugin Configure is unused for MCP).
    Native `~/.cursor/mcp.json` is the only Cursor MCP; the plugin does not publish MCP.
 3. If a plugin cache already exists, empties its `mcp.json` (`{"mcpServers": {}}`, no secrets) and
-   hides Claude’s `.mcp.json` so Cursor does not load unresolved `${user_config.*}` URLs.
+   hides leftover Claude `.mcp.json` from old snapshot installs so Cursor does not load unresolved
+   `${user_config.*}` URLs. The plugin does not ship `.mcp.json`, so marketplace updates cannot
+   reintroduce "Recallum (plugin)".
 
 Then install the plugin **in the Cursor UI** (the CLI cannot install plugins): Settings → Plugins →
 `recallum-local` → `recallum-memory`, or `/plugins` in `cursor-agent`. Fully quit and reopen Cursor.
@@ -99,9 +100,8 @@ agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory
 ```
 
 `agent --plugin-dir` loads skills, hooks, and rules only. MCP comes from `~/.cursor/mcp.json`.
-Cursor 2026.08.04 registers plugin MCP only when the manifest references it, so the Cursor
-manifest omits `"mcp"` / `"mcpServers"`. Claude Code’s root `.mcp.json` is unchanged (server
-`recallum`, `${user_config.*}` placeholders). Cursor's `sessionStart` hook emits top-level
+The plugin does not ship `.mcp.json` (Cursor auto-loads a root `.mcp.json` as a second MCP).
+Claude Code MCP is native `~/.claude.json` (installer). Cursor's `sessionStart` hook emits top-level
 `additional_context`, but delivery is best-effort and it cannot run before every prompt. The
 always-applied rule carries the exact canonical-project-key fallback. Recallum tools appear in
 Cursor's Available Tools list without a stable textual prefix.
@@ -165,7 +165,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
 | `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent` and `devin`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
-| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex, Grok, and Devin read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into userConfig storage, because `.mcp.json` reads `${user_config.api_token}` and never the environment |
+| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex, Grok, and Devin read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into pluginSecrets / userConfig and a literal Bearer in native `~/.claude.json` |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |
 | `--force-mcp` | off | Replace an existing setup: a differing Codex/Grok MCP definition, or an already-installed Claude Code plugin |
@@ -216,7 +216,7 @@ Two constraints, neither cosmetic:
 - **`api_token` cannot live here as a hand-written secret.** It is `sensitive` in `plugin.json`.
   The installer stores it in `~/.claude/.credentials.json` under `pluginSecrets` (same place as
   `/plugin configure recallum-memory@recallum-local`). Exporting `RECALLUM_API_KEY` is **not**
-  enough on its own — `.mcp.json` resolves `${user_config.api_token}`, so the value has to reach
+  enough on its own — native MCP / pluginSecrets need a stored key, so the value has to reach
   userConfig storage via the installer or `/plugin configure`. Only the non-sensitive `mcp_url`
   is declared in settings.
 
@@ -270,9 +270,9 @@ would put it in `argv`, shell history, and the process list).
 
 | | Codex | Claude Code | Grok Build |
 | --- | --- | --- | --- |
-| MCP registration | `codex mcp add`, separate from the plugin | `.mcp.json` bundled **inside** the plugin | `grok mcp add` → `~/.grok/config.toml` (required; Grok does not resolve Claude `${user_config.*}`) |
-| Endpoint | `--url` | `userConfig.mcp_url`, passed by the installer | `--url` written into config.toml |
-| Key at connect time | `--token-env-var` env var | `${user_config.api_token}` (userConfig storage only — never the environment) | `Authorization: Bearer ${--token-env-var}` in config.toml |
+| MCP registration | `codex mcp add`, separate from the plugin | native `~/.claude.json` `mcpServers.recallum` (installer); plugin does not ship `.mcp.json` | `grok mcp add` → `~/.grok/config.toml` (required; Grok does not resolve Claude `${user_config.*}`) |
+| Endpoint | `--url` | `--url` written into `~/.claude.json` | `--url` written into config.toml |
+| Key at connect time | `--token-env-var` env var | literal Bearer in `~/.claude.json` when stored; else `Bearer ${token-env-var}` | `Authorization: Bearer ${--token-env-var}` in config.toml |
 | Key set by installer | env file + environment.d | pluginSecrets + env file | env file + environment.d |
 
 Pass `--no-store-api-key` to only register marketplaces/MCP and manage the secret yourself.
@@ -458,8 +458,8 @@ from this repository is needed.
 | Desktop ToolSearch 0 results for `recallum` (CLI works) | Plugin hooks can run while plugin MCP never enters Desktop’s deferred catalog. Rerun `install.sh --target claude --force-mcp`, fully quit Claude.app, new session, ToolSearch `+recallum` |
 | Stale Codex plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target codex`, then start a new session |
 | Stale Claude Code plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Rerun `plugins/recallum-memory/scripts/install.sh --target claude --force-mcp`, then start a new session |
-| Leftover Cursor `recallum_memory` after plugin update | Older plugin versions registered a second MCP from cache `mcp.json`. This version omits plugin MCP; rerun `install.sh --target cursor` to empty old cache snapshots. Native `~/.cursor/mcp.json` is the only Cursor MCP. |
-| Claude authentication failure | Re-run `install.sh` (pluginSecrets + native `~/.claude.json` Bearer) or `/plugin configure recallum-memory@recallum-local`. Plugin path reads `${user_config.api_token}` only; native path uses the dual-written Bearer. |
+| Leftover Cursor `Recallum (plugin)` after plugin update | Cursor auto-loads a root `.mcp.json` copied into the plugin cache. This tree does not ship that file. On any host: `install.sh --target cursor`, update plugin `recallum-memory` from `recallum-local`, fully quit Cursor. Only native `recallum` should stay enabled. No Recallum server deploy. |
+| Claude authentication failure | Re-run `install.sh` (pluginSecrets + native `~/.claude.json` Bearer) or `/plugin configure recallum-memory@recallum-local`. Native path uses the dual-written Bearer. |
 | Grok authentication / handshake failure | Export `RECALLUM_API_KEY` and ensure `~/.grok/config.toml` has a real URL plus `Bearer ${RECALLUM_API_KEY}` — not `${user_config.mcp_url}`. Rerun `install.sh --target grok` |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |

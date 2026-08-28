@@ -1065,9 +1065,9 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("sensitive", key_schema)
         cursor_servers = self._load(PLUGIN_ROOT / "mcp.json")["mcpServers"]
         self.assertEqual(cursor_servers, {})
-        claude_servers = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]
-        self.assertEqual(set(claude_servers), {"recallum"})
-        self.assertIn("user_config", json.dumps(claude_servers))
+        # Cursor auto-loads a plugin-root .mcp.json as "Recallum (plugin)" even
+        # when the Cursor manifest has no mcp key; the plugin must not ship it.
+        self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
 
     def test_cursor_marketplace_points_at_plugin_source(self) -> None:
         marketplace = self._load(CURSOR_MARKETPLACE)
@@ -1133,47 +1133,31 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("sensitive", user_config["mcp_url"])
 
     def test_bundled_mcp_server_reads_only_user_config_token(self) -> None:
-        # Claude Code's .mcp.json expansion officially supports only ${VAR}
-        # and ${VAR:-default}, single-pass. A nested
-        # ${RECALLUM_API_KEY:-${user_config.api_token}} is undocumented and
-        # breaks on GUI launches that do not inherit the shell profile, so
-        # the header must read userConfig only; install.sh is responsible for
-        # bridging any env-provided key into userConfig storage.
-        # Claude keeps the convention filename and server key `recallum` so the
-        # tool prefix stays `mcp__plugin_recallum-memory_recallum__*`.
+        # Plugin does not ship .mcp.json. Cursor auto-loads a root .mcp.json
+        # as "Recallum (plugin)" even without a manifest mcp key; Claude MCP
+        # is native ~/.claude.json only (install.sh).
         self.assertNotIn("mcpServers", self._load(CLAUDE_MANIFEST))
-        server = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["recallum"]
-        self.assertEqual(server["type"], "http")
-        self.assertEqual(server["url"], "${user_config.mcp_url}")
-        self.assertEqual(
-            server["headers"]["Authorization"],
-            "Bearer ${user_config.api_token}",
-        )
+        self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
 
     def test_claude_mcp_json_header_has_no_nested_placeholder(self) -> None:
-        # Regression guard: nested ${...${...}} constructs are undocumented
-        # by Claude Code's single-pass ${VAR} / ${VAR:-default} expansion and
-        # must never reappear in the Authorization header.
-        server = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]["recallum"]
-        header = server["headers"]["Authorization"]
-        self.assertIsNone(re.search(r"\$\{[^}]*\$\{", header))
-        self.assertEqual(header.count("${"), 1)
-        self.assertNotIn("RECALLUM_API_KEY", header)
+        self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
 
     def test_claude_tool_prefix_is_derivable_from_the_manifest_and_server_name(self) -> None:
-        """Pin the prefix to its inputs so a rename cannot silently break it.
+        """Pin CLAUDE_PREFIX as the historical plugin-bundled id string.
 
-        Claude Code registers a plugin-bundled MCP server as
-        `plugin:<plugin>:<server>` and rewrites every character outside
-        [A-Za-z0-9_-] to `_` when building tool ids. Observed on 2.1.220:
-        `mcp__plugin_recallum-memory_recallum__context`. If this test fails
-        after a rename, update CLAUDE_PREFIX and both SKILL.md tables together.
+        Claude Code used to register a plugin-bundled MCP server as
+        `plugin:<plugin>:<server>` and rewrite every character outside
+        [A-Za-z0-9_-] to `_`. Observed on 2.1.220:
+        `mcp__plugin_recallum-memory_recallum__context`. Skills still document
+        CLAUDE_PREFIX as that old plugin prefix. Native Claude is CODEX_PREFIX
+        (`mcp__recallum__`).
         """
         plugin_name = self._load(CLAUDE_MANIFEST)["name"]
-        server_name = next(iter(self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]))
+        server_name = "recallum"  # historical plugin-bundled server id
         registered = f"plugin:{plugin_name}:{server_name}"
         derived = "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", registered) + "__"
         self.assertEqual(derived, CLAUDE_PREFIX)
+        self.assertEqual(CLAUDE_PREFIX, "mcp__plugin_recallum-memory_recallum__")
 
     def test_hook_and_tests_agree_on_all_tool_prefixes(self) -> None:
         source = HOOK.read_text(encoding="utf-8")
@@ -1369,9 +1353,9 @@ class ManifestTests(unittest.TestCase):
 class AntigravityMcpConfigTests(unittest.TestCase):
     """Bundle-root `mcp_config.json` for Antigravity CLI (`agy`).
 
-    Antigravity requires the `serverUrl` shape (not the legacy `type`/`url`
-    shape the pre-existing `mcp.json` / `.mcp.json` use), so this is a third,
-    independent config file living alongside those two, not a replacement.
+    Antigravity requires the `serverUrl` shape (not the empty Cursor
+    `mcp.json` object), so this is a third, independent config file living
+    alongside mcp.json, not a replacement. Plugin-root `.mcp.json` must not exist.
     """
 
     def test_antigravity_mcp_config_shape(self) -> None:
@@ -1413,15 +1397,10 @@ class AntigravityMcpConfigTests(unittest.TestCase):
 
     def test_legacy_mcp_files_untouched(self) -> None:
         # Cursor mcp.json is empty by design (no plugin-registered MCP).
-        # Claude .mcp.json must stay untouched (server `recallum`, type/url).
+        # Plugin-root .mcp.json must not exist (Claude MCP is native).
         mcp_json = json.loads(LEGACY_MCP_JSON.read_text(encoding="utf-8"))
-        dot_mcp_json = json.loads(LEGACY_DOT_MCP_JSON.read_text(encoding="utf-8"))
         self.assertEqual(mcp_json["mcpServers"], {})
-        self.assertEqual(set(dot_mcp_json["mcpServers"]), {"recallum"})
-        legacy_dot_server = dot_mcp_json["mcpServers"]["recallum"]
-        self.assertIn("type", legacy_dot_server)
-        self.assertIn("url", legacy_dot_server)
-        self.assertNotIn("serverUrl", legacy_dot_server)
+        self.assertFalse(LEGACY_DOT_MCP_JSON.exists())
 
     def test_plugin_json_unchanged_by_the_new_sibling_file(self) -> None:
         # Adding mcp_config.json must not perturb plugin.json itself.
@@ -2388,8 +2367,8 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertIn("--force-mcp", result.stderr)
 
     def test_install_without_any_credential_warns_but_still_succeeds(self) -> None:
-        # Regression: with neither route set, .mcp.json sends the literal
-        # "Bearer ". Claude Code registers the server and starts the hooks, then
+        # Regression: with neither route set, native MCP / pluginSecrets cannot
+        # authenticate. Claude Code registers the server and starts the hooks, then
         # fails every tool call authentication in silence. The install itself is
         # valid -- the key is read at launch, not now -- so this warns.
         with tempfile.TemporaryDirectory() as directory:
@@ -2402,11 +2381,11 @@ class ClaudeInstallerTests(InstallerTestCase):
             self.assertIn("api_token", result.stderr)
 
     def test_exported_key_alone_fails_the_credential_check(self) -> None:
-        # RECALLUM_API_KEY no longer satisfies the check by itself: .mcp.json
-        # only reads ${user_config.api_token}, so an env var that never made
-        # it into userConfig storage (e.g. --no-store-api-key) would silently
-        # fail every tool call. That must now be a loud, actionable failure
-        # instead of a pass.
+        # RECALLUM_API_KEY no longer satisfies the check by itself: native MCP /
+        # pluginSecrets do not read the env unless it was persisted, so an env
+        # var that never made it into storage (e.g. --no-store-api-key) would
+        # silently fail every tool call. That must now be a loud, actionable
+        # failure instead of a pass.
         with tempfile.TemporaryDirectory() as directory:
             env, _ = self._fake_clis(Path(directory))
             env["RECALLUM_API_KEY"] = "env-token-placeholder"

@@ -65,19 +65,18 @@ credential leak happened.
 
 ## Setup — Claude Code
 
-Claude Code uses **two** complementary MCP registrations after `install.sh --target claude`:
+Claude Code uses **native** MCP after `install.sh --target claude`. The plugin does not ship
+`.mcp.json`.
 
-1. **Plugin-bundled** `.mcp.json` — `${user_config.mcp_url}` and
-   `Bearer ${user_config.api_token}` (pluginSecrets / `/plugin configure`). Tools appear as
-   `mcp__plugin_recallum-memory_recallum__*`. Exporting `RECALLUM_API_KEY` alone does **not**
-   authenticate this path.
-2. **Native user MCP** in `~/.claude.json` → `mcpServers.recallum` — real URL plus desktop-safe
-   Bearer (literal when the installer stores a key). Tools appear as `mcp__recallum__*`. **Claude
-   Desktop** often fails to put plugin-bundled HTTP MCP into the deferred ToolSearch catalog; the
-   native entry is what Desktop sessions need.
+Native user MCP in `~/.claude.json` → `mcpServers.recallum` — real URL plus desktop-safe Bearer
+(literal when the installer stores a key). Tools appear as `mcp__recallum__*`. **Claude Desktop**
+needs this native entry for the deferred ToolSearch catalog. The historical plugin prefix
+`mcp__plugin_recallum-memory_recallum__*` is documented for leftover caches / old installs; native
+is `mcp__recallum__`. Exporting `RECALLUM_API_KEY` alone does **not** authenticate unless it was
+persisted this run.
 
 Cursor does not register a plugin-bundled MCP server. Native `~/.cursor/mcp.json` (server
-`recallum`) is the only Cursor MCP; Claude's `.mcp.json` server key remains `recallum`.
+`recallum`) is the only Cursor MCP. The plugin does not ship `.mcp.json`.
 
 `mcp_url` is `required`, with no default: the endpoint must be your own Recallum server, so
 enabling the plugin prompts for it rather than pointing at someone else's.
@@ -120,7 +119,8 @@ Then install `recallum-memory` from marketplace `recallum-local` inside Cursor (
 or `/plugins`). Fully quit and reopen Cursor. The installer writes native `~/.cursor/mcp.json`
 (the only Cursor MCP) with a literal Bearer (mode 600) because Cursor desktop does not expand
 placeholders. If a plugin cache exists, it empties that snapshot's `mcp.json` (no URL or Bearer)
-and hides Claude's `.mcp.json`. The plugin does not publish MCP; Cursor Configure is unused for
+and hides leftover Claude `.mcp.json` from old installs. The plugin does not ship `.mcp.json`, so
+marketplace updates cannot reintroduce "Recallum (plugin)". Cursor Configure is unused for
 MCP. For one-off local CLI testing:
 
 ```bash
@@ -128,6 +128,17 @@ agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory
 ```
 
 That loads skills, hooks, and rules only. MCP comes from `~/.cursor/mcp.json`.
+
+### Rollout on another host (agents)
+
+No Recallum server deploy. Client machine only:
+
+1. `git pull` this repo on `main`.
+2. `export RECALLUM_API_KEY=…` then `plugins/recallum-memory/scripts/install.sh --target cursor --url https://recallum.zozbit.com/mcp/` (or that host's `/mcp/` URL). Never print the key.
+3. In Cursor: update marketplace `recallum-local`, then update/enable plugin `recallum-memory`.
+4. Fully quit Cursor (not reload) and reopen.
+5. Settings → Tools & MCP: only `recallum` enabled. `Recallum (plugin)` is a leftover — rerun step 2. Do not `cat` `~/.cursor/mcp.json` or plugin-cache `.mcp.json`.
+6. `python3 plugins/recallum-memory/scripts/recallum_doctor.py` — Cursor `native_mcp` healthy; `plugin_cache` must not list non-empty `mcpServers`.
 
 Tools appear under Available Tools. Cursor's `sessionStart` hook returns context through top-level
 `additional_context`, but delivery is best-effort. The always-applied rule and the
@@ -300,6 +311,7 @@ echo the key while doing so.
   tools never enter Desktop’s deferred catalog. Confirm `~/.claude.json` has `mcpServers.recallum`,
   re-run `install.sh --target claude --force-mcp`, fully quit Claude.app, and re-check with
   ToolSearch `+recallum` — not with nested `claude mcp list`.
+- **Cursor dual MCP (`recallum` enabled + `Recallum (plugin)` error):** native `~/.cursor/mcp.json` is the working server. The red plugin line is a leftover root `.mcp.json` (old Claude bundle) in `~/.cursor/plugins/cache/`. Rerun `install.sh --target cursor`, update the plugin from marketplace `recallum-local`, fully quit Cursor. Never print cache JSON. Other hosts: same steps; no server deploy.
 - **Cursor/cache leak:** never inspect or print Cursor `mcp.json` or cached `.mcp.json` with ad-hoc
   JSON/TOML recipes. The Cursor cache can load Claude-only `${user_config.*}` entries and can expose
   a literal bearer; run `python3 plugins/recallum-memory/scripts/recallum_doctor.py`
