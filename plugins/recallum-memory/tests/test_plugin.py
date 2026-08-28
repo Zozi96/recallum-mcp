@@ -1030,14 +1030,9 @@ class ManifestTests(unittest.TestCase):
         # Cursor 2026.08.04 loads skills/rules/hooks by convention but never
         # registers a plugin MCP server unless the manifest references it
         # (`"mcp": "./mcp.json"` or inline mcpServers). Verified with
-        # `agent --plugin-dir` probes.
-        #
-        # The Cursor server key must NOT be `recallum`: Claude Code's root
-        # `.mcp.json` uses that name with `${user_config.*}` placeholders, and
-        # Cursor merges both configs by server name. The Claude entry then
-        # overwrites the env-var Cursor entry and zero Recallum tools load.
-        # Server key `recallum_memory` coexists with Claude's `recallum`.
-        self.assertEqual(manifest["mcp"], "./mcp.json")
+        # `agent --plugin-dir` probes. That is why we omit the key: native
+        # ~/.cursor/mcp.json is the only Cursor MCP.
+        self.assertNotIn("mcp", manifest)
         self.assertNotIn("mcpServers", manifest)
         self.assertEqual(manifest["hooks"], "./hooks/cursor-hooks.json")
         self.assertEqual(manifest["rules"], "./rules/")
@@ -1069,15 +1064,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(key_schema["minLength"], 1)
         self.assertNotIn("sensitive", key_schema)
         cursor_servers = self._load(PLUGIN_ROOT / "mcp.json")["mcpServers"]
-        self.assertEqual(set(cursor_servers), {"recallum_memory"})
-        self.assertNotIn("recallum", cursor_servers)
-        server = cursor_servers["recallum_memory"]
-        self.assertEqual(server["url"], "${RECALLUM_MCP_URL}")
-        self.assertEqual(server["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}")
-        serialized = json.dumps(server)
-        self.assertNotIn("user_config", serialized)
-        self.assertNotIn("default", serialized.lower())
-        self.assertNotIn("rcl_", serialized)
+        self.assertEqual(cursor_servers, {})
         claude_servers = self._load(PLUGIN_ROOT / ".mcp.json")["mcpServers"]
         self.assertEqual(set(claude_servers), {"recallum"})
         self.assertIn("user_config", json.dumps(claude_servers))
@@ -1425,16 +1412,11 @@ class AntigravityMcpConfigTests(unittest.TestCase):
                 self.assertFalse(_endpoint_rule_satisfied(url))
 
     def test_legacy_mcp_files_untouched(self) -> None:
-        # Regression guard: this story adds a third, bundle-root config file;
-        # the pre-existing legacy files and their (different) server key
-        # names must not be touched as a side effect.
+        # Cursor mcp.json is empty by design (no plugin-registered MCP).
+        # Claude .mcp.json must stay untouched (server `recallum`, type/url).
         mcp_json = json.loads(LEGACY_MCP_JSON.read_text(encoding="utf-8"))
         dot_mcp_json = json.loads(LEGACY_DOT_MCP_JSON.read_text(encoding="utf-8"))
-        self.assertEqual(set(mcp_json["mcpServers"]), {"recallum_memory"})
-        legacy_server = mcp_json["mcpServers"]["recallum_memory"]
-        self.assertIn("type", legacy_server)
-        self.assertIn("url", legacy_server)
-        self.assertNotIn("serverUrl", legacy_server)
+        self.assertEqual(mcp_json["mcpServers"], {})
         self.assertEqual(set(dot_mcp_json["mcpServers"]), {"recallum"})
         legacy_dot_server = dot_mcp_json["mcpServers"]["recallum"]
         self.assertIn("type", legacy_dot_server)
@@ -2673,6 +2655,9 @@ class CursorInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
             self.assertIn(".cursor/mcp.json", result.stdout)
             self.assertIn("literal Bearer", result.stdout)
+            self.assertIn("empty Cursor plugin cache mcp.json if present", result.stdout)
+            self.assertIn("hide Claude .mcp.json", result.stdout)
+            self.assertNotIn("patch Cursor plugin cache", result.stdout)
             self.assertFalse((root / ".cursor" / "mcp.json").exists())
             self.assertNotIn("not-printed", result.stdout + result.stderr)
 
@@ -2782,17 +2767,106 @@ class CursorInstallerTests(InstallerTestCase):
             )
             result = self._run_cursor(env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            patched = json.loads((snap / "mcp.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                patched["mcpServers"]["recallum_memory"]["url"],
-                URL,
-            )
-            self.assertEqual(
-                patched["mcpServers"]["recallum_memory"]["headers"]["Authorization"],
-                "Bearer not-printed",
-            )
+            cache_text = (snap / "mcp.json").read_text(encoding="utf-8")
+            patched = json.loads(cache_text)
+            self.assertEqual(patched, {"mcpServers": {}})
+            self.assertNotIn("Authorization", cache_text)
+            self.assertNotIn("url", cache_text)
+            self.assertNotIn("Bearer", cache_text)
+            self.assertNotIn("not-printed", cache_text)
             self.assertFalse((snap / ".mcp.json").exists())
             self.assertTrue((snap / ".mcp.json.claude-only-ignored-by-cursor").is_file())
+
+    def test_empties_plugin_cache_without_copying_sentinel_bearer(self) -> None:
+        sentinel = "rcl_cache_sentinel_do_not_copy"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            env[TOKEN_ENV_VAR] = sentinel
+            snap = (
+                root
+                / ".cursor"
+                / "plugins"
+                / "cache"
+                / "recallum-local"
+                / "recallum-memory"
+                / "deadbeef"
+            )
+            snap.mkdir(parents=True)
+            (snap / "mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum_memory": {
+                                "type": "http",
+                                "url": "${RECALLUM_MCP_URL}",
+                                "headers": {"Authorization": f"Bearer {sentinel}"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (snap / ".mcp.json").write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": "http",
+                                "url": "${user_config.mcp_url}",
+                                "headers": {
+                                    "Authorization": "Bearer ${user_config.api_token}"
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_cursor(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            cache_text = (snap / "mcp.json").read_text(encoding="utf-8")
+            self.assertEqual(json.loads(cache_text), {"mcpServers": {}})
+            self.assertNotIn(sentinel, cache_text)
+            native_path = root / ".cursor" / "mcp.json"
+            native = json.loads(native_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                native["mcpServers"]["recallum"]["headers"]["Authorization"],
+                f"Bearer {sentinel}",
+            )
+            self.assertEqual(oct(native_path.stat().st_mode & 0o777), "0o600")
+            self.assertFalse((snap / ".mcp.json").exists())
+            self.assertTrue((snap / ".mcp.json.claude-only-ignored-by-cursor").is_file())
+
+    def test_skips_plugin_cache_mcp_json_symlink_to_native(self) -> None:
+        sentinel = "rcl_symlink_sentinel_keep_native"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, _ = self._fake_clis(root)
+            env[TOKEN_ENV_VAR] = sentinel
+            native_path = root / ".cursor" / "mcp.json"
+            snap = (
+                root
+                / ".cursor"
+                / "plugins"
+                / "cache"
+                / "recallum-local"
+                / "recallum-memory"
+                / "deadbeef"
+            )
+            snap.mkdir(parents=True)
+            native_path.parent.mkdir(parents=True, exist_ok=True)
+            native_path.write_text("{}\n", encoding="utf-8")
+            (snap / "mcp.json").symlink_to(native_path)
+            result = self._run_cursor(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((snap / "mcp.json").is_symlink())
+            native = json.loads(native_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                native["mcpServers"]["recallum"]["headers"]["Authorization"],
+                f"Bearer {sentinel}",
+            )
+            self.assertEqual(oct(native_path.stat().st_mode & 0o777), "0o600")
 
 
 class DoctorTests(unittest.TestCase):
@@ -2880,17 +2954,7 @@ class DoctorTests(unittest.TestCase):
         self._write(
             home,
             ".cursor/plugins/cache/recallum-local/recallum-memory/0.15.0/mcp.json",
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "recallum_memory": {
-                            "type": "http",
-                            "url": "https://recallum.example/mcp/",
-                            "headers": {"Authorization": "Bearer " + token},
-                        }
-                    }
-                }
-            ),
+            json.dumps({"mcpServers": {}}),
         )
         self._write_cli(
             home,
@@ -3302,6 +3366,52 @@ class DoctorTests(unittest.TestCase):
             home = Path(directory)
             self._healthy_home(home)
             self.assertEqual(self._run_doctor(home, "--json").returncode, 0)
+
+    def test_doctor_leftover_plugin_cache_mcp_is_unhealthy(self) -> None:
+        leftover = {
+            "mcpServers": {
+                "recallum_memory": {
+                    "type": "http",
+                    "url": "https://recallum.example/mcp/",
+                    "headers": {"Authorization": "Bearer ${RECALLUM_API_KEY}"},
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write(
+                home,
+                ".cursor/plugins/cache/recallum-local/recallum-memory/0.15.0/mcp.json",
+                json.dumps(leftover),
+            )
+            result = self._run_doctor(home, "--json")
+            self.assertNotEqual(result.returncode, 0)
+            report = json.loads(result.stdout)
+            joined = " ".join(report["problems"])
+            self.assertRegex(
+                joined,
+                r"(?i)plugin cache.*regist.*MCP|plugin cache still registers MCP",
+            )
+            self.assertIn("native ~/.cursor/mcp.json", joined)
+            leftover["mcpServers"]["recallum_memory"]["headers"]["Authorization"] = (
+                "Bearer rcl_leftover_literal_ok"
+            )
+            self._write(
+                home,
+                ".cursor/plugins/cache/recallum-local/recallum-memory/0.15.0/mcp.json",
+                json.dumps(leftover),
+            )
+            literal = self._run_doctor(home, "--json")
+            self.assertNotEqual(literal.returncode, 0)
+            self.assertIn("plugin cache", " ".join(json.loads(literal.stdout)["problems"]))
+            self._write(
+                home,
+                ".cursor/plugins/cache/recallum-local/recallum-memory/0.15.0/mcp.json",
+                json.dumps({"mcpServers": {}}),
+            )
+            empty = self._run_doctor(home, "--json")
+            self.assertEqual(empty.returncode, 0)
 
     def test_doctor_survives_null_plugin_secrets(self) -> None:
         """A null ``pluginSecrets`` is the same shape as a null ``mcpServers``:

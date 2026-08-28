@@ -64,10 +64,10 @@ API key handling (default: store when a key is available or can be prompted):
                resolved by Grok, so the native config entry is required and
                takes precedence over the plugin-bundled server.
   Cursor       registers the marketplace via cursor-agent/agent (plugin install is
-               still done in the Cursor UI), writes ~/.cursor/mcp.json with a real
-               URL + Bearer (literal when a key is stored), and if a plugin cache
-               already exists, patches its mcp.json the same way and moves Claude's
-               .mcp.json aside so Cursor does not load unresolved user_config URLs.
+               still done in the Cursor UI) and writes ~/.cursor/mcp.json with a real
+               URL + Bearer (literal when a key is stored). Native ~/.cursor/mcp.json
+               is the only Cursor MCP; if a plugin cache exists, empty its mcp.json
+               (no URL/Bearer) and still move Claude .mcp.json aside.
   Devin CLI    writes ~/.config/devin/mcp_config.json with a Bearer resolved from
                $token_env_var at connection time. Tools appear as mcp__recallum__*.
                Devin plugins are closed beta, so the installer does not run
@@ -1568,8 +1568,10 @@ if not isinstance(plugins, list) or not any(
     raise SystemExit("error: Cursor marketplace has an invalid recallum-memory plugin entry")
 if manifest.get("name") != "recallum-memory":
     raise SystemExit("error: Cursor plugin.json name must be recallum-memory")
-if manifest.get("mcp") != "./mcp.json":
-    raise SystemExit('error: Cursor manifest must set "mcp": "./mcp.json"')
+if "mcp" in manifest or "mcpServers" in manifest:
+    raise SystemExit(
+        "error: Cursor plugin must not register MCP (native ~/.cursor/mcp.json only)"
+    )
 print(data["name"])
 PY
   )
@@ -1668,7 +1670,7 @@ PY
     else
       echo "dry-run: write $cursor_mcp server recallum (url=$url, Bearer \${$token_env_var})"
     fi
-    echo "dry-run: patch Cursor plugin cache mcp.json if present; hide Claude .mcp.json there"
+    echo "dry-run: empty Cursor plugin cache mcp.json if present; hide Claude .mcp.json there"
   else
     python3 - "$cursor_mcp" "$url" "$token_env_var" "${key_path:-}" <<'PY'
 import json
@@ -1712,27 +1714,27 @@ tmp.replace(mcp_path)
 os.chmod(mcp_path, 0o600)
 print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
 
-# If the plugin is already installed into the Cursor cache, make its bundled
-# MCP usable without the Configure UI: same URL/auth, server key recallum_memory,
-# and move Claude's .mcp.json aside so Cursor does not try user_config URLs.
+# If a plugin cache already exists, empty its mcp.json so Cursor cannot
+# register a second MCP server from a marketplace copy of placeholders.
+# Move Claude's .mcp.json aside so Cursor does not try user_config URLs.
 cache_root = Path.home() / ".cursor/plugins/cache/recallum-local/recallum-memory"
 if not cache_root.is_dir():
     raise SystemExit(0)
-patched = 0
+emptied = 0
+cache_root = cache_root.resolve()
+native_resolved = mcp_path.resolve()
 for snap in sorted(p for p in cache_root.iterdir() if p.is_dir()):
+    if snap.is_symlink():
+        continue
     plugin_mcp = snap / "mcp.json"
-    body = {
-        "mcpServers": {
-            "recallum_memory": {
-                "type": "http",
-                "url": url,
-                "headers": {"Authorization": auth},
-            }
-        }
-    }
-    plugin_mcp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-    os.chmod(plugin_mcp, 0o600)
-    patched += 1
+    if not (
+        plugin_mcp.is_symlink()
+        or (plugin_mcp.exists() and plugin_mcp.resolve() == native_resolved)
+    ):
+        plugin_mcp.write_text(
+            json.dumps({"mcpServers": {}}, indent=2) + "\n", encoding="utf-8"
+        )
+        emptied += 1
     claude_mcp = snap / ".mcp.json"
     if claude_mcp.is_file():
         aside = snap / ".mcp.json.claude-only-ignored-by-cursor"
@@ -1740,8 +1742,8 @@ for snap in sorted(p for p in cache_root.iterdir() if p.is_dir()):
             claude_mcp.replace(aside)
         else:
             claude_mcp.unlink()
-if patched:
-    print(f"Patched {patched} Cursor plugin cache snapshot(s) under {cache_root}.")
+if emptied:
+    print(f"Emptied {emptied} Cursor plugin cache snapshot(s) under {cache_root}.")
 PY
   fi
   [[ -z "$key_path" ]] || rm -f -- "$key_path"

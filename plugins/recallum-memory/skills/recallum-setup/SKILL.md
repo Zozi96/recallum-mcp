@@ -76,8 +76,8 @@ Claude Code uses **two** complementary MCP registrations after `install.sh --tar
    Desktop** often fails to put plugin-bundled HTTP MCP into the deferred ToolSearch catalog; the
    native entry is what Desktop sessions need.
 
-Cursor uses a separate `mcp.json` under the server key `recallum_memory` so it does not collide with
-Claude's `recallum` entry when both configs are present in the same package.
+Cursor does not register a plugin-bundled MCP server. Native `~/.cursor/mcp.json` (server
+`recallum`) is the only Cursor MCP; Claude's `.mcp.json` server key remains `recallum`.
 
 `mcp_url` is `required`, with no default: the endpoint must be your own Recallum server, so
 enabling the plugin prompts for it rather than pointing at someone else's.
@@ -117,13 +117,17 @@ plugins/recallum-memory/scripts/install.sh --target cursor --url https://recallu
 ```
 
 Then install `recallum-memory` from marketplace `recallum-local` inside Cursor (Settings → Plugins
-or `/plugins`). Fully quit and reopen Cursor. The installer writes `~/.cursor/mcp.json` with a
-literal Bearer (mode 600) because Cursor desktop does not reliably expand shell env vars and plugin
-Configure is often unavailable for user marketplaces. For one-off local CLI testing:
+or `/plugins`). Fully quit and reopen Cursor. The installer writes native `~/.cursor/mcp.json`
+(the only Cursor MCP) with a literal Bearer (mode 600) because Cursor desktop does not expand
+placeholders. If a plugin cache exists, it empties that snapshot's `mcp.json` (no URL or Bearer)
+and hides Claude's `.mcp.json`. The plugin does not publish MCP; Cursor Configure is unused for
+MCP. For one-off local CLI testing:
 
 ```bash
 agent --plugin-dir /path/to/recallum-mcp/plugins/recallum-memory
 ```
+
+That loads skills, hooks, and rules only. MCP comes from `~/.cursor/mcp.json`.
 
 Tools appear under Available Tools. Cursor's `sessionStart` hook returns context through top-level
 `additional_context`, but delivery is best-effort. The always-applied rule and the

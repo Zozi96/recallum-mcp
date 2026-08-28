@@ -478,6 +478,12 @@ def _cursor(
                 "Cursor plugin cache",
                 problems,
             )
+            raw_servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+            if isinstance(raw_servers, dict) and raw_servers:
+                problems.append(
+                    "config: Cursor plugin cache still registers MCP; "
+                    "native ~/.cursor/mcp.json is the only Cursor MCP"
+                )
             if not isinstance(manifest, dict) and not isinstance(server, dict):
                 continue
             snapshot: dict[str, Any] = {}

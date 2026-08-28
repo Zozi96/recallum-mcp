@@ -1,11 +1,3 @@
 {
-  "mcpServers": {
-    "recallum_memory": {
-      "type": "http",
-      "url": "${RECALLUM_MCP_URL}",
-      "headers": {
-        "Authorization": "Bearer ${RECALLUM_API_KEY}"
-      }
-    }
-  }
+  "mcpServers": {}
 }
