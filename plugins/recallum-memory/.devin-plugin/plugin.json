@@ -1,0 +1,28 @@
+{
+  "name": "recallum-memory",
+  "version": "0.15.0",
+  "description": "Persistent, project-aware memory for Devin CLI, Cursor, Grok Build, Codex, Claude Code, and Antigravity CLI through a self-hosted Recallum MCP server. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
+  "author": {
+    "name": "Zozi"
+  },
+  "homepage": "https://github.com/Zozi96/recallum-mcp",
+  "repository": "https://github.com/Zozi96/recallum-mcp",
+  "license": "MIT",
+  "keywords": [
+    "devin",
+    "memory",
+    "mcp",
+    "context",
+    "hooks",
+    "cursor",
+    "codex",
+    "claude-code",
+    "grok",
+    "antigravity"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "paths": [],
+    "exclusive": true
+  }
+}
