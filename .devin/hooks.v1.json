@@ -1,0 +1,26 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "p=\"${DEVIN_PROJECT_DIR:-}\"; y=\"$(command -v python3 || command -v python)\"; if [ -n \"$p\" ] && [ -n \"$y\" ] && [ -f \"$p/plugins/recallum-memory/hooks/recallum_hook.py\" ]; then exec \"$y\" \"$p/plugins/recallum-memory/hooks/recallum_hook.py\" session; fi; cat >/dev/null 2>&1; exit 0",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "p=\"${DEVIN_PROJECT_DIR:-}\"; y=\"$(command -v python3 || command -v python)\"; if [ -n \"$p\" ] && [ -n \"$y\" ] && [ -f \"$p/plugins/recallum-memory/hooks/recallum_hook.py\" ]; then exec \"$y\" \"$p/plugins/recallum-memory/hooks/recallum_hook.py\" prompt; fi; cat >/dev/null 2>&1; exit 0",
+          "timeout": 5
+        }
+      ]
+    }
+  ]
+}
