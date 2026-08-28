@@ -516,34 +516,38 @@ def _cursor(
     return result
 
 
-def _antigravity_endpoint_problem(client: str, raw_url: Any, problems: list[str]) -> None:
+def _endpoint_problem(
+    client: str, raw_url: Any, problems: list[str], url_key: str
+) -> None:
     """HTTPS with an exact ``/mcp/`` path, except loopback hosts may use plain
     HTTP. Mirrors install.sh's write-time ``normalize_url`` rule
     (scripts/install.sh ~L174-181) so the doctor never diverges from what the
     installer accepts -- this is the one place that rule is re-expressed in
-    Python and it must not be forked a second time."""
+    Python and it must not be forked. ``url_key`` is the config field the client
+    stores the endpoint under (``"serverUrl"`` for Antigravity, ``"url"`` for
+    Devin)."""
     if not isinstance(raw_url, str) or not raw_url:
-        problems.append(f"config: {client} serverUrl is missing")
+        problems.append(f"config: {client} {url_key} is missing")
         return
     try:
         parsed = urlsplit(raw_url)
     except ValueError:
-        problems.append(f"config: {client} serverUrl is invalid")
+        problems.append(f"config: {client} {url_key} is invalid")
         return
     hostname = parsed.hostname
     if not parsed.scheme or hostname is None:
-        problems.append(f"config: {client} serverUrl is invalid")
+        problems.append(f"config: {client} {url_key} is invalid")
         return
     local = hostname in {"localhost", "127.0.0.1"}
     allowed_schemes = {"https", "http"} if local else {"https"}
     if parsed.scheme not in allowed_schemes:
         problems.append(
-            f"config: {client} serverUrl must use HTTPS "
+            f"config: {client} {url_key} must use HTTPS "
             "(HTTP is allowed only for localhost or 127.0.0.1)"
         )
         return
     if parsed.path != "/mcp/":
-        problems.append(f"config: {client} serverUrl path must be exactly /mcp/")
+        problems.append(f"config: {client} {url_key} path must be exactly /mcp/")
 
 
 def _antigravity_plugin_present(problems: list[str]) -> bool | None:
@@ -634,10 +638,50 @@ def _antigravity(
                 "variables, so the API key must be written literally"
             )
         _record_permission(safe, config_path, auth, problems, client="Antigravity CLI")
-        _antigravity_endpoint_problem("Antigravity CLI", server.get("serverUrl"), problems)
+        _endpoint_problem("Antigravity CLI", server.get("serverUrl"), problems, "serverUrl")
         present = _antigravity_plugin_present(problems)
         if present is not None:
             result["plugin_present"] = present
+    return result
+
+
+def _devin(
+    home: Path, _expected: str | None, token_env: str, problems: list[str]
+) -> dict[str, Any]:
+    """``_expected`` is accepted only to keep the call signature uniform with
+    the other client functions -- Devin has no version-drift signal today."""
+    result: dict[str, Any] = {}
+    # Empty-string XDG_CONFIG_HOME is treated as unset, matching the installer's
+    # `${XDG_CONFIG_HOME:-$HOME/.config}` (empty expands to the default).
+    config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+    )
+    config_path = config_home / "devin" / "mcp_config.json"
+    config = _read_json(config_path)
+    server = _configured_server(
+        config, "mcpServers", "recallum", "Devin CLI", problems
+    )
+    if config is not None and not isinstance(server, dict):
+        problems.append(
+            f"config: Devin CLI recallum server entry is missing ({config_path})"
+        )
+    if isinstance(server, dict):
+        safe = _safe_server(server, include_type=False, url_key="url")
+        result["native_mcp"] = safe
+        auth = safe["auth"]
+        _auth_problem("Devin CLI", auth, token_env, problems)
+        if auth.startswith("Bearer ${"):
+            # Devin-specific: environment-variable expansion in mcp_config.json
+            # headers is not documented, so a ${VAR} placeholder is likely sent
+            # to the server literally and cannot authenticate. Flag it regardless
+            # of `_auth_problem`'s unset-variable outcome.
+            problems.append(
+                "auth: Devin CLI header is an unexpanded ${...} "
+                "placeholder -- Devin does not document environment-variable "
+                "expansion in mcp_config.json, so the API key must be written literally"
+            )
+        _record_permission(safe, config_path, auth, problems, client="Devin CLI")
+        _endpoint_problem("Devin CLI", server.get("url"), problems, "url")
     return result
 
 
@@ -701,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Codex", _codex(home, expected, args.token_env_var, problems)),
         ("Grok Build", _grok(home, expected, args.token_env_var, problems)),
         ("Cursor", _cursor(home, expected, args.token_env_var, problems)),
+        ("Devin CLI", _devin(home, expected, args.token_env_var, problems)),
         ("Antigravity CLI", _antigravity(home, expected, args.token_env_var, problems)),
     ):
         if value:

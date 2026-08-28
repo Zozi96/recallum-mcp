@@ -6,17 +6,17 @@ usage() {
 Usage: install.sh [OPTIONS]
 
 Install the repo-local Recallum plugin and configure its remote MCP server for
-Codex, Claude Code, Grok Build, Cursor, or any combination the host has installed.
+Codex, Claude Code, Grok Build, Cursor, Devin CLI, or any combination the host has installed.
 
 Options:
   --url URL                 Recallum MCP endpoint
                             (default: https://recallum.zozbit.com/mcp/)
                             Normalized to a trailing slash to avoid a redirect
                             that would expose or drop the bearer token
-  --target TARGET           auto | codex | claude | grok | cursor | antigravity | both
+  --target TARGET           auto | codex | claude | grok | cursor | devin | antigravity | both
                             (default: auto)
                             auto installs into every detected CLI
-                            both requires Codex and Claude Code (not Grok/Cursor/Antigravity)
+                            both requires Codex and Claude Code (not Grok/Cursor/Devin/Antigravity)
   --token-env-var NAME      Codex, Grok, and Cursor: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
@@ -139,9 +139,9 @@ while (($#)); do
 done
 
 case "$target" in
-  auto | codex | claude | grok | cursor | antigravity | both) ;;
+  auto | codex | claude | grok | cursor | devin | antigravity | both) ;;
   *)
-    echo "error: --target must be auto, codex, claude, grok, cursor, antigravity, or both" >&2
+    echo "error: --target must be auto, codex, claude, grok, cursor, devin, antigravity, or both" >&2
     exit 2
     ;;
 esac
@@ -188,12 +188,15 @@ has_claude=0
 has_grok=0
 has_cursor=0
 has_agy=0
+has_devin=0
 cursor_cli=""
 if command -v codex >/dev/null 2>&1; then has_codex=1; fi
 if command -v claude >/dev/null 2>&1; then has_claude=1; fi
 if command -v grok >/dev/null 2>&1; then has_grok=1; fi
 # Antigravity CLI ships as `agy`.
 if command -v agy >/dev/null 2>&1; then has_agy=1; fi
+# Devin CLI ships as `devin`.
+if command -v devin >/dev/null 2>&1; then has_devin=1; fi
 # Cursor ships as cursor-agent; some installs expose the same binary as agent.
 if command -v cursor-agent >/dev/null 2>&1; then
   has_cursor=1
@@ -207,6 +210,7 @@ install_codex=0
 install_claude=0
 install_grok=0
 install_cursor=0
+install_devin=0
 install_antigravity=0
 case "$target" in
   auto)
@@ -214,9 +218,10 @@ case "$target" in
     install_claude=$has_claude
     install_grok=$has_grok
     install_cursor=$has_cursor
+    install_devin=$has_devin
     install_antigravity=$has_agy
-    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_antigravity == 0)); then
-      echo "error: none of the codex, claude, grok, cursor-agent/agent, or agy CLIs is on PATH" >&2
+    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_devin == 0 && install_antigravity == 0)); then
+      echo "error: none of the codex, claude, grok, cursor-agent/agent, devin, or agy CLIs is on PATH" >&2
       exit 1
     fi
     ;;
@@ -238,6 +243,10 @@ case "$target" in
       exit 1
     }
     install_cursor=1
+    ;;
+  devin)
+    ((has_devin)) || { echo "error: devin CLI is not installed or not on PATH" >&2; exit 1; }
+    install_devin=1
     ;;
   antigravity)
     ((has_agy)) || { echo "error: agy CLI is not installed or not on PATH" >&2; exit 1; }
@@ -1741,6 +1750,102 @@ PY
   echo "        Then fully quit and reopen Cursor so MCP reloads."
 }
 
+# Devin CLI. No plugin install in this installer (Devin plugins are closed beta);
+# this only writes the user-scope MCP config. Devin does not document environment-
+# variable expansion in mcp_config.json headers, so the API key is written literally
+# when available. A --no-store-api-key placeholder is accepted but warned about.
+# Mirrors the Antigravity literal-bearer safety model: mode 0600 and a retained
+# backup of any pre-existing file.
+install_for_devin() {
+  local devin_mcp="${XDG_CONFIG_HOME:-$HOME/.config}/devin/mcp_config.json"
+  local key_path=""
+
+  # Unconditional, and before the python3 child is forked: the child inherits
+  # this umask, so every file it creates is born private even on the paths
+  # where no key is resolved (--no-store-api-key, declined prompt).
+  umask 077
+  if [[ -n "${resolved_api_key-}" ]]; then
+    key_path="$tmp_dir/devin-api-key"
+    printf '%s' "$resolved_api_key" >"$key_path"
+    chmod 600 "$key_path"
+  fi
+
+  if ((dry_run)); then
+    if [[ -n "$key_path" ]]; then
+      echo "dry-run: write $devin_mcp server recallum (url=$url, literal Bearer, mode 600, backup retained)"
+    else
+      echo "dry-run: write $devin_mcp server recallum (url=$url, Bearer \${$token_env_var})"
+    fi
+    return 0
+  fi
+
+  python3 - "$devin_mcp" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+mcp_path = Path(sys.argv[1])
+url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+# Devin's env-var expansion in mcp_config.json headers is not documented, so the
+# placeholder form is inert; it is still written so the entry is well-formed and
+# the doctor can flag it.
+auth = f"Bearer {key}" if key else f"Bearer ${{{token_env}}}"
+
+mcp_path.parent.mkdir(parents=True, exist_ok=True)
+existed = mcp_path.is_file()
+data = {}
+if existed:
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid JSON in {mcp_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {mcp_path} root must be a JSON object")
+servers = data.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    raise SystemExit(f"error: {mcp_path} mcpServers must be an object")
+
+entry = {"url": url, "headers": {"Authorization": auth}}
+if servers.get("recallum") == entry:
+    print(f"Devin MCP server 'recallum' in {mcp_path} already matches; leaving it unchanged.")
+    raise SystemExit(0)
+
+if existed:
+    stamp = f"{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
+    backup = mcp_path.with_name(f"{mcp_path.name}.bak-{stamp}")
+    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(fd, "wb") as handle, open(mcp_path, "rb") as source:
+        shutil.copyfileobj(source, handle)
+    print(
+        f"Backed up the previous {mcp_path.name} to {backup.name} (mode 600). "
+        "That backup contains your Recallum API key in cleartext -- delete it "
+        "once the new config is verified."
+    )
+
+servers["recallum"] = entry
+tmp = mcp_path.with_name(mcp_path.name + ".tmp")
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+with open(fd, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(data, indent=2) + "\n")
+os.chmod(tmp, 0o600)
+tmp.replace(mcp_path)
+os.chmod(mcp_path, 0o600)
+print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
+PY
+  [[ -z "$key_path" ]] || rm -f -- "$key_path"
+
+  if [[ -z "${resolved_api_key-}" ]]; then
+    echo "warning: no API key stored for Devin; it does not expand \${$token_env_var} in" >&2
+    echo "         mcp_config.json, so re-run without --no-store-api-key or pass --api-key-file." >&2
+  fi
+}
+
 # Antigravity CLI (`agy`). Two independent registrations, mirroring Claude:
 #   1. the plugin bundle via `agy plugin install <dir>` (skills/hooks);
 #   2. the native GLOBAL MCP config ~/.gemini/config/mcp_config.json.
@@ -1881,6 +1986,7 @@ if ((install_codex)); then install_for_codex; fi
 if ((install_claude)); then install_for_claude; fi
 if ((install_grok)); then install_for_grok; fi
 if ((install_cursor)); then install_for_cursor; fi
+if ((install_devin)); then install_for_devin; fi
 if ((install_antigravity)); then install_for_antigravity; fi
 
 # Drop the in-memory copy once clients are configured. Files already hold it.
@@ -1918,6 +2024,13 @@ fi
 if ((install_cursor)); then
   echo "Cursor: after installing the plugin in the UI, restart Cursor and confirm the recallum MCP is ready."
   echo "        MCP config was written to ~/.cursor/mcp.json (mode 600)."
+fi
+if ((install_devin)); then
+  echo "Devin: recallum server written to ~/.config/devin/mcp_config.json (mode 600, literal Bearer)."
+  echo "       Tools appear as mcp__recallum__*. If Devin supports plugins, install the"
+  echo "       recallum-memory skill manually; hook dispatch via the plugin is expected"
+  echo "       but unconfirmed, so the hook wiring in .devin/hooks.v1.json is optional."
+  echo "       Restart Devin so MCP reloads."
 fi
 if ((install_antigravity)); then
   echo "Antigravity: plugin installed with 'agy plugin install' and the recallum server written to"

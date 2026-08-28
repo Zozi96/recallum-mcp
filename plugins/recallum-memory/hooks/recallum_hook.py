@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-open context hints for the Recallum plugin (Cursor, Codex, Claude Code, Grok).
+"""Fail-open context hints for the Recallum plugin (Cursor, Codex, Claude Code, Grok, Devin).
 
 Runs under whichever ``python3`` is on the host PATH, so this module must stay
 compatible with older interpreters. Do not use syntax newer than Python 3.9.
@@ -35,7 +35,9 @@ from urllib.parse import urlsplit, urlunsplit
 # as Codex. Grok Build namespaces MCP tools as `server__tool` for
 # search_tool/use_tool, so `recallum__*`. Cursor exposes them through its
 # Available Tools list rather than a stable textual prefix, so its hint
-# uses semantic tool names instead.
+# uses semantic tool names instead. Devin registers the MCP server as
+# `recallum` and exposes tools as `mcp__recallum__*`, identical to Codex,
+# with no lookup step.
 CODEX_TOOL_PREFIX = "mcp__recallum__"
 CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 CLAUDE_NATIVE_TOOL_PREFIX = "mcp__recallum__"
@@ -159,6 +161,8 @@ def _tool(name: str) -> str:
 
     * ``CURSOR_PLUGIN_ROOT`` — Cursor. It may set compatibility aliases, so
       Cursor must be checked first.
+    * ``DEVIN_PROJECT_DIR`` — Devin. Devin sets this during hooks and its
+      tool prefix (`mcp__recallum__*`) is identical to Codex's.
     * ``GROK_PLUGIN_ROOT`` — Grok Build. It also sets ``CLAUDE_PLUGIN_ROOT``
       as a compatibility alias, so Grok must be checked first.
     * ``PLUGIN_ROOT`` — Codex. Codex sets ``PLUGIN_ROOT`` *and*
@@ -173,6 +177,8 @@ def _tool(name: str) -> str:
     """
     if os.environ.get("CURSOR_PLUGIN_ROOT"):
         return f"the Recallum MCP tool `{name}`"
+    if os.environ.get("DEVIN_PROJECT_DIR"):
+        return f"{CODEX_TOOL_PREFIX}{name}"
     if os.environ.get("GROK_PLUGIN_ROOT"):
         prefixes = [GROK_TOOL_PREFIX]
     elif os.environ.get("PLUGIN_ROOT"):
@@ -209,14 +215,17 @@ def _lookup_hint() -> str:
     authenticated. Grok Build similarly routes MCP tools through
     ``search_tool`` / ``use_tool`` rather than listing them as first-class
     builtins. Cursor exposes its tools through Available Tools without a stable
-    textual prefix. Codex lists its MCP tools directly and has no lookup step,
-    so the hint is omitted on the Codex path, mirroring the branch in ``_tool``.
+    textual prefix. Codex and Devin list their MCP tools directly and have no
+    lookup step, so the hint is omitted on the Codex and Devin paths,
+    mirroring the branches in ``_tool``.
     """
     if os.environ.get("CURSOR_PLUGIN_ROOT"):
         return (
             " In Cursor, use the Recallum MCP tools listed under Available Tools; "
             "do not assume a textual tool prefix."
         )
+    if os.environ.get("DEVIN_PROJECT_DIR"):
+        return ""
     if os.environ.get("PLUGIN_ROOT") and not os.environ.get("GROK_PLUGIN_ROOT"):
         return ""
     if os.environ.get("GROK_PLUGIN_ROOT"):

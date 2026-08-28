@@ -320,9 +320,20 @@ elif args == ["plugin", "list"]:
 # Unknown subcommands succeed quietly so unrelated installer probes stay green.
 """
 
+# Minimal fake `devin` binary for installer target validation tests. Devin is
+# detected by `command -v devin` but `install_for_devin` does not invoke it.
+FAKE_DEVIN = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["devin", *args]) + "\\n")
+# Unknown subcommands succeed quietly.
+"""
+
 CODEX_PREFIX = "mcp__recallum__"
 CLAUDE_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 GROK_PREFIX = "recallum__"
+DEVIN_PREFIX = "mcp__recallum__"
 
 
 def run_hook(
@@ -336,6 +347,7 @@ def run_hook(
         "CLAUDE_PLUGIN_ROOT",
         "GROK_PLUGIN_ROOT",
         "CURSOR_PLUGIN_ROOT",
+        "DEVIN_PROJECT_DIR",
         "RECALLUM_MCP_URL",
         "RECALLUM_API_KEY",
     ):
@@ -402,6 +414,7 @@ class HookTests(unittest.TestCase):
             {"CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory"},
             {"GROK_PLUGIN_ROOT": "/plugins/recallum-memory"},
             {"CURSOR_PLUGIN_ROOT": "/plugins/recallum-memory"},
+            {"DEVIN_PROJECT_DIR": "/projects/alpha"},
         )
         for env in variants:
             with self.subTest(env=sorted(env)):
@@ -543,6 +556,31 @@ class HookTests(unittest.TestCase):
         )
         self.assertNotIn("ToolSearch", context)
         self.assertNotIn("search_tool", context)
+
+    def test_devin_is_told_the_bare_server_tool_name(self) -> None:
+        # Devin registers the server as `recallum`, so its tools are
+        # `mcp__recallum__*` — the same spelling as Codex. The hook must not
+        # emit the Claude plugin prefix or the Grok search-tool phrasing.
+        context = self._session_context(
+            {
+                "DEVIN_PROJECT_DIR": "/projects/alpha",
+                "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+                "PLUGIN_ROOT": "/plugins/recallum-memory",
+                "GROK_PLUGIN_ROOT": "/plugins/recallum-memory",
+            }
+        )
+        self.assertIn(f"{DEVIN_PREFIX}context", context)
+        self.assertIn(f"{DEVIN_PREFIX}recall", context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
+        self.assertNotIn(f"call {GROK_PREFIX}context", context)
+        self.assertNotIn("Available Tools", context)
+
+    def test_devin_is_not_told_about_a_lookup_step(self) -> None:
+        # Devin lists MCP tools directly, like Codex, so there is no lookup hint.
+        context = self._session_context({"DEVIN_PROJECT_DIR": "/projects/alpha"})
+        self.assertNotIn("ToolSearch", context)
+        self.assertNotIn("search_tool", context)
+        self.assertNotIn("Available Tools", context)
 
     def test_same_basename_in_different_paths_gets_distinct_local_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -966,6 +1004,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("grok", grok["keywords"])
         self.assertIn("Cursor", grok["description"])
         self.assertIn("cursor", grok["keywords"])
+        self.assertIn("Devin", grok["description"])
+        self.assertIn("devin", grok["keywords"])
 
     def test_cursor_manifest_uses_required_variable_only_credentials(self) -> None:
         manifest = self._load(CURSOR_MANIFEST)
@@ -1147,6 +1187,9 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(namespace["CLAUDE_TOOL_PREFIX"], CLAUDE_PREFIX)
         self.assertEqual(namespace["CLAUDE_NATIVE_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["GROK_TOOL_PREFIX"], GROK_PREFIX)
+        # Devin reuses the Codex prefix; there is no separate constant.
+        self.assertIn("DEVIN_PROJECT_DIR", source)
+        self.assertNotIn("DEVIN_TOOL_PREFIX", source)
 
     def test_skills_document_the_tool_prefix_of_each_client(self) -> None:
         for name in ("recallum-memory", "recallum-setup"):
@@ -1155,6 +1198,9 @@ class ManifestTests(unittest.TestCase):
                 self.assertIn(CODEX_PREFIX, text)
                 self.assertIn(CLAUDE_PREFIX, text)
                 self.assertIn(GROK_PREFIX, text)
+                # Devin uses the same prefix as Codex; the constant duplicates it
+                # so the assertion is explicit.
+                self.assertIn(DEVIN_PREFIX, text)
 
     def test_memory_skill_covers_reusable_context_beyond_decisions(self) -> None:
         text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(encoding="utf-8")
@@ -1275,7 +1321,7 @@ class ManifestTests(unittest.TestCase):
         text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, GROK_PREFIX):
+        for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, GROK_PREFIX, DEVIN_PREFIX):
             self.assertIn(prefix, text)
         self.assertIn("search_tool", text)
         self.assertIn("use_tool", text)
@@ -1567,6 +1613,7 @@ class InstallerTestCase(unittest.TestCase):
         stub_claude: bool = True,
         stub_grok: bool = True,
         stub_cursor: bool = True,
+        stub_devin: bool = False,
         stub_agy: bool = False,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
@@ -1577,6 +1624,7 @@ class InstallerTestCase(unittest.TestCase):
             ("claude", FAKE_CLAUDE, stub_claude),
             ("grok", FAKE_GROK, stub_grok),
             ("cursor-agent", FAKE_CURSOR, stub_cursor),
+            ("devin", FAKE_DEVIN, stub_devin),
             ("agy", FAKE_AGY, stub_agy),
         ):
             if not wanted:
@@ -1763,7 +1811,7 @@ class SharedInstallerTests(InstallerTestCase):
 
     def test_auto_target_installs_into_every_detected_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env, _ = self._fake_clis(Path(directory))
+            env, _ = self._fake_clis(Path(directory), stub_devin=True)
             result = self._run(env, "--url", URL, "--token-env-var", TOKEN_ENV_VAR, "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("dry-run: codex plugin marketplace add", result.stdout)
@@ -1772,6 +1820,7 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
             self.assertIn("dry-run: write", result.stdout)
             self.assertIn(".cursor/mcp.json", result.stdout)
+            self.assertIn("devin/mcp_config.json", result.stdout)
 
     def test_remote_uses_private_repository_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1799,6 +1848,7 @@ class SharedInstallerTests(InstallerTestCase):
             self.assertIn("dry-run: claude plugin marketplace add", result.stdout)
             self.assertIn("dry-run: grok plugin marketplace add", result.stdout)
             self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
+            self.assertNotIn("devin/mcp_config.json", result.stdout)
 
     def test_explicit_target_requires_that_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1836,7 +1886,7 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "none of the codex, claude, grok, cursor-agent/agent, or agy CLIs",
+                "none of the codex, claude, grok, cursor-agent/agent, devin, or agy CLIs",
                 result.stderr,
             )
             self.assertFalse(log.exists())
@@ -1847,6 +1897,23 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--target", "cursor", "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("cursor-agent nor agent", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_explicit_devin_target_requires_that_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), stub_devin=False)
+            result = self._run(
+                env,
+                "--url",
+                URL,
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+                "--target",
+                "devin",
+                "--dry-run",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("devin CLI is not installed", result.stderr)
             self.assertFalse(log.exists())
 
 
@@ -2772,6 +2839,20 @@ class DoctorTests(unittest.TestCase):
             "[mcp_servers.recallum]\nurl = \"https://recallum.example/mcp/\"\n"
             "bearer_token_env_var = \"RECALLUM_API_KEY\"\n",
         )
+        self._write(
+            home,
+            ".config/devin/mcp_config.json",
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "recallum": {
+                            "url": "https://recallum.example/mcp/",
+                            "headers": {"Authorization": "Bearer " + token},
+                        }
+                    }
+                }
+            ),
+        )
         self._write(home, ".config/recallum/env", "export RECALLUM_API_KEY=" + token + "\n")
         self._write(
             home,
@@ -2832,6 +2913,9 @@ class DoctorTests(unittest.TestCase):
         env.update(
             {
                 "HOME": str(home),
+                # Pin XDG_CONFIG_HOME so the Devin check reads the temp home's
+                # .config even when the host exports its own XDG_CONFIG_HOME.
+                "XDG_CONFIG_HOME": str(home / ".config"),
                 "PATH": str(home / "bin") + ":/usr/bin:/bin",
                 "RECALLUM_API_KEY": "rcl_doctor_secret_123",
             }
@@ -2865,6 +2949,26 @@ class DoctorTests(unittest.TestCase):
         # Create the file first, then chmod in a separate step -- chmod sets
         # the mode directly and is not subject to umask, unlike a mode passed
         # to write_text/open, so this is immune to the process umask.
+        path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def _write_devin_config(
+        self,
+        home: Path,
+        *,
+        url: str = "https://recallum.example/mcp/",
+        token: str | None = "rcl_doctor_secret_123",
+        mode: int = 0o600,
+        include_server: bool = True,
+        placeholder: bool = False,
+    ) -> Path:
+        path = home / ".config" / "devin" / "mcp_config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        servers: dict[str, object] = {}
+        if include_server:
+            auth = f"Bearer ${{{TOKEN_ENV_VAR}}}" if placeholder else f"Bearer {token}"
+            servers["recallum"] = {"url": url, "headers": {"Authorization": auth}}
         path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
         path.chmod(mode)
         return path
@@ -2921,6 +3025,40 @@ class DoctorTests(unittest.TestCase):
             result = self._run_doctor(home)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Recallum doctor: healthy", result.stdout)
+
+    def test_devin_healthy_config_reported_in_text_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            devin = report["clients"]["Devin CLI"]["native_mcp"]
+            self.assertEqual(devin["url"], "https://recallum.example/mcp/")
+            self.assertEqual(devin["auth"], "Bearer *** (literal)")
+            self.assertNotIn("type", devin)
+            self.assertEqual(devin["file_mode"], "0600")
+            self.assertIn("Devin CLI", result.stdout)
+
+    def test_devin_unexpanded_env_placeholder_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_devin_config(home, placeholder=True)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("unexpanded ${...} placeholder", result.stdout)
+
+    def test_devin_world_readable_config_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            config = self._write_devin_config(home)
+            config.chmod(0o644)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Devin CLI", result.stdout)
+            self.assertIn("0644", result.stdout)
 
     def test_doctor_redacts_literal_token_in_text_and_json(self) -> None:
         token = "rcl_doctor_secret_456"
@@ -3844,6 +3982,186 @@ class AntigravityInstallTests(InstallerTestCase):
             result, _, _ = self._install(Path(directory))
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(status(), before)
+
+
+class DevinInstallTests(InstallerTestCase):
+    """Devin writes the API key into mcp_config.json literally.
+
+    Like Antigravity, Devin does not document environment-variable expansion
+    in mcp_config.json headers, so the bearer token is written in cleartext
+    when the installer stores a key. The config path is user-scope, governed by
+    XDG_CONFIG_HOME, and the installer preserves unrelated mcpServers entries.
+    """
+
+    def _devin_env(self, root: Path) -> tuple[dict[str, str], Path]:
+        env, log = self._fake_clis(root, stub_devin=True)
+        env[TOKEN_ENV_VAR] = SENTINEL_KEY
+        return env, log
+
+    @staticmethod
+    def _config(env: dict[str, str]) -> Path:
+        return Path(env["HOME"]) / ".config" / "devin" / "mcp_config.json"
+
+    def _assert_no_leak(self, result: subprocess.CompletedProcess[str], log: Path) -> None:
+        captured = result.stdout + result.stderr
+        if log.exists():
+            captured += log.read_text(encoding="utf-8")
+        self.assertNotIn(SENTINEL_KEY, captured)
+
+    def test_dry_run_lists_devin_config_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._devin_env(root)
+            result = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("devin/mcp_config.json", result.stdout)
+            self.assertIn("server recallum", result.stdout)
+            self._assert_no_leak(result, log)
+
+    def test_devin_mcp_config_has_url_literal_bearer_and_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._devin_env(root)
+            result = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            config = self._config(env)
+            self.assertTrue(config.is_file())
+            data = json.loads(config.read_text(encoding="utf-8"))
+            server = data["mcpServers"]["recallum"]
+            self.assertIn("url", server)
+            self.assertNotIn("serverUrl", server)
+            self.assertNotIn("type", server)
+            self.assertEqual(server["url"], URL)
+            self.assertEqual(server["headers"]["Authorization"], f"Bearer {SENTINEL_KEY}")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_no_store_api_key_writes_placeholder_and_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._devin_env(root)
+            result = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+                "--no-store-api-key",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            config = self._config(env)
+            data = json.loads(config.read_text(encoding="utf-8"))
+            auth = data["mcpServers"]["recallum"]["headers"]["Authorization"]
+            self.assertEqual(auth, f"Bearer ${{{TOKEN_ENV_VAR}}}")
+            self.assertIn("does not expand", result.stderr)
+
+    def test_preserves_unrelated_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._devin_env(root)
+            config = self._config(env)
+            config.parent.mkdir(parents=True)
+            other = {"url": "https://other.example/mcp/", "headers": {"X-Keep": "yes"}}
+            config.write_text(
+                json.dumps({"theme": "dark", "mcpServers": {"other-tool": other}}, indent=2),
+                encoding="utf-8",
+            )
+
+            result = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            merged = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(merged["mcpServers"]["other-tool"], other)
+            self.assertEqual(merged["theme"], "dark")
+            self.assertEqual(merged["mcpServers"]["recallum"]["url"], URL)
+
+    def test_existing_config_is_backed_up_before_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._devin_env(root)
+            config = self._config(env)
+            config.parent.mkdir(parents=True)
+            prior = json.dumps({"mcpServers": {"recallum": {"url": "https://old.example/mcp/"}}})
+            config.write_text(prior, encoding="utf-8")
+
+            result = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+            )
+            self._assert_no_leak(result, log)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            backups = [p for p in config.parent.iterdir() if p != config]
+            self.assertEqual(len(backups), 1, backups)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), prior)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+
+    def test_idempotent_rerun_does_not_accumulate_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._devin_env(root)
+            first = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self._assert_no_leak(first, log)
+            config = self._config(env)
+            before = config.read_bytes()
+
+            second = self._run(
+                env,
+                "--url",
+                URL,
+                "--target",
+                "devin",
+                "--token-env-var",
+                TOKEN_ENV_VAR,
+            )
+            self._assert_no_leak(second, log)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("already matches", second.stdout)
+            self.assertEqual(config.read_bytes(), before)
+            backups = [p for p in config.parent.iterdir() if p != config]
+            self.assertEqual(backups, [])
 
 
 if __name__ == "__main__":

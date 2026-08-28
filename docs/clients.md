@@ -1,4 +1,4 @@
-# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, and Antigravity CLI)
+# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, and Antigravity CLI)
 
 Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
@@ -12,8 +12,8 @@ The server exposes fifteen MCP tools: `remember`, `remember_batch`, `recall`,
 `get_skill`, and `forget_skill`. The last four store versioned procedures
 (skills), a separate entity from memories.
 
-Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build, and
-Antigravity CLI. Cursor uses its native marketplace and Settings flow below. Keep credentials in
+Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build,
+Devin CLI, and Antigravity CLI. Cursor uses its native marketplace and Settings flow below. Keep credentials in
 client-owned settings; do not rely on a shell-only export as the sole GUI strategy, and verify the
 setup after restart.
 
@@ -158,6 +158,58 @@ It reports an `Antigravity CLI` client: whether the `recallum` server entry is p
 is always wrong for Antigravity), the config file's permission mode, and whether the plugin is
 listed by `agy plugin list`. If `agy` is not on `PATH`, that last sub-check is skipped, not failed.
 
+## Devin
+
+Devin uses the MCP server `recallum` over Streamable HTTP at `https://<host>/mcp/`.
+
+The installer writes the user-scope MCP config:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target devin --url https://recallum.example.com/mcp/
+```
+
+Or add the server manually with the Devin CLI:
+
+```bash
+devin mcp add -s user recallum https://recallum.example.com/mcp/ \
+  --header "Authorization: Bearer rcl_YOUR_API_KEY"
+```
+
+Equivalently, write `~/.config/devin/mcp_config.json` by hand:
+
+```json
+{
+  "mcpServers": {
+    "recallum": {
+      "url": "https://recallum.example.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer rcl_YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
+
+Tools are named `mcp__recallum__*` (identical to Codex). Devin lists MCP tools directly, so no
+`search_tool` or `ToolSearch` lookup step is needed.
+
+Devin plugins are closed beta, so `install.sh` does **not** run `devin plugins install`. If your
+Devin build supports plugins, you can install the recallum-memory skill manually and optionally
+wire `.devin/hooks.v1.json` for `SessionStart`. Plugin-hook dispatch is expected but unconfirmed,
+so do not rely on it for context injection.
+
+Diagnose with the same read-only doctor used for the other clients:
+
+```bash
+python3 plugins/recallum-memory/scripts/recallum_doctor.py
+```
+
+It reports a `Devin CLI` client: whether the `recallum` server entry is present in
+`~/.config/devin/mcp_config.json`, its `url`, the Authorization header (and whether it is an
+unexpanded `${...}` placeholder, which is wrong for Devin because environment-variable expansion
+in `mcp_config.json` headers is not documented), and the config file's permission mode.
+
 ## Agent usage guidance
 
 Put a short instruction in each project's AGENTS.md / CLAUDE.md so agents
@@ -178,9 +230,9 @@ Never store full conversations; store the distilled fact.
 Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
 `mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` (native/Desktop), Grok Build
 `recallum__*` via `search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in
-Available Tools. Antigravity CLI's tool-name prefix is **not yet determined** — no prefix constant
-exists in `recallum_hook.py` — so prefer skill-driven tool discovery over assuming a specific prefix
-string when working in Antigravity CLI.
+Available Tools; Devin CLI uses `mcp__recallum__*`. Antigravity CLI's tool-name prefix is **not yet
+determined** — no prefix constant exists in `recallum_hook.py` — so prefer skill-driven tool
+discovery over assuming a specific prefix string when working in Antigravity CLI.
 
 ## Troubleshooting
 
@@ -189,5 +241,6 @@ string when working in Antigravity CLI.
 | Tool call fails with "authentication required" | Missing `Authorization: Bearer` header |
 | Tool call fails with "invalid or revoked API key" | Key typo or revoked — issue a new one |
 | Grok MCP target is `${user_config.mcp_url}` | Grok does not expand Claude userConfig; run `install.sh --target grok` |
+| Devin tool calls fail with "authentication required" | Devin does not document `${RECALLUM_API_KEY}` expansion in `mcp_config.json`; write the literal Bearer token or re-run `install.sh --target devin` |
 | `recall` returns `mode: degraded_textual` | Ollama unreachable; check `readyz` and the ollama service |
 | Client times out | MCP endpoint is `/mcp/` (trailing slash); HTTPS only via Traefik |

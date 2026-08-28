@@ -4,21 +4,23 @@
 
 # Recallum Memory plugin
 
-Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claude Code**, and
-**Antigravity CLI**, backed by a self-hosted Recallum MCP server.
+Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claude Code**,
+**Devin CLI**, and **Antigravity CLI**, backed by a self-hosted Recallum MCP server.
 
 The plugin ships:
 
 - two skills — `recallum-memory` (load context and capture verified reusable knowledge) and
   `recallum-setup` (install and diagnose);
 - shared hooks — Codex, Claude Code, and Grok wire `SessionStart` plus `UserPromptSubmit`; Cursor
-  wires `sessionStart` and adds an always-applied rule as a delivery fallback. Antigravity CLI ships
-  the same `hooks.json`, accepted by `agy plugin validate` (`hooks : 1 processed`), but dispatch is
-  unconfirmed — `agy` gates every session behind Google OAuth sign-in before any hook is reachable
-  (see docs/clients.md). All fail open;
+  wires `sessionStart` and adds an always-applied rule as a delivery fallback; Devin may wire
+  SessionStart through `.devin/hooks.v1.json` if it supports plugins, but hook dispatch is
+  unconfirmed (see docs/clients.md). Antigravity CLI ships the same `hooks.json`, accepted by
+  `agy plugin validate` (`hooks : 1 processed`), but dispatch is unconfirmed — `agy` gates every
+  session behind Google OAuth sign-in before any hook is reachable (see docs/clients.md). All fail
+  open;
 - the MCP wiring for each client.
 
-One plugin package, five native entry points — not a Claude-only addon:
+One plugin package, six native entry points — not a Claude-only addon:
 
 | Client | Marketplace index | Plugin metadata |
 | --- | --- | --- |
@@ -26,6 +28,7 @@ One plugin package, five native entry points — not a Claude-only addon:
 | Grok Build | `.grok-plugin/marketplace.json` | `plugin.json` |
 | Codex | `.agents/plugins/marketplace.json` | `.codex-plugin/plugin.json` |
 | Claude Code | `.claude-plugin/marketplace.json` | `.claude-plugin/plugin.json` |
+| Devin CLI | n/a — closed beta; use `devin mcp add` or write `~/.config/devin/mcp_config.json` | n/a — `.devin/hooks.v1.json` if plugin hooks are supported |
 | Antigravity CLI | n/a — `agy plugin install <dir>` (local dir or HTTPS GitHub URL) | `plugin.json` |
 
 ## Grok only (no Claude Code)
@@ -104,6 +107,23 @@ Cursor's `sessionStart` hook emits top-level `additional_context`, but delivery 
 it cannot run before every prompt. The always-applied rule carries the exact canonical-project-key
 fallback. Recallum tools appear in Cursor's Available Tools list without a stable textual prefix.
 
+## Devin
+
+Devin support is provided through the user-scope MCP config
+`~/.config/devin/mcp_config.json`:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target devin --url https://recallum.example.com/mcp/
+```
+
+The installer writes the `recallum` server with a literal Bearer token (mode 600)
+and preserves any pre-existing `mcpServers` entries. Devin plugins are closed beta, so
+`install.sh` does **not** run `devin plugins install`; if your Devin build supports
+plugins, install the recallum-memory skill manually and optionally wire
+`.devin/hooks.v1.json` for `SessionStart`. Hook dispatch through the plugin is expected
+but unconfirmed. Tools appear as `mcp__recallum__*`.
+
 ## Prerequisites
 
 - A reachable Recallum server, yours. The endpoint must be HTTPS; plain HTTP is accepted only for
@@ -112,7 +132,7 @@ fallback. Recallum tools appear in Cursor's Available Tools list without a stabl
   to `/mcp/`. It defaults to `https://recallum.zozbit.com/mcp/`; the Cursor marketplace has no
   endpoint default, so nobody inherits another operator's server without choosing it.
 - `python3` on `PATH` — the hooks run under it. Any 3.9+ interpreter works.
-- The `agent`, `codex`, `claude`, and/or `grok` CLI as applicable.
+- The `agent`, `codex`, `claude`, `grok`, `devin`, and/or `agy` CLI as applicable.
 
 ## Install
 
@@ -144,7 +164,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
-| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
+| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent` and `devin`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
 | `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex and Grok read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into userConfig storage, because `.mcp.json` reads `${user_config.api_token}` and never the environment |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |
@@ -396,6 +416,7 @@ Claude Desktop ToolSearch (`mcp__recallum__*`):
 | Claude Code (native / Desktop) | `mcp__recallum__` |
 | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
 | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
+| Devin CLI | `mcp__recallum__` |
 | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
 Both skills document this, and the session hook emits the client-appropriate name or discovery
