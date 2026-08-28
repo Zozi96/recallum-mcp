@@ -42,6 +42,7 @@ CODEX_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 GROK_MANIFEST = PLUGIN_ROOT / "plugin.json"
 CURSOR_MANIFEST = PLUGIN_ROOT / ".cursor-plugin" / "plugin.json"
+DEVIN_MANIFEST = PLUGIN_ROOT / ".devin-plugin" / "plugin.json"
 CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 CLAUDE_MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 GROK_MARKETPLACE = REPO_ROOT / ".grok-plugin" / "marketplace.json"
@@ -992,13 +993,16 @@ class ManifestTests(unittest.TestCase):
         claude = self._load(CLAUDE_MANIFEST)
         grok = self._load(GROK_MANIFEST)
         cursor = self._load(CURSOR_MANIFEST)
+        devin = self._load(DEVIN_MANIFEST)
         self.assertEqual(codex["name"], "recallum-memory")
         self.assertEqual(claude["name"], "recallum-memory")
         self.assertEqual(grok["name"], "recallum-memory")
         self.assertEqual(cursor["name"], "recallum-memory")
+        self.assertEqual(devin["name"], "recallum-memory")
         self.assertEqual(codex["version"], claude["version"])
         self.assertEqual(codex["version"], grok["version"])
         self.assertEqual(codex["version"], cursor["version"])
+        self.assertEqual(codex["version"], devin["version"])
         self.assertEqual(codex["version"], "0.15.0")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
@@ -1006,6 +1010,20 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("cursor", grok["keywords"])
         self.assertIn("Devin", grok["description"])
         self.assertIn("devin", grok["keywords"])
+        self.assertIn("Devin", devin["description"])
+        self.assertIn("devin", devin["keywords"])
+
+    def test_devin_manifest_shape_suppresses_bundled_mcp(self) -> None:
+        manifest = self._load(DEVIN_MANIFEST)
+        self.assertEqual(manifest["skills"], "./skills/")
+        mcp_servers = manifest["mcpServers"]
+        self.assertEqual(mcp_servers, {"paths": [], "exclusive": True})
+        # The suppression object is not a list and not a dict-of-servers.
+        self.assertNotIsInstance(mcp_servers, list)
+        self.assertFalse(
+            any(isinstance(v, dict) and "url" in v for v in mcp_servers.values()),
+            "mcpServers must not be a dict-of-servers",
+        )
 
     def test_cursor_manifest_uses_required_variable_only_credentials(self) -> None:
         manifest = self._load(CURSOR_MANIFEST)

@@ -1,6 +1,6 @@
 ---
 name: recallum-setup
-description: Set up or diagnose the Recallum plugin and remote MCP connection for Cursor, Codex, Claude Code, Grok Build, or Antigravity CLI when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
+description: Set up or diagnose the Recallum plugin and remote MCP connection for Devin CLI, Cursor, Codex, Claude Code, Grok Build, or Antigravity CLI when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
 ---
 
 # Recallum Setup
@@ -16,9 +16,10 @@ prompt) so clients can authenticate after install:
 - All targets → `~/.config/recallum/env` and Linux `~/.config/environment.d/99-recallum.conf`
 
 Never pass the key as `claude --config api_token=...` or as a CLI flag (argv / process list). Use
-`--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `antigravity`,
-`both`, or default `auto`. Run with `--dry-run` first to see the planned actions. `--target both`
-means Codex + Claude Code only; it does not include Grok, Cursor, or Antigravity CLI.
+`--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `cursor`,
+`devin`, `antigravity`, `both`, or default `auto`. Run with `--dry-run` first to see the planned
+actions. `--target both` means Codex + Claude Code only; it does not include Grok, Cursor, Devin,
+or Antigravity CLI.
 
 Cursor: `install.sh --target cursor` (or `auto` when `cursor-agent`/`agent` is on PATH) registers the
 marketplace and writes a mode-600 `~/.cursor/mcp.json` entry. Plugin install is still done in the
@@ -200,6 +201,48 @@ session-start hook, hook dispatch, or MCP tool surface becomes reachable, so do 
 hook-injected context digest for Antigravity CLI. The MCP tool-name prefix for Antigravity CLI is
 also not yet determined — no prefix constant exists in the shared hook code.
 
+## Setup — Devin
+
+Devin CLI does **not** document environment-variable expansion in `mcp_config.json` headers, so the
+API key is written to disk in cleartext — read the whole section before running the installer.
+
+1. Confirm `devin` is on `PATH` (`devin --version`).
+2. Run the installer:
+
+   ```bash
+   export RECALLUM_API_KEY=rcl_…
+   plugins/recallum-memory/scripts/install.sh --target devin --url https://recallum.example.com/mcp/
+   ```
+
+   This writes `~/.config/devin/mcp_config.json` at mode `0600` with a **literal, cleartext**
+   bearer token under `mcpServers.recallum` (`url` plus `headers.Authorization: Bearer <literal>`).
+   A `${RECALLUM_API_KEY}`-style placeholder will **not** be expanded by Devin. `--target both`
+   does not cover Devin CLI; use `--target devin` explicitly.
+3. **Cleartext key warning:** the bearer token is written literally into
+   `~/.config/devin/mcp_config.json` — a `${RECALLUM_API_KEY}`-style placeholder will **not** be
+   expanded by Devin. The installer's backup of the prior config also holds the key in cleartext.
+   Treat both files as sensitive; never commit either one.
+4. Install the plugin (Devin plugins are closed beta; a local path requires `--local`):
+
+   ```bash
+   devin plugins install --local plugins/recallum-memory -y
+   ```
+
+   The repo-local `.devin/hooks.v1.json` is the Devin hook (`SessionStart` + `UserPromptSubmit`,
+   keyed on `DEVIN_PROJECT_DIR`). Hook dispatch is expected but unconfirmed; use skill-driven tool
+   discovery if the hook does not fire.
+5. Confirm the registration with the read-only doctor:
+
+   ```bash
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
+   ```
+
+   It reports the `Devin CLI` client: server presence, `url`, the `Authorization` header (flagging
+   any unexpanded `${...}` placeholder as wrong for this client), and the config file's permission
+   mode. Never print or echo the key.
+6. Restart Devin so the MCP server, hooks, and tool catalog reload. Tools appear as `mcp__recallum__*`
+   (same prefix as Codex; no `search_tool` or `ToolSearch` lookup step).
+
 ## Shared Checks
 
 1. Check only whether the token environment variable or Claude Code fallback is present. The
@@ -220,6 +263,7 @@ also not yet determined — no prefix constant exists in the shared hook code.
    | Claude Code (native / Desktop) | `mcp__recallum__` |
    | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
    | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
+   | Devin CLI | `mcp__recallum__` |
    | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every
@@ -264,6 +308,9 @@ echo the key while doing so.
   and that `~/.grok/config.toml` has `Authorization = "Bearer ${RECALLUM_API_KEY}"` (unexpanded).
   A plugin-only MCP entry showing `url = "${user_config.mcp_url}"` is broken on Grok — re-run
   `scripts/install.sh --target grok` (or `--force-mcp` if a stale definition exists).
+- Authentication failure on Devin CLI: re-run `install.sh --target devin` so
+  `~/.config/devin/mcp_config.json` contains a literal Bearer (not a `${...}` placeholder). Do not
+  ask for the value in chat and do not read it back.
 - Connection failure: verify the URL and service readiness independently, then retry discovery.
 - Hook absent or blocked (Codex): use `/hooks` to inspect the path and trust state; never bypass the
   trust review.
@@ -276,3 +323,7 @@ echo the key while doing so.
   is validation acceptance only, not dispatch evidence — `agy` gates every session behind
   interactive Google OAuth sign-in before any session-start hook is reachable, so hook parity is
   unconfirmed. Use skill-driven tool discovery instead of relying on a hook-injected context digest.
+- Hook not firing (Devin CLI): confirm the plugin is installed and the repo-local
+  `.devin/hooks.v1.json` hook (`SessionStart` + `UserPromptSubmit`, keyed on `DEVIN_PROJECT_DIR`) is
+  present. If the hook still does not fire, use skill-driven tool discovery instead of relying on a
+  hook-injected context digest.
