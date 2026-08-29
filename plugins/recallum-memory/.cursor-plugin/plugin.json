@@ -1,7 +1,7 @@
 {
   "name": "recallum-memory",
   "displayName": "Recallum Memory",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Persistent, project-aware memory for Cursor through a self-hosted Recallum MCP server.",
   "author": {
     "name": "Zozi"
