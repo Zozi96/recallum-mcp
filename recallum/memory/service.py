@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from recallum.boundary_types import StrictImportance, StrictNonNegativeOffset, StrictPositiveLimit
 from recallum.db.models import Memory
@@ -114,8 +115,9 @@ class MemoryService:
     # remember
     # ------------------------------------------------------------------
 
-    async def remember(
+    async def _remember_in_session(
         self,
+        session: AsyncSession | None,
         user_id: uuid.UUID,
         *,
         content: str,
@@ -128,17 +130,15 @@ class MemoryService:
         ttl_seconds: int | None = None,
         source_type: str | None = None,
         source_ref: str | None = None,
+        embedding: list[float] | None = None,
+        rebuild: bool = True,
         anchors: Sequence[Mapping[str, str]] | None = None,
     ) -> RememberResult:
-        """Store an atomic memory, deduplicating exact active repeats.
+        """Core remember logic, run inside the provided session (or one per call).
 
-        ``ttl_seconds`` declares short-lived working memory: the memory stops
-        being served everywhere once it expires. Omit it for durable context.
-        ``kind`` is the orthogonal coding facet; ``kind='todo'`` MUST declare
-        a TTL (working memory only, no durable backlog). ``anchors`` are
-        optional structured code references (``{"type", "identifier"}``,
-        type one of ``file``/``symbol``/``module``); omitting them stores the
-        memory exactly as before this feature existed.
+        This is the implementation detail behind ``remember`` and
+        ``remember_batch``. It must NOT catch ``IntegrityError``: the caller
+        decides whether to retry or record a per-item error.
         """
         normalized = self._normalize_content(content)
         normalized_project = self._normalize_project(project)
@@ -155,26 +155,14 @@ class MemoryService:
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
         language_warning = self._language_warning(normalized)
 
-        # An expired duplicate MUST NOT block re-remembering the same content:
-        # this lookup already ignores expired rows, so a repeat of expired
-        # working memory falls through to the create path below and comes
-        # back fresh, not revived.
         existing = await self._repo.find_active_by_hash(
-            user_id, scope=scope, project=normalized_project, content_hash=digest
+            user_id,
+            scope=scope,
+            project=normalized_project,
+            content_hash=digest,
+            session=session,
         )
         if existing is not None:
-            # Re-stating a memory used to silently drop the new importance and
-            # metadata, so raising the importance of something already stored
-            # did nothing at all. The content is identical by construction
-            # here, so this is bookkeeping, not a new claim: no supersession.
-            #
-            # Expiry follows the same "this call is authoritative" rule as
-            # every other attribute: omitting ttl_seconds on a restatement
-            # reasserts durability (consistent with reconfirm semantics --
-            # the claim was just observed to still hold, so it must not
-            # silently vanish on an expiry nobody renewed), and passing
-            # ttl_seconds always refreshes the expiry from now, even when the
-            # existing row was durable.
             existing_source_type = getattr(existing, "source_type", None) or "unknown"
             existing_source_ref = getattr(existing, "source_ref", None)
             existing_kind = getattr(existing, "kind", None)
@@ -210,14 +198,18 @@ class MemoryService:
                         if validated_kind is not None and validated_kind != existing_kind
                         else None
                     ),
+                    session=session,
                 )
             except TodoRequiresTtlError as exc:
                 raise MemoryValidationError(str(exc)) from exc
-            # It IS a reconfirmation, though: the claim was just observed to
-            # still hold, and readers use that stamp to judge freshness.
-            reconfirmed = await self._repo.mark_reconfirmed(user_id, existing.id)
+            reconfirmed = await self._repo.mark_reconfirmed(
+                user_id, existing.id, session=session
+            )
             current = next(row for row in (reconfirmed, refreshed, existing) if row is not None)
-            await self._rebuild_profiles_for_memory(user_id, current)
+            if session is not None and rebuild:
+                await session.commit()
+            if rebuild:
+                await self._rebuild_profiles_for_memory(user_id, current)
             return RememberResult(
                 memory=_to_memory_out(current),
                 created=False,
@@ -229,58 +221,127 @@ class MemoryService:
                 "kind='todo' requires ttl_seconds; durable todos are not supported"
             )
 
-        # Embed before persisting: a memory without a vector is never stored.
-        embedding = await self._embeddings.embed(normalized)
+        if embedding is None:
+            embedding = await self._embeddings.embed(normalized)
+        elif not isinstance(embedding, list) or len(embedding) != self._embeddings.dimensions:
+            raise EmbeddingError(
+                f"expected embedding with {self._embeddings.dimensions} dimensions"
+            )
 
-        try:
-            memory = await self._repo.create_memory(
-                user_id,
-                scope=scope,
-                project=normalized_project,
-                category=validated_category,
-                kind=validated_kind,
-                content=normalized,
-                content_hash=digest,
-                embedding=embedding,
-                embedding_model=self._embeddings.model,
-                importance=validated_importance,
-                source_client=source_client,
-                metadata=validated_metadata,
-                expires_at=expires_at,
-                source_type=validated_source_type or "unknown",
-                source_ref=validated_source_ref,
-                anchors=validated_anchors,
-            )
-        except IntegrityError:
-            # Concurrent insert won the race on the partial unique index.
-            racing = await self._repo.find_active_by_hash(
-                user_id, scope=scope, project=normalized_project, content_hash=digest
-            )
-            if racing is not None:
-                # A concurrent insert of identical content is a reconfirmation
-                # from this caller's point of view: stamp it like the dedup path.
-                reconfirmed = await self._repo.mark_reconfirmed(user_id, racing.id)
-                current = reconfirmed if reconfirmed is not None else racing
-                await self._rebuild_profiles_for_memory(user_id, current)
-                return RememberResult(
-                    memory=_to_memory_out(current),
-                    created=False,
-                    language_warning=language_warning,
-                )
-            raise
-        await self._rebuild_profiles_for_memory(user_id, memory)
+        memory = await self._repo.create_memory(
+            user_id,
+            scope=scope,
+            project=normalized_project,
+            category=validated_category,
+            kind=validated_kind,
+            content=normalized,
+            content_hash=digest,
+            embedding=embedding,
+            embedding_model=self._embeddings.model,
+            importance=validated_importance,
+            source_client=source_client,
+            metadata=validated_metadata,
+            expires_at=expires_at,
+            source_type=validated_source_type or "unknown",
+            source_ref=validated_source_ref,
+            anchors=validated_anchors,
+            session=session,
+        )
+
+        # Compute the similar advisory before any commit: once the session is
+        # committed the SET LOCAL RLS context is gone, and a fresh transaction
+        # would not see the just-written row.
+        similar = await self._similar_to(
+            user_id,
+            embedding,
+            scope=scope,
+            project=normalized_project,
+            exclude_id=memory.id,
+            session=session,
+        )
+
+        if session is not None and rebuild:
+            await session.commit()
+        if rebuild:
+            await self._rebuild_profiles_for_memory(user_id, memory)
         return RememberResult(
             memory=_to_memory_out(memory),
             created=True,
-            similar=await self._similar_to(
-                user_id,
-                embedding,
-                scope=scope,
-                project=normalized_project,
-                exclude_id=memory.id,
-            ),
+            similar=similar,
             language_warning=language_warning,
         )
+
+    @staticmethod
+    def _is_dedup_integrity_error(exc: IntegrityError) -> bool:
+        """True when the error is a collision on the active-memory dedup index."""
+        orig = getattr(exc, "orig", None)
+        if orig is not None:
+            constraint = getattr(orig, "constraint_name", "") or ""
+            if "uq_memories_active_dedup" in constraint:
+                return True
+        return "uq_memories_active_dedup" in str(exc)
+
+    async def remember(
+        self,
+        user_id: uuid.UUID,
+        *,
+        content: str,
+        category: str,
+        kind: str | None = None,
+        project: str | None = None,
+        importance: StrictImportance = 5,
+        metadata: dict[str, Any] | None = None,
+        source_client: str | None = None,
+        ttl_seconds: int | None = None,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        embedding: list[float] | None = None,
+        rebuild: bool = True,
+        anchors: Sequence[Mapping[str, str]] | None = None,
+    ) -> RememberResult:
+        """Store an atomic memory, deduplicating exact active repeats.
+
+        ``ttl_seconds`` declares short-lived working memory: the memory stops
+        being served everywhere once it expires. Omit it for durable context.
+        ``kind`` is the orthogonal coding facet; ``kind='todo'`` MUST declare
+        a TTL (working memory only, no durable backlog). ``anchors`` are
+        optional structured code references (``{"type", "identifier"}``,
+        type one of ``file``/``symbol``/``module``); omitting them stores the
+        memory exactly as before this feature existed.
+
+        A shared session is opened for the whole operation; on the rare
+        ``IntegrityError`` from a concurrent duplicate insert, the transaction
+        is rolled back and retried (up to 3 times), which turns the race into
+        a reconfirmation just like the old per-call path.
+        """
+        for attempt in range(3):
+            try:
+                async with self._repo.session_for(user_id) as session:
+                    return await self._remember_in_session(
+                        session,
+                        user_id,
+                        content=content,
+                        category=category,
+                        kind=kind,
+                        project=project,
+                        importance=importance,
+                        metadata=metadata,
+                        source_client=source_client,
+                        ttl_seconds=ttl_seconds,
+                        source_type=source_type,
+                        source_ref=source_ref,
+                        embedding=embedding,
+                        rebuild=rebuild,
+                        anchors=anchors,
+                    )
+            except IntegrityError as exc:
+                # Only the active-memory dedup index is a safe race. Any other
+                # constraint violation is an infrastructure/domain bug and must
+                # not be silently retried or mislabeled.
+                if not self._is_dedup_integrity_error(exc):
+                    raise
+                if attempt == 2:
+                    raise
 
     def _language_warning(self, normalized: str) -> str | None:
         """Advisory hint that ``normalized`` content looks non-English.
@@ -303,6 +364,7 @@ class MemoryService:
         scope: str,
         project: str | None,
         exclude_id: uuid.UUID,
+        session: AsyncSession | None = None,
     ) -> list[SimilarMemory]:
         """Pre-existing memories about the same subject as the one just stored.
 
@@ -317,16 +379,30 @@ class MemoryService:
         if self._limits.similar_max_results == 0:
             return []
         try:
-            neighbours = await self._repo.similar_active(
-                user_id,
-                embedding,
-                embedding_model=self._embeddings.model,
-                scope=scope,
-                project=project,
-                min_similarity=self._limits.similar_min_similarity,
-                limit=self._limits.similar_max_results,
-                exclude_id=exclude_id,
-            )
+            if session is not None:
+                async with session.begin_nested():
+                    neighbours = await self._repo.similar_active(
+                        user_id,
+                        embedding,
+                        embedding_model=self._embeddings.model,
+                        scope=scope,
+                        project=project,
+                        min_similarity=self._limits.similar_min_similarity,
+                        limit=self._limits.similar_max_results,
+                        exclude_id=exclude_id,
+                        session=session,
+                    )
+            else:
+                neighbours = await self._repo.similar_active(
+                    user_id,
+                    embedding,
+                    embedding_model=self._embeddings.model,
+                    scope=scope,
+                    project=project,
+                    min_similarity=self._limits.similar_min_similarity,
+                    limit=self._limits.similar_max_results,
+                    exclude_id=exclude_id,
+                )
         except Exception:
             logger.warning("similar-memory check failed; the memory was stored", exc_info=True)
             return []
@@ -358,48 +434,184 @@ class MemoryService:
         (partial success), but an empty or oversized batch is rejected whole
         before anything persists. Domain and embedding failures stay per-item;
         infrastructure failures propagate and fail the call.
+
+        One ``embed_batch`` call handles all unique normalized contents; if it
+        fails we fall back to per-text ``embed`` so a per-text failure does not
+        fail the whole batch.
         """
         if not items:
             raise MemoryValidationError("batch must contain at least one item")
         if len(items) > self._limits.batch_max_items:
             raise MemoryValidationError(f"batch exceeds {self._limits.batch_max_items} items")
-        outcomes: list[RememberBatchItemOutcome] = []
-        for item in items:
+
+        outcomes: list[RememberBatchItemOutcome | None] = [None] * len(items)
+        prepared: list[tuple[RememberBatchItem, str] | None] = [None] * len(items)
+        unique_texts: list[str] = []
+        seen_texts: set[str] = set()
+        for index, item in enumerate(items):
             try:
-                result = await self.remember(
-                    user_id,
-                    content=item.content,
-                    category=item.category,
-                    kind=item.kind,
-                    project=item.project,
-                    importance=item.importance,
-                    metadata=item.metadata,
-                    source_client=source_client,
-                    ttl_seconds=item.ttl_seconds,
-                    source_type=item.source_type,
-                    source_ref=item.source_ref,
-                    anchors=([a.model_dump() for a in item.anchors] if item.anchors else None),
-                )
+                normalized = self._normalize_content(item.content)
             except MemoryValidationError as exc:
-                outcomes.append(RememberBatchItemOutcome(error=str(exc)))
+                outcomes[index] = RememberBatchItemOutcome(error=str(exc))
                 continue
-            except EmbeddingError as exc:
-                record_sanitized_failure(logger, exc, message="Memory batch item failure")
-                outcomes.append(RememberBatchItemOutcome(error=EMBEDDING_UNAVAILABLE_MESSAGE))
-                continue
-            outcomes.append(
-                RememberBatchItemOutcome(
-                    created=result.created,
-                    memory=result.memory,
-                    similar=result.similar,
-                    language_warning=result.language_warning,
-                )
-            )
+            prepared[index] = (item, normalized)
+            if normalized not in seen_texts:
+                seen_texts.add(normalized)
+                unique_texts.append(normalized)
+
+        text_to_vector: dict[str, list[float] | None] = {}
+        if unique_texts:
+            try:
+                vectors = await self._embeddings.embed_batch(unique_texts)
+                for text, vector in zip(unique_texts, vectors, strict=True):
+                    text_to_vector[text] = vector
+            except EmbeddingError:
+                for text in unique_texts:
+                    try:
+                        text_to_vector[text] = await self._embeddings.embed(text)
+                    except EmbeddingError as exc:
+                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                        text_to_vector[text] = None
+
+        profile_keys: set[str | None] = set()
+        has_global = False
+
+        async with self._repo.session_for(user_id) as session:
+            if session is None:
+                # Fake repositories have no real session; fall back to the
+                # original per-item remember path so unit tests stay simple.
+                for index, entry in enumerate(prepared):
+                    if entry is None:
+                        continue
+                    item, normalized = entry
+                    vector = text_to_vector.get(normalized)
+                    if vector is None:
+                        outcomes[index] = RememberBatchItemOutcome(
+                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
+                        )
+                        continue
+                    try:
+                        result = await self.remember(
+                            user_id,
+                            content=item.content,
+                            category=item.category,
+                            kind=item.kind,
+                            project=item.project,
+                            importance=item.importance,
+                            metadata=item.metadata,
+                            source_client=source_client,
+                            ttl_seconds=item.ttl_seconds,
+                            source_type=item.source_type,
+                            source_ref=item.source_ref,
+                            anchors=(
+                                [a.model_dump() for a in item.anchors]
+                                if item.anchors
+                                else None
+                            ),
+                            embedding=vector,
+                            rebuild=False,
+                        )
+                    except MemoryValidationError as exc:
+                        outcomes[index] = RememberBatchItemOutcome(error=str(exc))
+                        continue
+                    except EmbeddingError as exc:
+                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                        outcomes[index] = RememberBatchItemOutcome(
+                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
+                        )
+                        continue
+                    outcomes[index] = RememberBatchItemOutcome(
+                        created=result.created,
+                        memory=result.memory,
+                        similar=result.similar,
+                        language_warning=result.language_warning,
+                    )
+                    if result.memory is not None:
+                        if result.memory.scope == "project" and result.memory.project:
+                            profile_keys.add(result.memory.project)
+                        else:
+                            has_global = True
+            else:
+                for index, entry in enumerate(prepared):
+                    if entry is None:
+                        continue
+                    item, normalized = entry
+                    vector = text_to_vector.get(normalized)
+                    if vector is None:
+                        outcomes[index] = RememberBatchItemOutcome(
+                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
+                        )
+                        continue
+                    try:
+                        async with session.begin_nested():
+                            result = await self._remember_in_session(
+                                session,
+                                user_id,
+                                content=item.content,
+                                category=item.category,
+                                kind=item.kind,
+                                project=item.project,
+                                importance=item.importance,
+                                metadata=item.metadata,
+                                source_client=source_client,
+                                ttl_seconds=item.ttl_seconds,
+                                source_type=item.source_type,
+                                source_ref=item.source_ref,
+                                anchors=(
+                                    [a.model_dump() for a in item.anchors]
+                                    if item.anchors
+                                    else None
+                                ),
+                                embedding=vector,
+                                rebuild=False,
+                            )
+                    except MemoryValidationError as exc:
+                        outcomes[index] = RememberBatchItemOutcome(error=str(exc))
+                        continue
+                    except EmbeddingError as exc:
+                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                        outcomes[index] = RememberBatchItemOutcome(
+                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
+                        )
+                        continue
+                    except IntegrityError as exc:
+                        # A non-dedup constraint violation is not a per-item
+                        # race; let it propagate as an infrastructure failure.
+                        if not self._is_dedup_integrity_error(exc):
+                            raise
+                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                        outcomes[index] = RememberBatchItemOutcome(
+                            error="concurrent write conflicted with this item",
+                        )
+                        continue
+                    outcomes[index] = RememberBatchItemOutcome(
+                        created=result.created,
+                        memory=result.memory,
+                        similar=result.similar,
+                        language_warning=result.language_warning,
+                    )
+                    if result.memory is not None:
+                        if result.memory.scope == "project" and result.memory.project:
+                            profile_keys.add(result.memory.project)
+                        else:
+                            has_global = True
+
+        if has_global:
+            profile_keys.add(None)
+            try:
+                profile_keys.update(await self._repo.list_profile_projects(user_id))
+            except Exception:
+                logger.warning("could not list project profiles after batch", exc_info=True)
+        if profile_keys:
+            await self._rebuild_profiles_for_keys(user_id, list(profile_keys))
+
         return RememberBatchResult(
-            results=outcomes,
-            stored=sum(1 for o in outcomes if o.memory is not None and o.created),
-            deduplicated=sum(1 for o in outcomes if o.memory is not None and not o.created),
-            failed=sum(1 for o in outcomes if o.error is not None),
+            results=[o for o in outcomes if o is not None],
+            stored=sum(1 for o in outcomes if o is not None and o.memory is not None and o.created),
+            deduplicated=sum(
+                1 for o in outcomes if o is not None and o.memory is not None and not o.created
+            ),
+            failed=sum(1 for o in outcomes if o is not None and o.error is not None),
         )
 
     # ------------------------------------------------------------------
@@ -679,13 +891,22 @@ class MemoryService:
             )
             if not rows:
                 return reembedded, failed
-            for row in rows:
+            contents = [row.content for row in rows]
+            vectors: list[list[float]] | None = None
+            try:
+                vectors = await self._embeddings.embed_batch(contents)
+            except EmbeddingError:
+                pass
+            for index, row in enumerate(rows):
                 after = row.id
-                try:
-                    vector = await self._embeddings.embed(row.content)
-                except EmbeddingError:
-                    failed += 1
-                    continue
+                if vectors is not None and index < len(vectors):
+                    vector = vectors[index]
+                else:
+                    try:
+                        vector = await self._embeddings.embed(row.content)
+                    except EmbeddingError:
+                        failed += 1
+                        continue
                 # False means the row retired mid-run; neither counter moves.
                 if await self._repo.replace_embedding(
                     user_id, row.id, embedding=vector, model=model

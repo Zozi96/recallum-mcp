@@ -306,7 +306,10 @@ async def _read_profile_resource(client: Client, uri: str) -> dict[str, Any]:
 
 @pytest.fixture
 async def server() -> ServerInfo:
-    container, fakes = build_test_container(embedder=FakeEmbeddingClient(dimensions=16))
+    settings = Settings(auth={"identity_cache_seconds": 0.0})
+    container, fakes = build_test_container(
+        embedder=FakeEmbeddingClient(dimensions=16), settings=settings
+    )
     key_service = container.api_key_service()
     alice = await key_service.create_user("alice@example.com")
     bob = await key_service.create_user("bob@example.com")
@@ -315,7 +318,7 @@ async def server() -> ServerInfo:
     revoked = await key_service.issue_key(alice.id)
     await key_service.revoke_key(revoked.key.id)
 
-    app = create_app(Settings(), container)
+    app = create_app(settings, container)
     authenticator = container.authenticator()
     verifier_calls, dispatch_calls = _instrument_mcp_server(app, authenticator)
     async with _serve(app) as url:

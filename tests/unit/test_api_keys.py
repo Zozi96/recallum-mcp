@@ -12,6 +12,7 @@ from fastmcp.server.auth import AccessToken
 
 from recallum.auth.api_keys import ApiKeyService, UserNotFoundError, hash_token
 from recallum.auth.middleware import (
+    IDENTITY_CACHE_TTL,
     BearerAuthMiddleware,
     RecallumTokenVerifier,
     TokenAuthenticator,
@@ -20,11 +21,13 @@ from recallum.cli import _run
 from tests.fakes import FakeApiKeyRepository, FakeUserRepository, build_test_container
 
 
-def make_service() -> tuple[ApiKeyService, TokenAuthenticator, FakeApiKeyRepository]:
+def make_service(
+    cache_ttl: timedelta = IDENTITY_CACHE_TTL,
+) -> tuple[ApiKeyService, TokenAuthenticator, FakeApiKeyRepository]:
     users = FakeUserRepository()
     keys = FakeApiKeyRepository(users)
     service = ApiKeyService(user_repository=users, api_key_repository=keys)
-    return service, TokenAuthenticator(api_key_repository=keys), keys
+    return service, TokenAuthenticator(api_key_repository=keys, cache_ttl=cache_ttl), keys
 
 
 def test_hash_token_is_sha256_hex():
@@ -61,7 +64,7 @@ async def test_create_user_rejects_invalid_email():
 
 
 async def test_authenticate_valid_invalid_revoked():
-    service, authenticator, _ = make_service()
+    service, authenticator, _ = make_service(cache_ttl=timedelta(0))
     user = await service.create_user("carol@example.com")
     issued = await service.issue_key(user.id)
 
@@ -250,7 +253,11 @@ async def test_authentication_refreshes_last_used_once_per_interval():
     users = FakeUserRepository()
     keys = CountingApiKeyRepository(users)
     token = await _issue(keys, users)
-    auth = TokenAuthenticator(api_key_repository=keys, refresh_interval=timedelta(seconds=60))
+    auth = TokenAuthenticator(
+        api_key_repository=keys,
+        refresh_interval=timedelta(seconds=60),
+        cache_ttl=timedelta(0),
+    )
 
     assert await auth.authenticate(token) is not None
     assert keys.touches == 1, "the first use must record last_used_at"
@@ -264,7 +271,11 @@ async def test_authentication_refreshes_last_used_once_the_interval_elapses():
     users = FakeUserRepository()
     keys = CountingApiKeyRepository(users)
     token = await _issue(keys, users)
-    auth = TokenAuthenticator(api_key_repository=keys, refresh_interval=timedelta(seconds=60))
+    auth = TokenAuthenticator(
+        api_key_repository=keys,
+        refresh_interval=timedelta(seconds=60),
+        cache_ttl=timedelta(0),
+    )
 
     await auth.authenticate(token)
     assert keys.touches == 1
@@ -277,12 +288,12 @@ async def test_authentication_refreshes_last_used_once_the_interval_elapses():
     assert keys.touches == 2
 
 
-async def test_identity_cache_is_off_by_default_so_revocation_is_immediate():
-    """The default must not trade the revocation guarantee for a round trip."""
+async def test_identity_cache_with_zero_ttl_keeps_revocation_immediate():
+    """With caching disabled, a revoked key must stop working on the next call."""
     users = FakeUserRepository()
     keys = CountingApiKeyRepository(users)
     token = await _issue(keys, users)
-    auth = TokenAuthenticator(api_key_repository=keys)
+    auth = TokenAuthenticator(api_key_repository=keys, cache_ttl=timedelta(0))
 
     assert await auth.authenticate(token) is not None
     key = next(iter(keys.keys.values()))

@@ -478,18 +478,18 @@ Activate the scalable path when **either** of these holds:
 
 - The operator flag `RECALLUM__LIMITS__GRAPH_SCALABLE_ENABLED=true` is set.
 - The active node count is **strictly above**
-  `RECALLUM__LIMITS__GRAPH_SCALABLE_MIN_NODES` (default `2000`), with the flag
+  `RECALLUM__LIMITS__GRAPH_SCALABLE_MIN_NODES` (default `500`), with the flag
   off or unset.
 
-Default deployments keep the pairwise path: the flag ships unset and the
-default threshold (2000) sits above the default node ceiling (1000), so a
-typical user stays on the pairwise path. Routing compares the **uncapped**
-active node count against the threshold, not the number of presented nodes:
-because the default threshold equals the maximum node ceiling (2000), a user
-with more than 2000 active memories auto-routes to the scalable path even
-with the flag off, on a projection the pairwise path would otherwise present
-uncapped. Raise `graph_scalable_min_nodes` above your expected active-memory
-volume if the scalable path must only ever be an explicit opt-in.
+Default deployments auto-route above 500 active memories: the flag ships
+unset and the default threshold (500) sits below the default node ceiling
+(1000), so the bounded per-node kNN path replaces the O(n²) self-join before
+a large user's projection would otherwise become expensive. Routing compares
+the **uncapped** active node count against the threshold, not the number of
+presented nodes, so a user with more than 500 active memories auto-routes to
+the scalable path even with the flag off. Raise `graph_scalable_min_nodes`
+above your expected active-memory volume if the scalable path must only ever
+be an explicit opt-in.
 
 On the scalable path, each node contributes at most `graph_max_neighbours`
 edges; edges still require `graph_min_similarity` and matching embedding

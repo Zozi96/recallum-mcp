@@ -7,7 +7,8 @@ import random
 import re
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -78,6 +79,9 @@ class FakeEmbeddingClient:
         norm = math.sqrt(sum(x * x for x in vector)) or 1.0
         return [x / norm for x in vector]
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(t) for t in texts]
+
     async def is_available(self) -> bool:
         return self.available
 
@@ -94,6 +98,9 @@ class ScriptedEmbeddingClient:
         self.vectors = vectors
         self.available = available
         self.model = model
+        self.dimensions = (
+            len(next(iter(vectors.values()))) if vectors else 0
+        )
         self.embedded_texts: list[str] = []
 
     async def embed(self, text: str) -> list[float]:
@@ -104,6 +111,9 @@ class ScriptedEmbeddingClient:
             return list(self.vectors[text])
         except KeyError as exc:
             raise EmbeddingError(f"no scripted vector for {text!r}") from exc
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(t) for t in texts]
 
     async def is_available(self) -> bool:
         return self.available
@@ -162,6 +172,12 @@ class FakeMemoryRepository:
         self.last_graph_scalable: bool | None = None
         self.generations: dict[uuid.UUID, int] = {}
 
+    @asynccontextmanager
+    async def session_for(self, user_id: uuid.UUID) -> AsyncIterator[None]:
+        """Fake repositories have no real session; yield None so callers fall back."""
+        _ = user_id
+        yield None
+
     def _bump(self, user_id: uuid.UUID) -> None:
         self.generations[user_id] = self.generations.get(user_id, 0) + 1
 
@@ -203,7 +219,9 @@ class FakeMemoryRepository:
             for a in (memory.anchors or ())
         )
 
-    async def create_memory(self, user_id: uuid.UUID, **kwargs: Any) -> Memory:
+    async def create_memory(
+        self, user_id: uuid.UUID, *, session: Any | None = None, **kwargs: Any
+    ) -> Memory:
         scope = kwargs["scope"]
         project = kwargs["project"]
         digest = kwargs["content_hash"]
@@ -229,7 +247,11 @@ class FakeMemoryRepository:
                 and (existing.project or "") == (project or "")
                 and existing.content_hash == digest
             ):
-                raise IntegrityError("create_memory", {}, Exception("duplicate key"))
+                raise IntegrityError(
+                    "create_memory",
+                    {},
+                    Exception("uq_memories_active_dedup: duplicate key"),
+                )
         metadata = kwargs.pop("metadata", {})
         anchors = kwargs.pop("anchors", None) or ()
         memory = Memory(
@@ -258,7 +280,13 @@ class FakeMemoryRepository:
         return memory
 
     async def find_active_by_hash(
-        self, user_id: uuid.UUID, *, scope: str, project: str | None, content_hash: str
+        self,
+        user_id: uuid.UUID,
+        *,
+        scope: str,
+        project: str | None,
+        content_hash: str,
+        session: Any | None = None,
     ) -> Memory | None:
         for memory in self._active(user_id):
             if (
@@ -434,7 +462,7 @@ class FakeMemoryRepository:
         min_similarity: float,
         max_neighbours: int = 4,
         scalable_enabled: bool = False,
-        scalable_min_nodes: int = 2000,
+        scalable_min_nodes: int = 500,
     ) -> GraphSnapshot:
         rows = sorted(
             self._filtered(user_id, visibility, category),
@@ -594,6 +622,7 @@ class FakeMemoryRepository:
         min_similarity: float,
         limit: int,
         exclude_id: uuid.UUID | None = None,
+        session: Any | None = None,
     ) -> Sequence[ScoredMemory]:
         # Deliberately category-blind, matching the adapter: a near-duplicate
         # filed under another category is exactly what must surface. Only
@@ -679,7 +708,9 @@ class FakeMemoryRepository:
         self._bump(user_id)
         return replacement, [row.id for row in found]
 
-    async def mark_reconfirmed(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
+    async def mark_reconfirmed(
+        self, user_id: uuid.UUID, memory_id: uuid.UUID, session: Any | None = None
+    ) -> Memory | None:
         memory = self.rows.get(memory_id)
         if memory is None or memory.user_id != user_id or memory.is_deleted:
             return None
@@ -869,6 +900,7 @@ class FakeMemoryRepository:
         source_ref: str | None = None,
         set_source_ref: bool = False,
         kind: str | None = None,
+        session: Any | None = None,
     ) -> Memory | None:
         # Deliberately not gated on ``is_expired``: this is a keyed edit by
         # id, matching the adapter, so an expired row can still be reached to

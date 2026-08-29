@@ -14,7 +14,7 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -23,7 +23,7 @@ from recallum.db.readiness import DatabaseReadiness
 from recallum.db.repositories.memory_repo import ProfileGenerationConflict
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.limits import MemoryLimits
-from recallum.memory.schemas import RememberResult
+from recallum.memory.schemas import RememberBatchItem, RememberResult
 from recallum.memory.service import MemoryService
 
 pytestmark = pytest.mark.integration
@@ -216,13 +216,35 @@ async def test_supersession_links_replaced_memory_and_frees_its_content(containe
     assert reused.created is True
 
 
-async def test_remember_flags_a_similar_existing_memory(container):
-    """The write-time conflict signal, over real pgvector cosine distance."""
+async def test_remember_flags_a_similar_existing_memory(container, monkeypatch):
+    """The write-time conflict signal, over real pgvector cosine distance.
+
+    The stub embedder is content-hash seeded, so unrelated texts are never
+    close enough to exercise the advisory. Swap in a deterministic embedder
+    that maps both texts to the same vector, forcing a real near-duplicate
+    hit against pgvector, then assert the second write actually surfaces it.
+    """
     user_id = await _make_user_with_key(container, "similar@example.com")
     service = container.memory_service()
-    embedder = container.embedding_client()
 
-    embedder.vectors = {}
+    class _CloseEmbeddings:
+        dimensions = 768
+        model = "stub-embed"
+
+        async def embed(self, text: str) -> list[float]:
+            return self.vectors[text]
+
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [self.vectors[t] for t in texts]
+
+    vector = [1.0] + [0.0] * 767
+    fake = _CloseEmbeddings()
+    fake.vectors = {
+        "Deploys go out on fridays": vector,
+        "Deploys go out on tuesdays": vector,
+    }
+    monkeypatch.setattr(service, "_embeddings", fake)
+
     first = await service.remember(
         user_id, content="Deploys go out on fridays", category="decision"
     )
@@ -230,14 +252,56 @@ async def test_remember_flags_a_similar_existing_memory(container):
         user_id, content="Deploys go out on tuesdays", category="decision"
     )
 
-    # The fake embedder is content-hash seeded, so these two are not close;
-    # what must hold is that the check runs against pgvector without error and
-    # never silently resolves anything.
     assert second.created is True
     listed = await service.list_memories(user_id)
     assert len(listed.items) == 2
-    assert all(isinstance(s.similarity, float) for s in second.similar)
-    assert first.memory.id not in {s.id for s in second.similar} or second.similar
+    assert first.memory.id in {s.id for s in second.similar}
+
+
+async def test_remember_batch_shares_one_transaction(container):
+    """Per-item persistence runs in one shared transaction via savepoints.
+
+    The stub embedder has no database side effects, so counting SQLAlchemy
+    ``begin``/``begin_nested`` events isolates the persistence phase. Three
+    items must produce three savepoints (not three transactions) and the
+    profile rebuild stays outside the shared transaction.
+    """
+    user_id = await _make_user_with_key(container, "batch-tx@example.com")
+    service = container.memory_service()
+
+    engine = container.engine().sync_engine
+    begins = 0
+    nested = 0
+
+    def on_begin(conn):
+        nonlocal begins
+        begins += 1
+
+    def on_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        nonlocal nested
+        if str(statement).lstrip().upper().startswith("SAVEPOINT"):
+            nested += 1
+
+    event.listen(engine, "begin", on_begin)
+    event.listen(engine, "before_cursor_execute", on_before_cursor_execute)
+    try:
+        items = [
+            RememberBatchItem(content=f"batch fact {i}", category="fact", project="proj")
+            for i in range(3)
+        ]
+        result = await service.remember_batch(user_id, items=items)
+    finally:
+        event.remove(engine, "begin", on_begin)
+        event.remove(engine, "before_cursor_execute", on_before_cursor_execute)
+
+    assert result.failed == 0
+    assert result.stored == 3
+    # One shared persistence transaction, then three rebuild transactions
+    # (generation read, profile candidate list, profile upsert).
+    assert begins == 4
+    # Two savepoints per created item: one isolating the item write, one
+    # isolating the advisory similar check inside it.
+    assert nested == 6
 
 
 async def test_purge_can_hard_delete_a_replacement_without_stranding_its_ancestor(container):

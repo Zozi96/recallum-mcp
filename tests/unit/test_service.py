@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import ScoredMemory
@@ -63,6 +64,18 @@ async def test_remember_exact_duplicate_returns_existing():
     assert second.created is False
     assert second.memory.id == first.memory.id
     assert len(repo.rows) == 1
+
+
+async def test_remember_re_raises_non_dedup_integrity_error():
+    """Only the dedup index race is retried; other constraint violations propagate."""
+    service, repo, _ = make_service()
+
+    async def failing_create(*args, **kwargs):
+        raise IntegrityError("create_memory", {}, Exception("fk_user_id: foreign key violation"))
+
+    repo.create_memory = failing_create
+    with pytest.raises(IntegrityError, match="fk_user_id"):
+        await service.remember(USER, content="orphaned content", category="fact")
 
 
 async def test_remember_dedup_path_accumulates_reconfirm_count():
@@ -595,6 +608,21 @@ async def test_remember_batch_outcomes_carry_language_warning():
     assert result.failed == 0
     assert result.results[0].language_warning is not None
     assert result.results[1].language_warning is None
+
+
+async def test_remember_batch_embeds_unique_contents_once():
+    service, _, embedder = make_service()
+    items = [
+        RememberBatchItem(content="shared fact", category="fact"),
+        RememberBatchItem(content="shared fact", category="fact"),
+    ]
+    result = await service.remember_batch(USER, items=items)
+
+    assert embedder.embedded_texts == ["shared fact"]
+    assert len(result.results) == 2
+    assert result.stored == 1
+    assert result.deduplicated == 1
+    assert result.failed == 0
 
 
 async def test_update_content_supersedes_and_returns_a_new_memory():
@@ -1430,7 +1458,9 @@ async def test_memory_graph_scalable_is_deterministic():
 def test_memory_limits_scalable_graph_defaults_and_bounds():
     limits = MemoryLimits()
     assert limits.graph_scalable_enabled is False
-    assert limits.graph_scalable_min_nodes > limits.graph_max_nodes
+    assert limits.graph_scalable_min_nodes == 500
+    assert limits.graph_max_nodes == 1000
+    assert limits.graph_scalable_min_nodes < limits.graph_max_nodes
     with pytest.raises(ValidationError):
         MemoryLimits(graph_scalable_min_nodes=0)
     with pytest.raises(ValidationError):
@@ -2174,3 +2204,23 @@ async def test_remember_accepts_anchor_identifier_at_the_length_cap():
         anchors=[{"type": "symbol", "identifier": at_cap}],
     )
     assert result.memory.anchors == [Anchor(type="symbol", identifier=at_cap)]
+
+
+async def test_remember_batch_propagates_non_dedup_integrity_error():
+    """A non-dedup constraint violation must fail the whole batch, not one item."""
+    service, repo, _ = make_service()
+
+    async def failing_create(*args, **kwargs):
+        raise IntegrityError(
+            "create_memory",
+            {},
+            Exception("fk_user_id: foreign key violation"),
+        )
+
+    repo.create_memory = failing_create
+    items = [
+        RememberBatchItem(content="first", category="fact"),
+        RememberBatchItem(content="second", category="fact"),
+    ]
+    with pytest.raises(IntegrityError, match="fk_user_id"):
+        await service.remember_batch(USER, items=items)

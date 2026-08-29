@@ -171,8 +171,9 @@ class MemoryRepositoryContract:
     async def test_duplicate_active_create_raises_integrity_error(self, repo, user_id):
         kwargs = self._kwargs(content="exact duplicate", content_hash=_hash("exact"))
         await repo.create_memory(user_id, **kwargs)
-        with pytest.raises(IntegrityError):
+        with pytest.raises(IntegrityError) as exc_info:
             await repo.create_memory(user_id, **kwargs)
+        assert "uq_memories_active_dedup" in str(exc_info.value)
 
     async def test_find_active_by_hash_ignores_expired_rows(self, repo, user_id):
         digest = _hash("working memory")
@@ -297,6 +298,93 @@ class MemoryRepositoryContract:
         # not be misreported as either bucket, just excluded from "active".
         assert stats["superseded"] == 0
         assert stats["retired"] == 0
+
+    async def test_statistics_aggregates_match_python_reference(self, repo, user_id):
+        """All aggregation buckets are computed in SQL while preserving the
+        exact dict shape the in-memory adapter produces."""
+        first = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="project-decision",
+                content_hash=_hash("project-decision"),
+                scope="project",
+                project="p",
+                category="decision",
+                importance=7,
+            ),
+        )
+        second = await repo.supersede(
+            user_id,
+            first.id,
+            content="superseded project-decision",
+            content_hash=_hash("superseded project-decision"),
+            embedding=_embedding(43),
+            embedding_model="contract-embedding-model",
+            category=None,
+            importance=None,
+            metadata=None,
+            source_client=None,
+        )
+        assert second is not None
+
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="global-fact",
+                content_hash=_hash("global-fact"),
+                scope="global",
+                category="fact",
+                importance=5,
+            ),
+        )
+
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="expired",
+                content_hash=_hash("expired"),
+                expires_at=past,
+            ),
+        )
+
+        to_delete = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="retired-preference",
+                content_hash=_hash("retired-preference"),
+                scope="global",
+                category="preference",
+                importance=3,
+            ),
+        )
+        await repo.soft_delete(user_id, to_delete.id)
+
+        stats = await repo.statistics(user_id)
+        assert stats["active"] == 2
+        assert stats["superseded"] == 1
+        assert stats["retired"] == 1
+        assert stats["by_category"] == {"decision": 1, "fact": 1}
+        assert stats["by_scope"] == {"project": 1, "global": 1}
+        assert stats["by_project"] == {"p": 1, "none": 1}
+        assert stats["by_importance"] == {"7": 1, "5": 1}
+        assert sum(stats["created_by_day"].values()) == 5
+        assert len(stats["created_by_day"]) == 1
+
+        from recallum.config import EMBEDDING_DIMENSIONS
+
+        contents = [
+            "project-decision",
+            "superseded project-decision",
+            "global-fact",
+            "expired",
+            "retired-preference",
+        ]
+        expected_volume = (
+            sum(len(c.encode("utf-8")) for c in contents)
+            + len(contents) * EMBEDDING_DIMENSIONS * 4
+        )
+        assert stats["volume_bytes"] == expected_volume
 
     # -- list_active ---------------------------------------------------
 

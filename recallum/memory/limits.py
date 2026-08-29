@@ -35,14 +35,14 @@ class MemoryLimits(BaseModel):
     # Scalable edge strategy: when ``graph_scalable_enabled`` is set, or the
     # active node count exceeds ``graph_scalable_min_nodes`` (strict ``>``),
     # graph edges come from a single bounded per-node kNN query over the
-    # selected subset instead of the pairwise O(n²) self-join. Both mechanisms
-    # are independent and default off: the flag ships unset and the threshold
-    # default sits above the default ``graph_max_nodes`` ceiling, so a typical
-    # deployment keeps the pairwise path. Routing uses the uncapped active
-    # count, so a user with more actives than ``graph_max_nodes`` (default
-    # 1000, max 2000) can still auto-route even with the flag off.
+    # selected subset instead of the pairwise O(n²) self-join. Routing uses the
+    # uncapped active count, so a user with more actives than ``graph_max_nodes``
+    # (default 1000, max 2000) can still auto-route even with the flag off.
+    # The threshold default is below ``graph_max_nodes`` so the bounded kNN path
+    # replaces the quadratic self-join before the selected subset reaches the
+    # hard ceiling.
     graph_scalable_enabled: bool = Field(default=False)
-    graph_scalable_min_nodes: int = Field(default=2000, gt=0)
+    graph_scalable_min_nodes: int = Field(default=500, gt=0)
 
     max_content_chars: int = Field(default=4000, gt=0)
     max_project_chars: int = Field(default=200, gt=0)

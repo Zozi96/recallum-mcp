@@ -14,7 +14,8 @@ from tests.fakes import FakeDatabaseReadiness, build_test_container
 
 
 def _app_with_users():
-    container, fakes = build_test_container()
+    settings = Settings(auth={"identity_cache_seconds": 0.0})
+    container, fakes = build_test_container(settings=settings)
     service = container.api_key_service()
     admin = asyncio.run(service.create_user("admin@example.com"))
     ordinary = asyncio.run(service.create_user("ordinary@example.com"))
@@ -22,7 +23,7 @@ def _app_with_users():
     asyncio.run(container.password_service().set_password(admin, "admin password"))
     asyncio.run(container.password_service().set_password(ordinary, "user password"))
     container.database_readiness.override(providers.Object(FakeDatabaseReadiness(True)))
-    return create_app(Settings(), container), container, fakes, admin, ordinary
+    return create_app(settings, container), container, fakes, admin, ordinary
 
 
 def _login(client: TestClient, email: str, password: str) -> None:

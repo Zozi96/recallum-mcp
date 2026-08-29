@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import cast, func, literal, or_, select, text, true, update
+from sqlalchemy import Date, String, cast, func, literal, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -285,6 +286,17 @@ class MemoryRepository:
     def __init__(self, sessions: SessionProvider) -> None:
         self._sessions = sessions
 
+    @asynccontextmanager
+    async def session_for(self, user_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
+        """Yield one user-scoped session for the caller to own.
+
+        Callers that pass the session through to the statement methods below
+        keep everything in a single transaction; call methods without a session
+        to let each method open and close its own transaction as before.
+        """
+        async with self._sessions.for_user(user_id) as session:
+            yield session
+
     @staticmethod
     async def _increment_generation(session: AsyncSession, user_id: uuid.UUID) -> None:
         await session.execute(
@@ -353,54 +365,129 @@ class MemoryRepository:
     async def statistics(self, user_id: uuid.UUID) -> dict[str, Any]:
         """Derive per-user aggregates in one forced-RLS transaction."""
         async with self._sessions.for_user(user_id) as session:
-            rows = (
-                await session.execute(
-                    select(
-                        Memory.category,
-                        Memory.scope,
-                        Memory.project,
-                        Memory.importance,
-                        Memory.created_at,
-                        Memory.content,
-                        Memory.deleted_at,
-                        Memory.superseded_by,
-                        Memory.expires_at,
-                    ).where(Memory.user_id == user_id)
-                )
-            ).all()
-        # ``rows`` intentionally keeps every row (active, retired, superseded,
-        # expired) so the counts below can account for all of them; only the
-        # "active" bucket additionally excludes rows that have expired -- an
-        # expired-but-undeleted row is exactly as invisible here as it is on
-        # every other read surface.
-        now = datetime.now(UTC)
-        active = [
-            row
-            for row in rows
-            if row.deleted_at is None and (row.expires_at is None or row.expires_at > now)
-        ]
+            user_filter = Memory.user_id == user_id
+            active_filter = [user_filter, Memory.deleted_at.is_(None), _not_expired()]
 
-        def counts(values: Sequence[Any]) -> dict[str, int]:
-            result: dict[str, int] = {}
-            for value in values:
-                key = str(value) if value is not None else "none"
-                result[key] = result.get(key, 0) + 1
-            return result
+            active = (
+                await session.execute(
+                    select(func.count()).select_from(Memory).where(*active_filter)
+                )
+            ).scalar_one()
+
+            superseded = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(user_filter, Memory.superseded_by.is_not(None))
+                )
+            ).scalar_one()
+
+            retired = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(
+                        user_filter,
+                        Memory.deleted_at.is_not(None),
+                        Memory.superseded_by.is_(None),
+                    )
+                )
+            ).scalar_one()
+
+            category_key = func.coalesce(Memory.category, "none")
+            by_category = dict(
+                (
+                    await session.execute(
+                        select(category_key, func.count())
+                        .select_from(Memory)
+                        .where(*active_filter)
+                        .group_by(category_key)
+                    )
+                ).all()
+            )
+
+            scope_key = func.coalesce(Memory.scope, "none")
+            by_scope = dict(
+                (
+                    await session.execute(
+                        select(scope_key, func.count())
+                        .select_from(Memory)
+                        .where(*active_filter)
+                        .group_by(scope_key)
+                    )
+                ).all()
+            )
+
+            project_key = func.coalesce(Memory.project, "none")
+            by_project = dict(
+                (
+                    await session.execute(
+                        select(project_key, func.count())
+                        .select_from(Memory)
+                        .where(*active_filter)
+                        .group_by(project_key)
+                    )
+                ).all()
+            )
+
+            importance_key = func.coalesce(cast(Memory.importance, String), "none")
+            by_importance = dict(
+                (
+                    await session.execute(
+                        select(importance_key, func.count())
+                        .select_from(Memory)
+                        .where(*active_filter)
+                        .group_by(importance_key)
+                    )
+                ).all()
+            )
+
+            day = cast(
+                func.date_trunc(
+                    literal("day"), func.timezone(literal("UTC"), Memory.created_at)
+                ),
+                Date,
+            ).label("day")
+            created_by_day = {
+                day.isoformat(): count
+                for day, count in (
+                    await session.execute(
+                        select(day, func.count())
+                        .select_from(Memory)
+                        .where(user_filter)
+                        .group_by(day)
+                    )
+                ).all()
+            }
+
+            volume_bytes = int(
+                (
+                    await session.execute(
+                        select(
+                            func.coalesce(
+                                func.sum(
+                                    func.octet_length(Memory.content)
+                                    + EMBEDDING_DIMENSIONS * 4
+                                ),
+                                0,
+                            )
+                        )
+                        .select_from(Memory)
+                        .where(user_filter)
+                    )
+                ).scalar_one()
+            )
 
         return {
-            "active": len(active),
-            "superseded": sum(row.superseded_by is not None for row in rows),
-            "retired": sum(
-                row.deleted_at is not None and row.superseded_by is None for row in rows
-            ),
-            "by_category": counts([row.category for row in active]),
-            "by_scope": counts([row.scope for row in active]),
-            "by_project": counts([row.project for row in active]),
-            "by_importance": counts([row.importance for row in active]),
-            "created_by_day": counts([row.created_at.date().isoformat() for row in rows]),
-            "volume_bytes": sum(
-                len(row.content.encode("utf-8")) + EMBEDDING_DIMENSIONS * 4 for row in rows
-            ),
+            "active": active,
+            "superseded": superseded,
+            "retired": retired,
+            "by_category": by_category,
+            "by_scope": by_scope,
+            "by_project": by_project,
+            "by_importance": by_importance,
+            "created_by_day": created_by_day,
+            "volume_bytes": volume_bytes,
         }
 
     async def has_model_mismatch(self, user_id: uuid.UUID, model: str) -> bool:
@@ -516,6 +603,73 @@ class MemoryRepository:
             )
             return result.rowcount == 1
 
+    async def _create_memory_in_session(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        *,
+        scope: str,
+        project: str | None,
+        category: str,
+        content: str,
+        content_hash: str,
+        embedding: list[float],
+        embedding_model: str | None,
+        importance: int,
+        source_client: str | None,
+        metadata: dict[str, Any],
+        memory_id: uuid.UUID | None = None,
+        expires_at: datetime | None = None,
+        source_type: str = "unknown",
+        source_ref: str | None = None,
+        kind: str | None = None,
+        anchors: Sequence[Mapping[str, str]] | None = None,
+    ) -> Memory:
+        await session.execute(
+            update(Memory)
+            .where(
+                Memory.user_id == user_id,
+                Memory.scope == scope,
+                func.coalesce(Memory.project, "") == (project or ""),
+                Memory.content_hash == content_hash,
+                Memory.deleted_at.is_(None),
+                Memory.expires_at.is_not(None),
+                Memory.expires_at <= func.now(),
+            )
+            .values(deleted_at=func.now())
+        )
+        memory = Memory(
+            user_id=user_id,
+            scope=scope,
+            project=project,
+            category=category,
+            kind=kind,
+            content=content,
+            content_hash=content_hash,
+            embedding=embedding,
+            embedding_model=embedding_model,
+            importance=importance,
+            source_client=source_client,
+            source_type=source_type,
+            source_ref=source_ref,
+            metadata_=metadata,
+            expires_at=expires_at,
+            anchors=[
+                MemoryAnchor(anchor_type=anchor["type"], identifier=anchor["identifier"])
+                for anchor in (anchors or ())
+            ],
+        )
+        if memory_id is not None:
+            memory.id = memory_id
+        session.add(memory)
+        await session.flush()
+        await self._increment_generation(session, user_id)
+        # Only ``created_at`` is server-generated and actually read back.
+        # A bare refresh() would re-select the 768-dimension vector that
+        # was just written, plus the generated tsvector nobody reads.
+        await session.refresh(memory, attribute_names=["created_at"])
+        return memory
+
     async def create_memory(
         self,
         user_id: uuid.UUID,
@@ -536,6 +690,7 @@ class MemoryRepository:
         source_ref: str | None = None,
         kind: str | None = None,
         anchors: Sequence[Mapping[str, str]] | None = None,
+        session: AsyncSession | None = None,
     ) -> Memory:
         """Insert a memory. Raises IntegrityError on exact active duplicate.
 
@@ -555,51 +710,72 @@ class MemoryRepository:
         same transaction: it was already invisible to every read, and this
         just makes that permanent for the one row about to be replaced.
         """
-        async with self._sessions.for_user(user_id) as session:
-            await session.execute(
-                update(Memory)
-                .where(
-                    Memory.user_id == user_id,
-                    Memory.scope == scope,
-                    func.coalesce(Memory.project, "") == (project or ""),
-                    Memory.content_hash == content_hash,
-                    Memory.deleted_at.is_(None),
-                    Memory.expires_at.is_not(None),
-                    Memory.expires_at <= func.now(),
-                )
-                .values(deleted_at=func.now())
-            )
-            memory = Memory(
-                user_id=user_id,
+        if session is not None:
+            return await self._create_memory_in_session(
+                session,
+                user_id,
                 scope=scope,
                 project=project,
                 category=category,
-                kind=kind,
                 content=content,
                 content_hash=content_hash,
                 embedding=embedding,
                 embedding_model=embedding_model,
                 importance=importance,
                 source_client=source_client,
+                metadata=metadata,
+                memory_id=memory_id,
+                expires_at=expires_at,
                 source_type=source_type,
                 source_ref=source_ref,
-                metadata_=metadata,
-                expires_at=expires_at,
-                anchors=[
-                    MemoryAnchor(anchor_type=anchor["type"], identifier=anchor["identifier"])
-                    for anchor in (anchors or ())
-                ],
+                kind=kind,
+                anchors=anchors,
             )
-            if memory_id is not None:
-                memory.id = memory_id
-            session.add(memory)
-            await session.flush()
-            await self._increment_generation(session, user_id)
-            # Only ``created_at`` is server-generated and actually read back.
-            # A bare refresh() would re-select the 768-dimension vector that
-            # was just written, plus the generated tsvector nobody reads.
-            await session.refresh(memory, attribute_names=["created_at"])
-            return memory
+        async with self._sessions.for_user(user_id) as session:
+            return await self._create_memory_in_session(
+                session,
+                user_id,
+                scope=scope,
+                project=project,
+                category=category,
+                content=content,
+                content_hash=content_hash,
+                embedding=embedding,
+                embedding_model=embedding_model,
+                importance=importance,
+                source_client=source_client,
+                metadata=metadata,
+                memory_id=memory_id,
+                expires_at=expires_at,
+                source_type=source_type,
+                source_ref=source_ref,
+                kind=kind,
+                anchors=anchors,
+            )
+
+    async def _find_active_by_hash_in_session(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        *,
+        scope: str,
+        project: str | None,
+        content_hash: str,
+    ) -> Memory | None:
+        stmt = (
+            select(Memory)
+            .options(*_light())
+            .where(
+                Memory.user_id == user_id,
+                Memory.scope == scope,
+                func.coalesce(Memory.project, "") == (project or ""),
+                Memory.content_hash == content_hash,
+                Memory.deleted_at.is_(None),
+                _not_expired(),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
 
     async def find_active_by_hash(
         self,
@@ -608,6 +784,7 @@ class MemoryRepository:
         scope: str,
         project: str | None,
         content_hash: str,
+        session: AsyncSession | None = None,
     ) -> Memory | None:
         """Return the active, non-expired memory matching the dedup key, if any.
 
@@ -615,21 +792,14 @@ class MemoryRepository:
         re-remembering the same content, so a repeat of expired working memory
         creates a fresh row instead of silently reviving the stale one.
         """
-        async with self._sessions.for_user(user_id) as session:
-            stmt = (
-                select(Memory)
-                .options(*_light())
-                .where(
-                    Memory.user_id == user_id,
-                    Memory.scope == scope,
-                    func.coalesce(Memory.project, "") == (project or ""),
-                    Memory.content_hash == content_hash,
-                    Memory.deleted_at.is_(None),
-                    _not_expired(),
-                )
-                .limit(1)
+        if session is not None:
+            return await self._find_active_by_hash_in_session(
+                session, user_id, scope=scope, project=project, content_hash=content_hash
             )
-            return (await session.execute(stmt)).scalar_one_or_none()
+        async with self._sessions.for_user(user_id) as session:
+            return await self._find_active_by_hash_in_session(
+                session, user_id, scope=scope, project=project, content_hash=content_hash
+            )
 
     async def get_active(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
         async with self._sessions.for_user(user_id) as session:
@@ -694,7 +864,7 @@ class MemoryRepository:
         min_similarity: float,
         max_neighbours: int = 4,
         scalable_enabled: bool = False,
-        scalable_min_nodes: int = 2000,
+        scalable_min_nodes: int = 500,
     ) -> GraphSnapshot:
         """Select bounded active nodes and comparable semantic pairs under RLS.
 
@@ -1137,6 +1307,48 @@ class MemoryRepository:
             )
             return (await session.execute(stmt)).scalars().all()
 
+    async def _similar_active_in_session(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        embedding_model: str,
+        scope: str,
+        project: str | None,
+        min_similarity: float,
+        limit: int,
+        exclude_id: uuid.UUID | None = None,
+    ) -> Sequence[ScoredMemory]:
+        await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+        distance = Memory.embedding.cosine_distance(embedding)
+        score = (literal(1.0) - distance).label("score")
+        filters = [
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+            _not_expired(),
+            Memory.scope == scope,
+            func.coalesce(Memory.project, "") == (project or ""),
+            or_(
+                Memory.embedding_model.is_(None),
+                Memory.embedding_model == embedding_model,
+            ),
+            distance <= (1.0 - min_similarity),
+        ]
+        if exclude_id is not None:
+            filters.append(Memory.id != exclude_id)
+        stmt = (
+            select(Memory, score)
+            .options(*_light())
+            .where(*filters)
+            .order_by(distance)
+            .limit(limit)
+        )
+        return [
+            ScoredMemory(memory=row.Memory, score=float(row.score))
+            for row in (await session.execute(stmt)).all()
+        ]
+
     async def similar_active(
         self,
         user_id: uuid.UUID,
@@ -1148,6 +1360,7 @@ class MemoryRepository:
         min_similarity: float,
         limit: int,
         exclude_id: uuid.UUID | None = None,
+        session: AsyncSession | None = None,
     ) -> Sequence[ScoredMemory]:
         """Active memories close enough to ``embedding`` to be about the same thing.
 
@@ -1163,35 +1376,90 @@ class MemoryRepository:
         compared: the probe vector just came from that model, and distances
         into another model's space would report noise as subject overlap.
         """
+        if session is not None:
+            return await self._similar_active_in_session(
+                session,
+                user_id,
+                embedding,
+                embedding_model=embedding_model,
+                scope=scope,
+                project=project,
+                min_similarity=min_similarity,
+                limit=limit,
+                exclude_id=exclude_id,
+            )
         async with self._sessions.for_user(user_id) as session:
-            await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
-            distance = Memory.embedding.cosine_distance(embedding)
-            score = (literal(1.0) - distance).label("score")
-            filters = [
+            return await self._similar_active_in_session(
+                session,
+                user_id,
+                embedding,
+                embedding_model=embedding_model,
+                scope=scope,
+                project=project,
+                min_similarity=min_similarity,
+                limit=limit,
+                exclude_id=exclude_id,
+            )
+
+    async def _update_attributes_in_session(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        *,
+        importance: int | None,
+        category: str | None,
+        metadata: dict[str, Any] | None,
+        expires_at: datetime | None = None,
+        clear_expires_at: bool = False,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        set_source_ref: bool = False,
+        kind: str | None = None,
+    ) -> Memory | None:
+        stmt = (
+            select(Memory)
+            .options(*_light())
+            .where(
+                Memory.id == memory_id,
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
-                _not_expired(),
-                Memory.scope == scope,
-                func.coalesce(Memory.project, "") == (project or ""),
-                or_(
-                    Memory.embedding_model.is_(None),
-                    Memory.embedding_model == embedding_model,
-                ),
-                distance <= (1.0 - min_similarity),
-            ]
-            if exclude_id is not None:
-                filters.append(Memory.id != exclude_id)
-            stmt = (
-                select(Memory, score)
-                .options(*_light())
-                .where(*filters)
-                .order_by(distance)
-                .limit(limit)
             )
-            return [
-                ScoredMemory(memory=row.Memory, score=float(row.score))
-                for row in (await session.execute(stmt)).all()
-            ]
+            .with_for_update()
+        )
+        memory = (await session.execute(stmt)).scalar_one_or_none()
+        if memory is None:
+            return None
+        if importance is not None:
+            memory.importance = importance
+        if category is not None:
+            memory.category = category
+        if metadata is not None:
+            memory.metadata_ = metadata
+        if clear_expires_at:
+            memory.expires_at = None
+        elif expires_at is not None:
+            memory.expires_at = expires_at
+        if source_type is not None:
+            memory.source_type = source_type
+        if set_source_ref:
+            memory.source_ref = source_ref
+        if kind is not None:
+            memory.kind = kind
+        if memory.kind == "todo" and memory.expires_at is None:
+            raise TodoRequiresTtlError(
+                "kind='todo' requires a TTL; declare ttl_seconds or keep an existing expiry"
+            )
+        if (
+            any(value is not None for value in (importance, category, metadata, expires_at))
+            or clear_expires_at
+            or source_type is not None
+            or set_source_ref
+            or kind is not None
+        ):
+            await self._increment_generation(session, user_id)
+        await session.flush()
+        return memory
 
     async def update_attributes(
         self,
@@ -1207,6 +1475,7 @@ class MemoryRepository:
         source_ref: str | None = None,
         set_source_ref: bool = False,
         kind: str | None = None,
+        session: AsyncSession | None = None,
     ) -> Memory | None:
         """Change what a memory is filed under, not what it claims.
 
@@ -1224,50 +1493,36 @@ class MemoryRepository:
         or inherited) would be ``todo`` with no expiry -- checked against this
         edit's own expiry change if any, else the row's already-carried one.
         """
-        async with self._sessions.for_user(user_id) as session:
-            stmt = (
-                select(Memory)
-                .options(*_light())
-                .where(
-                    Memory.id == memory_id,
-                    Memory.user_id == user_id,
-                    Memory.deleted_at.is_(None),
-                )
-                .with_for_update()
+        if session is not None:
+            return await self._update_attributes_in_session(
+                session,
+                user_id,
+                memory_id,
+                importance=importance,
+                category=category,
+                metadata=metadata,
+                expires_at=expires_at,
+                clear_expires_at=clear_expires_at,
+                source_type=source_type,
+                source_ref=source_ref,
+                set_source_ref=set_source_ref,
+                kind=kind,
             )
-            memory = (await session.execute(stmt)).scalar_one_or_none()
-            if memory is None:
-                return None
-            if importance is not None:
-                memory.importance = importance
-            if category is not None:
-                memory.category = category
-            if metadata is not None:
-                memory.metadata_ = metadata
-            if clear_expires_at:
-                memory.expires_at = None
-            elif expires_at is not None:
-                memory.expires_at = expires_at
-            if source_type is not None:
-                memory.source_type = source_type
-            if set_source_ref:
-                memory.source_ref = source_ref
-            if kind is not None:
-                memory.kind = kind
-            if memory.kind == "todo" and memory.expires_at is None:
-                raise TodoRequiresTtlError(
-                    "kind='todo' requires a TTL; declare ttl_seconds or keep an existing expiry"
-                )
-            if (
-                any(value is not None for value in (importance, category, metadata, expires_at))
-                or clear_expires_at
-                or source_type is not None
-                or set_source_ref
-                or kind is not None
-            ):
-                await self._increment_generation(session, user_id)
-            await session.flush()
-            return memory
+        async with self._sessions.for_user(user_id) as session:
+            return await self._update_attributes_in_session(
+                session,
+                user_id,
+                memory_id,
+                importance=importance,
+                category=category,
+                metadata=metadata,
+                expires_at=expires_at,
+                clear_expires_at=clear_expires_at,
+                source_type=source_type,
+                source_ref=source_ref,
+                set_source_ref=set_source_ref,
+                kind=kind,
+            )
 
     async def supersede(
         self,
@@ -1479,7 +1734,38 @@ class MemoryRepository:
             await session.refresh(replacement, attribute_names=["created_at"])
             return replacement, [row.id for row in rows]
 
-    async def mark_reconfirmed(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
+    async def _mark_reconfirmed_in_session(
+        self, session: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID
+    ) -> Memory | None:
+        result = await session.execute(
+            update(Memory)
+            .where(
+                Memory.id == memory_id,
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+            )
+            .values(
+                reconfirmed_at=func.now(),
+                reconfirm_count=Memory.reconfirm_count + 1,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self._increment_generation(session, user_id)
+        return (
+            await session.execute(
+                select(Memory)
+                .options(*_light())
+                .where(Memory.id == memory_id, Memory.user_id == user_id)
+            )
+        ).scalar_one_or_none()
+
+    async def mark_reconfirmed(
+        self,
+        user_id: uuid.UUID,
+        memory_id: uuid.UUID,
+        session: AsyncSession | None = None,
+    ) -> Memory | None:
         """Stamp ``reconfirmed_at`` on an active memory and return the fresh row.
 
         Called when identical content is re-stored: the claim was just observed
@@ -1488,29 +1774,10 @@ class MemoryRepository:
         kept separate from serve counts. Returns ``None`` for unknown, foreign
         or retired ids.
         """
+        if session is not None:
+            return await self._mark_reconfirmed_in_session(session, user_id, memory_id)
         async with self._sessions.for_user(user_id) as session:
-            result = await session.execute(
-                update(Memory)
-                .where(
-                    Memory.id == memory_id,
-                    Memory.user_id == user_id,
-                    Memory.deleted_at.is_(None),
-                )
-                .values(
-                    reconfirmed_at=func.now(),
-                    reconfirm_count=Memory.reconfirm_count + 1,
-                )
-            )
-            if result.rowcount != 1:
-                return None
-            await self._increment_generation(session, user_id)
-            return (
-                await session.execute(
-                    select(Memory)
-                    .options(*_light())
-                    .where(Memory.id == memory_id, Memory.user_id == user_id)
-                )
-            ).scalar_one_or_none()
+            return await self._mark_reconfirmed_in_session(session, user_id, memory_id)
 
     async def mark_recalled(self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]) -> None:
         """Record that these memories matched a ``recall`` query.

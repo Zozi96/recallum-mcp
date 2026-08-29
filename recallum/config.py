@@ -86,9 +86,11 @@ class AuthSettings(BaseModel):
     key_entropy_bytes: int = Field(default=32, ge=16, le=64)
     # Seconds a successful authentication is reused before PostgreSQL is asked
     # again, saving a round trip on every tool call. This is also exactly the
-    # worst-case delay before a revoked key stops working, so it defaults to 0
-    # (no caching, revocation is immediate) and is capped at five minutes.
-    identity_cache_seconds: float = Field(default=0.0, ge=0.0, le=300.0)
+    # worst-case delay before a revoked key stops working, so it is capped at
+    # five minutes. The default (5s) removes one authentication query per MCP
+    # tool call burst while keeping the revocation window small; set it to 0 to
+    # restore immediate revocation at the cost of a database hit on every call.
+    identity_cache_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
 
 
 class TelemetrySettings(BaseModel):

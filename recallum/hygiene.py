@@ -35,7 +35,7 @@ DEFAULT_MAX_MEMORIES = 500
 # UNCAPPED active-memory total against graph_scalable_min_nodes (see
 # _scalable_edges_enabled in memory_repo.py) -- not by the capped selection
 # this module requests. A user with more than graph_scalable_min_nodes active
-# memories (default 2000) silently gets the kNN path even though this module
+# memories (default 500) silently gets the kNN path even though this module
 # only ever asks for DEFAULT_MAX_MEMORIES (500) of them, and that path keeps
 # only each node's strongest DEFAULT_MAX_NEIGHBOURS matches, so a weak edge
 # of a busy node past its top-20 can be missed. The report stays bounded and

@@ -27,13 +27,11 @@ logger = logging.getLogger("recallum.auth")
 LAST_USED_REFRESH_INTERVAL = timedelta(seconds=60)
 
 # How long a successful authentication may be reused without asking PostgreSQL
-# again. Disabled by default: this is a security parameter before it is a
-# performance one, and the default must not quietly trade away the property
-# that revoking a key stops it on the very next call. Operators who would
-# rather spend that guarantee on a saved round trip per tool call opt in with
-# ``RECALLUM__AUTH__IDENTITY_CACHE_SECONDS``, accepting a revocation window of
-# exactly that many seconds.
-IDENTITY_CACHE_TTL = timedelta(0)
+# again. Defaults to five seconds: a small window that still removes the
+# per-call database round trip for a busy agent while keeping the revocation
+# window small. Set ``RECALLUM__AUTH__IDENTITY_CACHE_SECONDS`` to 0 to restore
+# immediate revocation at the cost of a database hit on every call.
+IDENTITY_CACHE_TTL = timedelta(seconds=5)
 
 # Only successful authentications are cached, so the ceiling is the number of
 # real, valid keys rather than anything an unauthenticated caller controls. It
@@ -53,11 +51,10 @@ class TokenAuthenticator:
     checkout, a transaction and a query — against a pool of five, before the
     call's own work starts — so caching removes a round trip from the hot path.
 
-    It is off by default because the price is paid in a different currency:
-    a key revoked through the admin CLI keeps working until its entry expires,
-    and since the cache lives in the process, each worker expires on its own
-    schedule. That turns revocation from immediate into eventually-consistent,
-    which is a call for whoever runs the server, not a default worth assuming.
+    It defaults to five seconds, a small window that removes the per-call
+    database round trip for a busy agent while keeping the revocation window
+    small. Set the TTL to zero to restore immediate revocation at the cost of
+    a database hit on every call.
 
     Failures are never cached, so an unknown, malformed or already-revoked
     token always reaches the database and always fails closed. Only the window
