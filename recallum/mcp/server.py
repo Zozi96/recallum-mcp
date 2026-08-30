@@ -278,9 +278,12 @@ def build_mcp_server(container: Container) -> FastMCP:
         typo-tolerant trigram leg, fused. Passing project includes that
         project's memories plus the user's global ones; scope narrows to
         exactly 'global' or 'project'. When embeddings are unavailable the
-        result mode is 'degraded_textual' (lexical legs only). ``limit`` and
-        ``max_tokens`` are maxima: the result may be shorter when few
-        memories meet the server's retrieval evidence floor.
+        result mode is 'degraded_textual' (lexical legs only). ``limit``
+        and ``max_tokens`` are maxima: the result may be shorter than
+        requested. They do not mean every served memory met a calibrated
+        utility floor; lexical hits and weak vector neighbours can still
+        appear. The optional vector cosine floor is server-side only, not
+        an argument of this tool.
 
         Optional ``max_tokens`` packs by a local estimate (not the client
         model tokenizer). Optional ``strategy`` reorders fused hits by
@@ -334,13 +337,15 @@ def build_mcp_server(container: Container) -> FastMCP:
         with get_memory. Profile-only reads can use the recallum://profile
         resource instead.
 
-        Optional ``max_items`` / ``max_tokens`` are maxima: focus admission
-        may yield fewer categorized items than the budget. Optional
-        ``max_tokens`` / ``strategy`` apply to the categorized
-        remainder only (profile stays reserved). Token counts are a local
-        estimate, not the client model tokenizer. Optional `kind` narrows the
-        categorized groups and any `focus` match to that coding facet; the
-        always-on `profile` block is unaffected by it.
+        Optional ``max_items`` / ``max_tokens`` are maxima: the
+        categorized slice may be shorter than the budget. Focus uses
+        the same hybrid retrieval as recall and does not promise a
+        calibrated utility floor. Optional ``max_tokens`` / ``strategy``
+        apply to the categorized remainder only (profile stays reserved).
+        Token counts are a local estimate, not the client model tokenizer.
+        Optional `kind` narrows the categorized groups and any `focus`
+        match to that coding facet; the always-on `profile` block is
+        unaffected by it.
         """
         return await memory_service().context(
             require_identity().user_id,
