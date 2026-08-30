@@ -509,7 +509,8 @@ BASELINE_TOPK = (
     Path(__file__).resolve().parents[2]
     / "openspec"
     / "changes"
-    / "recalibrate-memory-admission-default"
+    / "archive"
+    / "2026-08-30-recalibrate-memory-admission-default"
     / "baseline-topk.json"
 )
 
