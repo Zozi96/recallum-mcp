@@ -1,0 +1,454 @@
+{
+  "source": "2026-08-30 throwaway pgvector/pg17 + Ollama embeddinggemma:300m, Vmin unset, k=10, fusion defaults",
+  "k": 10,
+  "queries": [
+    {
+      "query": "which package manager should I use",
+      "tag": "semantic",
+      "returned": [
+        "pnpm",
+        "pnpm-ci",
+        "yarn-legacy",
+        "en-review-hotfix",
+        "db",
+        "deploy",
+        "tests",
+        "es-docs",
+        "fix-branch-retired",
+        "deploy-volume"
+      ]
+    },
+    {
+      "query": "where do production releases happen",
+      "tag": "semantic",
+      "returned": [
+        "en-retention-metrics",
+        "en-staging-prod-snap",
+        "en-oncall-weekend",
+        "tz",
+        "en-staging",
+        "deploy",
+        "tests",
+        "es-docs-runbooks",
+        "deploy-volume",
+        "auth-rotate"
+      ]
+    },
+    {
+      "query": "how are credentials protected",
+      "tag": "semantic",
+      "returned": [
+        "auth",
+        "auth-rotate",
+        "sessionprovider",
+        "tz",
+        "auth-v1-plaintext",
+        "tests",
+        "en-retention",
+        "deploy",
+        "en-review",
+        "feat-jira"
+      ]
+    },
+    {
+      "query": "what produces the embedding vectors",
+      "tag": "semantic",
+      "returned": [
+        "ollama",
+        "ollama-dims",
+        "openai-embed-retired",
+        "db",
+        "deploy",
+        "mysql-analytics",
+        "pnpm",
+        "deploy-volume",
+        "en-staging-prod-snap",
+        "en-staging"
+      ]
+    },
+    {
+      "query": "time zone handling rules",
+      "tag": "semantic",
+      "returned": [
+        "tz-warehouse-local",
+        "en-review-history",
+        "tz",
+        "auth-rotate",
+        "tz-ui",
+        "en-review",
+        "session-idle",
+        "sessionprovider",
+        "en-staging-window",
+        "es-soporte-tz"
+      ]
+    },
+    {
+      "query": "pgvector",
+      "tag": "exact",
+      "returned": [
+        "db",
+        "mysql-analytics",
+        "ollama-dims",
+        "es-docs-tu",
+        "deploy-volume",
+        "pnpm",
+        "ollama",
+        "tz",
+        "deploy",
+        "auth-rotate"
+      ]
+    },
+    {
+      "query": "ruff line length",
+      "tag": "exact",
+      "returned": [
+        "lint",
+        "ruff-ci",
+        "auth-rotate",
+        "en-retention",
+        "en-review",
+        "yarn-legacy",
+        "pnpm",
+        "db",
+        "en-review-drafts",
+        "en-retention-metrics"
+      ]
+    },
+    {
+      "query": "feat branch naming",
+      "tag": "exact",
+      "returned": [
+        "branch",
+        "feat-jira",
+        "fix-branch-retired",
+        "en-review",
+        "pnpm",
+        "db",
+        "deploy",
+        "tests",
+        "ruff-ci",
+        "yarn-legacy"
+      ]
+    },
+    {
+      "query": "postgersql database",
+      "tag": "typo",
+      "returned": [
+        "db",
+        "tz",
+        "deploy-volume",
+        "auth-rotate",
+        "mysql-analytics",
+        "pnpm",
+        "en-staging",
+        "en-retention",
+        "tz-warehouse-local",
+        "tests"
+      ]
+    },
+    {
+      "query": "pnmp packages",
+      "tag": "typo",
+      "returned": [
+        "pnpm",
+        "yarn-legacy",
+        "deploy",
+        "pnpm-ci",
+        "tests",
+        "db",
+        "deploy-volume",
+        "mysql-analytics",
+        "en-review",
+        "pnpm-history"
+      ]
+    },
+    {
+      "query": "SessionProvider",
+      "tag": "identifier",
+      "returned": [
+        "session-global-neg",
+        "sessionprovider",
+        "session-idle",
+        "pnpm",
+        "tz",
+        "auth-rotate",
+        "deploy",
+        "tests",
+        "deploy-volume",
+        "pnpm-ci"
+      ]
+    },
+    {
+      "query": "for_user transaction",
+      "tag": "identifier",
+      "returned": [
+        "sessionprovider",
+        "session-idle",
+        "session-global-neg",
+        "tz-ui",
+        "tz",
+        "auth-rotate",
+        "tests",
+        "feat-jira",
+        "en-review",
+        "auth"
+      ]
+    },
+    {
+      "query": "respaldos nocturnos de la base",
+      "tag": "es-es",
+      "returned": [
+        "es-backup",
+        "es-backup-history",
+        "es-backup-logs",
+        "es-soporte-status",
+        "es-facturas",
+        "es-backup-window",
+        "es-docs",
+        "es-docs-tu",
+        "es-soporte-chat",
+        "es-soporte"
+      ]
+    },
+    {
+      "query": "en qu\u00e9 idioma va la documentaci\u00f3n",
+      "tag": "es-es",
+      "returned": [
+        "es-docs",
+        "es-docs-history",
+        "es-docs-tu",
+        "es-docs-runbooks",
+        "es-soporte-tz",
+        "en-retention",
+        "db",
+        "tz",
+        "es-soporte-status",
+        "en-staging"
+      ]
+    },
+    {
+      "query": "cu\u00e1ndo se emiten las facturas",
+      "tag": "es-es",
+      "returned": [
+        "es-facturas",
+        "es-facturas-neto",
+        "es-facturas-proforma",
+        "es-backup",
+        "es-soporte",
+        "es-backup-logs",
+        "es-soporte-tz",
+        "es-soporte-chat",
+        "es-docs",
+        "es-backup-window"
+      ]
+    },
+    {
+      "query": "hasta qu\u00e9 hora atienden los clientes",
+      "tag": "es-es",
+      "returned": [
+        "es-soporte",
+        "es-soporte-status",
+        "es-soporte-tz",
+        "es-backup",
+        "es-backup-logs",
+        "es-docs-runbooks",
+        "es-facturas-proforma",
+        "tz",
+        "en-oncall",
+        "auth-rotate"
+      ]
+    },
+    {
+      "query": "nightly database backup schedule",
+      "tag": "es-en",
+      "returned": [
+        "en-staging",
+        "en-staging-prod-snap",
+        "db",
+        "es-backup",
+        "auth-rotate",
+        "tz",
+        "en-retention",
+        "es-backup-logs",
+        "deploy-volume",
+        "en-oncall"
+      ]
+    },
+    {
+      "query": "what language is the user documentation written in",
+      "tag": "es-en",
+      "returned": [
+        "tz-ui",
+        "sessionprovider",
+        "session-global-neg",
+        "es-docs",
+        "session-idle",
+        "db",
+        "es-docs-runbooks",
+        "tz",
+        "es-docs-tu",
+        "mysql-analytics"
+      ]
+    },
+    {
+      "query": "when are invoices issued",
+      "tag": "es-en",
+      "returned": [
+        "es-facturas",
+        "tz",
+        "auth-rotate",
+        "es-facturas-neto",
+        "en-retention",
+        "es-facturas-proforma",
+        "en-oncall",
+        "en-staging-prod-snap",
+        "en-retention-export",
+        "tz-warehouse-local"
+      ]
+    },
+    {
+      "query": "when does customer support close",
+      "tag": "es-en",
+      "returned": [
+        "es-soporte",
+        "tz",
+        "es-soporte-chat",
+        "en-oncall",
+        "auth-rotate",
+        "en-staging-window",
+        "es-soporte-status",
+        "es-docs",
+        "en-review",
+        "es-soporte-tz"
+      ]
+    },
+    {
+      "query": "when does the staging data get wiped",
+      "tag": "en-en",
+      "returned": [
+        "en-staging",
+        "en-staging-prod-snap",
+        "en-staging-window",
+        "en-staging-history",
+        "tz",
+        "auth-rotate",
+        "en-retention",
+        "es-backup",
+        "deploy",
+        "deploy-volume"
+      ]
+    },
+    {
+      "query": "who is on call this week",
+      "tag": "en-en",
+      "returned": [
+        "en-oncall-weekend",
+        "en-oncall",
+        "en-oncall-handoff",
+        "sessionprovider",
+        "en-oncall-history",
+        "en-staging",
+        "en-staging-window",
+        "auth-rotate",
+        "openai-embed-retired",
+        "tz"
+      ]
+    },
+    {
+      "query": "how many approvals does a merge need",
+      "tag": "en-en",
+      "returned": [
+        "en-review",
+        "en-review-drafts",
+        "en-review-hotfix",
+        "en-review-history",
+        "auth-rotate",
+        "tests",
+        "pnpm",
+        "ruff-ci",
+        "mysql-analytics",
+        "feat-jira"
+      ]
+    },
+    {
+      "query": "how long are audit logs kept",
+      "tag": "en-en",
+      "returned": [
+        "en-retention",
+        "en-retention-export",
+        "en-retention-metrics",
+        "en-retention-legal",
+        "es-backup-logs",
+        "auth-rotate",
+        "tz",
+        "auth",
+        "db",
+        "en-staging-prod-snap"
+      ]
+    },
+    {
+      "query": "cu\u00e1ndo se borran los datos del entorno de pruebas",
+      "tag": "en-es",
+      "returned": [
+        "es-backup",
+        "es-docs",
+        "es-docs-tu",
+        "es-docs-history",
+        "es-backup-logs",
+        "es-facturas",
+        "es-backup-history",
+        "es-soporte-tz",
+        "es-soporte-chat",
+        "en-staging"
+      ]
+    },
+    {
+      "query": "qui\u00e9n est\u00e1 de guardia esta semana",
+      "tag": "en-es",
+      "returned": [
+        "es-facturas",
+        "es-soporte-status",
+        "es-backup-history",
+        "en-oncall",
+        "auth-rotate",
+        "en-staging-window",
+        "es-backup",
+        "en-oncall-weekend",
+        "es-backup-logs",
+        "db"
+      ]
+    },
+    {
+      "query": "cu\u00e1ntas aprobaciones hacen falta para integrar un cambio",
+      "tag": "en-es",
+      "returned": [
+        "en-review",
+        "auth-rotate",
+        "en-review-drafts",
+        "es-backup-history",
+        "ruff-ci",
+        "en-retention",
+        "en-review-history",
+        "en-retention-export",
+        "tests",
+        "en-review-hotfix"
+      ]
+    },
+    {
+      "query": "cu\u00e1nto tiempo se conservan los registros de auditor\u00eda",
+      "tag": "en-es",
+      "returned": [
+        "es-backup",
+        "es-backup-logs",
+        "es-facturas",
+        "es-facturas-neto",
+        "es-docs",
+        "es-soporte-status",
+        "es-docs-history",
+        "es-backup-history",
+        "es-soporte-tz",
+        "es-soporte"
+      ]
+    }
+  ]
+}

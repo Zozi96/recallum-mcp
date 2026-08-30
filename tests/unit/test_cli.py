@@ -9,7 +9,7 @@ import pytest
 
 from recallum.auth.api_keys import hash_token
 from recallum.cli import _run, build_parser
-from recallum.evaluation import EvalReport
+from recallum.evaluation import EvalReport, QueryOutcome
 from tests.fakes import FakeEmbeddingClient, ScriptedEmbeddingClient, build_test_container
 
 
@@ -359,6 +359,49 @@ async def test_eval_vector_min_similarity_reaches_service_limits_and_report_tuna
     assert captured["service"]._limits.recall_vector_min_similarity == 0.7
     out = capsys.readouterr().out
     assert "tunables: recall_vector_min_similarity=0.7" in out
+
+
+async def test_eval_stdout_includes_explicit_zero_and_unjudged_diagnostics(
+    monkeypatch, capsys
+):
+    container, _ = build_test_container()
+    await _run(parse(["create-user", "--email", "eval@example.com"]), container)
+    capsys.readouterr()
+
+    async def fake_run_eval(service, user_id, dataset, *, k):
+        return EvalReport(
+            outcomes=[
+                QueryOutcome(
+                    query="who handles billing",
+                    tag="semantic",
+                    expected=["beta"],
+                    returned=["beta", "noise", "alpha"],
+                    reciprocal_rank=1.0,
+                    recall_at_k=1.0,
+                    graded=True,
+                    ndcg_at_5=1.0,
+                    essential_recall_at_3=1.0,
+                    irrelevant_rate_at_5=2 / 3,
+                    explicit_zero_rate_at_5=1 / 3,
+                    unjudged_rate_at_5=1 / 3,
+                    useful_token_density=0.5,
+                )
+            ],
+            k=k,
+        )
+
+    monkeypatch.setattr("recallum.cli.run_eval", fake_run_eval)
+    dataset = Path(__file__).resolve().parents[2] / "scripts" / "eval_dataset.json"
+    code = await _run(
+        parse(["eval", "--email", "eval@example.com", "--dataset", str(dataset)]),
+        container,
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "irr@5" in out
+    assert "exp0@5" in out
+    assert "unj@5" in out
+    assert "diagnostic" in out
 
 
 def test_bootstrap_requires_project_even_in_dry_run(tmp_path):

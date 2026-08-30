@@ -77,6 +77,8 @@ class QueryOutcome:
     ndcg_at_5: float | None = None
     essential_recall_at_3: float | None = None
     irrelevant_rate_at_5: float | None = None
+    explicit_zero_rate_at_5: float | None = None
+    unjudged_rate_at_5: float | None = None
     useful_token_density: float | None = None
     omitted_essentials: list[str] = field(default_factory=list)
     served_irrelevants: list[str] = field(default_factory=list)
@@ -158,10 +160,41 @@ class EvalReport:
             ]
         )
 
+    @property
+    def explicit_zero_rate_at_5(self) -> float | None:
+        return _mean(
+            [
+                o.explicit_zero_rate_at_5
+                for o in self.judged()
+                if o.explicit_zero_rate_at_5 is not None
+            ]
+        )
+
+    @property
+    def unjudged_rate_at_5(self) -> float | None:
+        return _mean(
+            [
+                o.unjudged_rate_at_5
+                for o in self.judged()
+                if o.unjudged_rate_at_5 is not None
+            ]
+        )
+
     def graded_by_tag(
         self,
-    ) -> dict[str, tuple[int, float | None, float | None, float | None, float | None]]:
-        """Per-tag judged (count, nDCG@5, essential-recall@3, irr@5, useful-tok)."""
+    ) -> dict[
+        str,
+        tuple[
+            int,
+            float | None,
+            float | None,
+            float | None,
+            float | None,
+            float | None,
+            float | None,
+        ],
+    ]:
+        """Per-tag judged (count, nDCG@5, ess@3, irr@5, exp0@5, unj@5, useful-tok)."""
         grouped: dict[str, list[QueryOutcome]] = {}
         for outcome in self.judged():
             grouped.setdefault(outcome.tag, []).append(outcome)
@@ -181,6 +214,20 @@ class EvalReport:
                         o.irrelevant_rate_at_5
                         for o in outcomes
                         if o.irrelevant_rate_at_5 is not None
+                    ]
+                ),
+                _mean(
+                    [
+                        o.explicit_zero_rate_at_5
+                        for o in outcomes
+                        if o.explicit_zero_rate_at_5 is not None
+                    ]
+                ),
+                _mean(
+                    [
+                        o.unjudged_rate_at_5
+                        for o in outcomes
+                        if o.unjudged_rate_at_5 is not None
                     ]
                 ),
                 _mean(
@@ -232,6 +279,22 @@ def irrelevant_rate_at_5(returned: Sequence[str], grades: Mapping[str, int]) -> 
     if not served:
         return 0.0
     return sum(1 for key in served if grades.get(key, 0) == 0) / len(served)
+
+
+def explicit_zero_rate_at_5(returned: Sequence[str], grades: Mapping[str, int]) -> float:
+    """Declared grade-0 count over served items up to 5; empty served is 0.0."""
+    served = returned[:5]
+    if not served:
+        return 0.0
+    return sum(1 for key in served if grades.get(key) == 0) / len(served)
+
+
+def unjudged_rate_at_5(returned: Sequence[str], grades: Mapping[str, int]) -> float:
+    """Served keys absent from declared relevance over served up to 5; empty is 0.0."""
+    served = returned[:5]
+    if not served:
+        return 0.0
+    return sum(1 for key in served if key not in grades) / len(served)
 
 
 def useful_token_density(
@@ -409,6 +472,10 @@ async def run_eval(
             outcome.ndcg_at_5 = ndcg_at_5(returned, grades)
             outcome.essential_recall_at_3 = essential_recall_at_3(returned, grades)
             outcome.irrelevant_rate_at_5 = irrelevant_rate_at_5(returned, grades)
+            outcome.explicit_zero_rate_at_5 = explicit_zero_rate_at_5(
+                returned, golden.relevance
+            )
+            outcome.unjudged_rate_at_5 = unjudged_rate_at_5(returned, golden.relevance)
             outcome.useful_token_density = useful_token_density(
                 returned, grades, served_tokens
             )
@@ -466,21 +533,26 @@ def _append_graded_report(lines: list[str], report: EvalReport) -> None:
         lines.append("graded: unavailable")
         return
     lines.append(f"graded (judged {len(judged)}/{len(report.outcomes)}):")
+    lines.append("diagnostics: exp0@5 explicit-zero-rate@5; unj@5 unjudged-rate@5")
     header = (
-        f"{'tag':<12} {'n':>3} {'nDCG@5':>7} {'ess@3':>6} {'irr@5':>6} {'useful-tok':>10}"
+        f"{'tag':<12} {'n':>3} {'nDCG@5':>7} {'ess@3':>6} {'irr@5':>6} "
+        f"{'exp0@5':>7} {'unj@5':>6} {'useful-tok':>10}"
     )
     lines.append(header)
     lines.append("-" * len(header))
-    for tag, (count, ndcg, ess, irr, density) in report.graded_by_tag().items():
+    for tag, (count, ndcg, ess, irr, exp0, unj, density) in report.graded_by_tag().items():
         lines.append(
             f"{tag:<12} {count:>3} {_fmt_metric(ndcg):>7} {_fmt_metric(ess):>6} "
-            f"{_fmt_metric(irr):>6} {_fmt_metric(density):>10}"
+            f"{_fmt_metric(irr):>6} {_fmt_metric(exp0):>7} {_fmt_metric(unj):>6} "
+            f"{_fmt_metric(density):>10}"
         )
     lines.append("-" * len(header))
     lines.append(
         f"{'overall':<12} {len(judged):>3} {_fmt_metric(report.ndcg_at_5):>7} "
         f"{_fmt_metric(report.essential_recall_at_3):>6} "
         f"{_fmt_metric(report.irrelevant_rate_at_5):>6} "
+        f"{_fmt_metric(report.explicit_zero_rate_at_5):>7} "
+        f"{_fmt_metric(report.unjudged_rate_at_5):>6} "
         f"{_fmt_metric(report.useful_token_density):>10}"
     )
     lines.append("")
@@ -493,6 +565,8 @@ def _append_graded_report(lines: list[str], report: EvalReport) -> None:
             f"  [{outcome.tag}] {outcome.query!r} nDCG@5={_fmt_metric(outcome.ndcg_at_5).strip()} "
             f"essential-recall@3={_fmt_metric(outcome.essential_recall_at_3).strip()} "
             f"irrelevant-rate@5={_fmt_metric(outcome.irrelevant_rate_at_5).strip()} "
+            f"explicit-zero-rate@5={_fmt_metric(outcome.explicit_zero_rate_at_5).strip()} "
+            f"unjudged-rate@5={_fmt_metric(outcome.unjudged_rate_at_5).strip()} "
             f"useful-tok={_fmt_metric(outcome.useful_token_density).strip()}"
         )
     omitted = [o for o in judged if o.omitted_essentials]

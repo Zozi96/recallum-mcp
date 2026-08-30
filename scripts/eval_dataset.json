@@ -68,40 +68,33 @@
     {"key": "en-retention-metrics", "content": "Product metrics are kept for six months, not eighteen", "category": "fact", "importance": 4}
   ],
   "queries": [
-    {"query": "which package manager should I use", "expect": ["pnpm"], "tag": "semantic", "relevance": {"pnpm": 3, "pnpm-ci": 2, "pnpm-history": 1, "yarn-legacy": 0}},
-    {"query": "where do production releases happen", "expect": ["deploy"], "tag": "semantic", "relevance": {"deploy": 3, "deploy-volume": 2, "capistrano-legacy": 0}},
-    {"query": "how are credentials protected", "expect": ["auth"], "tag": "semantic", "relevance": {"auth": 3, "auth-rotate": 2, "auth-v1-plaintext": 0}},
-    {"query": "what produces the embedding vectors", "expect": ["ollama"], "tag": "semantic", "relevance": {"ollama": 3, "ollama-dims": 2, "openai-embed-retired": 0}},
-    {"query": "time zone handling rules", "expect": ["tz"], "tag": "semantic", "relevance": {"tz": 3, "tz-ui": 1, "tz-warehouse-local": 0}},
-
-    {"query": "pgvector", "expect": ["db"], "tag": "exact", "relevance": {"db": 3, "mysql-analytics": 0}},
-    {"query": "ruff line length", "expect": ["lint"], "tag": "exact", "relevance": {"lint": 3, "ruff-ci": 1}},
-    {"query": "feat branch naming", "expect": ["branch"], "tag": "exact", "relevance": {"branch": 3, "feat-jira": 1, "fix-branch-retired": 0}},
-
-    {"query": "postgersql database", "expect": ["db"], "tag": "typo", "relevance": {"db": 3, "mysql-analytics": 0}},
-    {"query": "pnmp packages", "expect": ["pnpm"], "tag": "typo", "relevance": {"pnpm": 3, "pnpm-ci": 2, "yarn-legacy": 0}},
-
-    {"query": "SessionProvider", "expect": ["sessionprovider"], "tag": "identifier", "relevance": {"sessionprovider": 3, "session-idle": 2, "session-global-neg": 0}},
-    {"query": "for_user transaction", "expect": ["sessionprovider"], "tag": "identifier", "relevance": {"sessionprovider": 3, "session-idle": 2, "session-global-neg": 0}},
-
-    {"query": "respaldos nocturnos de la base", "expect": ["es-backup"], "tag": "es-es", "relevance": {"es-backup": 3, "es-backup-window": 2, "es-backup-history": 1, "es-backup-logs": 0}},
-    {"query": "en qué idioma va la documentación", "expect": ["es-docs"], "tag": "es-es", "relevance": {"es-docs": 3, "es-docs-tu": 2, "es-docs-history": 1, "es-docs-runbooks": 0}},
-    {"query": "cuándo se emiten las facturas", "expect": ["es-facturas"], "tag": "es-es", "relevance": {"es-facturas": 3, "es-facturas-neto": 2, "es-facturas-ciclo": 1, "es-facturas-proforma": 0}},
-    {"query": "hasta qué hora atienden los clientes", "expect": ["es-soporte"], "tag": "es-es", "relevance": {"es-soporte": 3, "es-soporte-chat": 2, "es-soporte-tz": 1, "es-soporte-status": 0}},
-
-    {"query": "nightly database backup schedule", "expect": ["es-backup"], "tag": "es-en", "relevance": {"es-backup": 3, "es-backup-window": 2, "es-backup-history": 1, "es-backup-logs": 0}},
-    {"query": "what language is the user documentation written in", "expect": ["es-docs"], "tag": "es-en", "relevance": {"es-docs": 3, "es-docs-tu": 2, "es-docs-history": 1, "es-docs-runbooks": 0}},
-    {"query": "when are invoices issued", "expect": ["es-facturas"], "tag": "es-en", "relevance": {"es-facturas": 3, "es-facturas-neto": 2, "es-facturas-ciclo": 1, "es-facturas-proforma": 0}},
-    {"query": "when does customer support close", "expect": ["es-soporte"], "tag": "es-en", "relevance": {"es-soporte": 3, "es-soporte-chat": 2, "es-soporte-tz": 1, "es-soporte-status": 0}},
-
-    {"query": "when does the staging data get wiped", "expect": ["en-staging"], "tag": "en-en", "relevance": {"en-staging": 3, "en-staging-window": 2, "en-staging-history": 1, "en-staging-prod-snap": 0}},
-    {"query": "who is on call this week", "expect": ["en-oncall"], "tag": "en-en", "relevance": {"en-oncall": 3, "en-oncall-handoff": 2, "en-oncall-history": 1, "en-oncall-weekend": 0}},
-    {"query": "how many approvals does a merge need", "expect": ["en-review"], "tag": "en-en", "relevance": {"en-review": 3, "en-review-drafts": 2, "en-review-history": 1, "en-review-hotfix": 0}},
-    {"query": "how long are audit logs kept", "expect": ["en-retention"], "tag": "en-en", "relevance": {"en-retention": 3, "en-retention-export": 2, "en-retention-legal": 1, "en-retention-metrics": 0}},
-
-    {"query": "cuándo se borran los datos del entorno de pruebas", "expect": ["en-staging"], "tag": "en-es", "relevance": {"en-staging": 3, "en-staging-window": 2, "en-staging-history": 1, "en-staging-prod-snap": 0}},
-    {"query": "quién está de guardia esta semana", "expect": ["en-oncall"], "tag": "en-es", "relevance": {"en-oncall": 3, "en-oncall-handoff": 2, "en-oncall-history": 1, "en-oncall-weekend": 0}},
-    {"query": "cuántas aprobaciones hacen falta para integrar un cambio", "expect": ["en-review"], "tag": "en-es", "relevance": {"en-review": 3, "en-review-drafts": 2, "en-review-history": 1, "en-review-hotfix": 0}},
-    {"query": "cuánto tiempo se conservan los registros de auditoría", "expect": ["en-retention"], "tag": "en-es", "relevance": {"en-retention": 3, "en-retention-export": 2, "en-retention-legal": 1, "en-retention-metrics": 0}}
+    {"query": "which package manager should I use", "expect": ["pnpm"], "tag": "semantic", "relevance": {"pnpm": 3, "pnpm-ci": 2, "pnpm-history": 1, "yarn-legacy": 0, "en-review-hotfix": 0, "db": 0, "deploy": 0, "tests": 0, "es-docs": 0, "fix-branch-retired": 0, "deploy-volume": 0}},
+    {"query": "where do production releases happen", "expect": ["deploy"], "tag": "semantic", "relevance": {"deploy": 3, "deploy-volume": 2, "capistrano-legacy": 0, "en-retention-metrics": 0, "en-staging-prod-snap": 0, "en-oncall-weekend": 0, "tz": 0, "en-staging": 0, "tests": 0, "es-docs-runbooks": 0, "auth-rotate": 0}},
+    {"query": "how are credentials protected", "expect": ["auth"], "tag": "semantic", "relevance": {"auth": 3, "auth-rotate": 2, "auth-v1-plaintext": 0, "sessionprovider": 0, "tz": 0, "tests": 0, "en-retention": 0, "deploy": 0, "en-review": 0, "feat-jira": 0}},
+    {"query": "what produces the embedding vectors", "expect": ["ollama"], "tag": "semantic", "relevance": {"ollama": 3, "ollama-dims": 2, "openai-embed-retired": 0, "db": 0, "deploy": 0, "mysql-analytics": 0, "pnpm": 0, "deploy-volume": 0, "en-staging-prod-snap": 0, "en-staging": 0}},
+    {"query": "time zone handling rules", "expect": ["tz"], "tag": "semantic", "relevance": {"tz": 3, "tz-ui": 1, "tz-warehouse-local": 0, "en-review-history": 0, "auth-rotate": 0, "en-review": 0, "session-idle": 0, "sessionprovider": 0, "en-staging-window": 0, "es-soporte-tz": 0}},
+    {"query": "pgvector", "expect": ["db"], "tag": "exact", "relevance": {"db": 3, "mysql-analytics": 0, "ollama-dims": 0, "es-docs-tu": 0, "deploy-volume": 0, "pnpm": 0, "ollama": 0, "tz": 0, "deploy": 0, "auth-rotate": 0}},
+    {"query": "ruff line length", "expect": ["lint"], "tag": "exact", "relevance": {"lint": 3, "ruff-ci": 1, "auth-rotate": 0, "en-retention": 0, "en-review": 0, "yarn-legacy": 0, "pnpm": 0, "db": 0, "en-review-drafts": 0, "en-retention-metrics": 0}},
+    {"query": "feat branch naming", "expect": ["branch"], "tag": "exact", "relevance": {"branch": 3, "feat-jira": 1, "fix-branch-retired": 0, "en-review": 0, "pnpm": 0, "db": 0, "deploy": 0, "tests": 0, "ruff-ci": 0, "yarn-legacy": 0}},
+    {"query": "postgersql database", "expect": ["db"], "tag": "typo", "relevance": {"db": 3, "mysql-analytics": 0, "tz": 0, "deploy-volume": 0, "auth-rotate": 0, "pnpm": 0, "en-staging": 0, "en-retention": 0, "tz-warehouse-local": 0, "tests": 0}},
+    {"query": "pnmp packages", "expect": ["pnpm"], "tag": "typo", "relevance": {"pnpm": 3, "pnpm-ci": 2, "yarn-legacy": 0, "deploy": 0, "tests": 0, "db": 0, "deploy-volume": 0, "mysql-analytics": 0, "en-review": 0, "pnpm-history": 0}},
+    {"query": "SessionProvider", "expect": ["sessionprovider"], "tag": "identifier", "relevance": {"sessionprovider": 3, "session-idle": 2, "session-global-neg": 0, "pnpm": 0, "tz": 0, "auth-rotate": 0, "deploy": 0, "tests": 0, "deploy-volume": 0, "pnpm-ci": 0}},
+    {"query": "for_user transaction", "expect": ["sessionprovider"], "tag": "identifier", "relevance": {"sessionprovider": 3, "session-idle": 2, "session-global-neg": 0, "tz-ui": 0, "tz": 0, "auth-rotate": 0, "tests": 0, "feat-jira": 0, "en-review": 0, "auth": 0}},
+    {"query": "respaldos nocturnos de la base", "expect": ["es-backup"], "tag": "es-es", "relevance": {"es-backup": 3, "es-backup-window": 2, "es-backup-history": 1, "es-backup-logs": 0, "es-soporte-status": 0, "es-facturas": 0, "es-docs": 0, "es-docs-tu": 0, "es-soporte-chat": 0, "es-soporte": 0}},
+    {"query": "en qué idioma va la documentación", "expect": ["es-docs"], "tag": "es-es", "relevance": {"es-docs": 3, "es-docs-tu": 2, "es-docs-history": 1, "es-docs-runbooks": 0, "es-soporte-tz": 0, "en-retention": 0, "db": 0, "tz": 0, "es-soporte-status": 0, "en-staging": 0}},
+    {"query": "cuándo se emiten las facturas", "expect": ["es-facturas"], "tag": "es-es", "relevance": {"es-facturas": 3, "es-facturas-neto": 2, "es-facturas-ciclo": 1, "es-facturas-proforma": 0, "es-backup": 0, "es-soporte": 0, "es-backup-logs": 0, "es-soporte-tz": 0, "es-soporte-chat": 0, "es-docs": 0, "es-backup-window": 0}},
+    {"query": "hasta qué hora atienden los clientes", "expect": ["es-soporte"], "tag": "es-es", "relevance": {"es-soporte": 3, "es-soporte-chat": 2, "es-soporte-tz": 1, "es-soporte-status": 0, "es-backup": 0, "es-backup-logs": 0, "es-docs-runbooks": 0, "es-facturas-proforma": 0, "tz": 0, "en-oncall": 0, "auth-rotate": 0}},
+    {"query": "nightly database backup schedule", "expect": ["es-backup"], "tag": "es-en", "relevance": {"es-backup": 3, "es-backup-window": 2, "es-backup-history": 1, "es-backup-logs": 0, "en-staging": 0, "en-staging-prod-snap": 0, "db": 0, "auth-rotate": 0, "tz": 0, "en-retention": 0, "deploy-volume": 0, "en-oncall": 0}},
+    {"query": "what language is the user documentation written in", "expect": ["es-docs"], "tag": "es-en", "relevance": {"es-docs": 3, "es-docs-tu": 2, "es-docs-history": 1, "es-docs-runbooks": 0, "tz-ui": 0, "sessionprovider": 0, "session-global-neg": 0, "session-idle": 0, "db": 0, "tz": 0, "mysql-analytics": 0}},
+    {"query": "when are invoices issued", "expect": ["es-facturas"], "tag": "es-en", "relevance": {"es-facturas": 3, "es-facturas-neto": 2, "es-facturas-ciclo": 1, "es-facturas-proforma": 0, "tz": 0, "auth-rotate": 0, "en-retention": 0, "en-oncall": 0, "en-staging-prod-snap": 0, "en-retention-export": 0, "tz-warehouse-local": 0}},
+    {"query": "when does customer support close", "expect": ["es-soporte"], "tag": "es-en", "relevance": {"es-soporte": 3, "es-soporte-chat": 2, "es-soporte-tz": 1, "es-soporte-status": 0, "tz": 0, "en-oncall": 0, "auth-rotate": 0, "en-staging-window": 0, "es-docs": 0, "en-review": 0}},
+    {"query": "when does the staging data get wiped", "expect": ["en-staging"], "tag": "en-en", "relevance": {"en-staging": 3, "en-staging-window": 2, "en-staging-history": 1, "en-staging-prod-snap": 0, "tz": 0, "auth-rotate": 0, "en-retention": 0, "es-backup": 0, "deploy": 0, "deploy-volume": 0}},
+    {"query": "who is on call this week", "expect": ["en-oncall"], "tag": "en-en", "relevance": {"en-oncall": 3, "en-oncall-handoff": 2, "en-oncall-history": 1, "en-oncall-weekend": 0, "sessionprovider": 0, "en-staging": 0, "en-staging-window": 0, "auth-rotate": 0, "openai-embed-retired": 0, "tz": 0}},
+    {"query": "how many approvals does a merge need", "expect": ["en-review"], "tag": "en-en", "relevance": {"en-review": 3, "en-review-drafts": 2, "en-review-history": 1, "en-review-hotfix": 0, "auth-rotate": 0, "tests": 0, "pnpm": 0, "ruff-ci": 0, "mysql-analytics": 0, "feat-jira": 0}},
+    {"query": "how long are audit logs kept", "expect": ["en-retention"], "tag": "en-en", "relevance": {"en-retention": 3, "en-retention-export": 2, "en-retention-legal": 1, "en-retention-metrics": 0, "es-backup-logs": 0, "auth-rotate": 0, "tz": 0, "auth": 0, "db": 0, "en-staging-prod-snap": 0}},
+    {"query": "cuándo se borran los datos del entorno de pruebas", "expect": ["en-staging"], "tag": "en-es", "relevance": {"en-staging": 3, "en-staging-window": 2, "en-staging-history": 1, "en-staging-prod-snap": 0, "es-backup": 0, "es-docs": 0, "es-docs-tu": 0, "es-docs-history": 0, "es-backup-logs": 0, "es-facturas": 0, "es-backup-history": 0, "es-soporte-tz": 0, "es-soporte-chat": 0}},
+    {"query": "quién está de guardia esta semana", "expect": ["en-oncall"], "tag": "en-es", "relevance": {"en-oncall": 3, "en-oncall-handoff": 2, "en-oncall-history": 1, "en-oncall-weekend": 0, "es-facturas": 0, "es-soporte-status": 0, "es-backup-history": 0, "auth-rotate": 0, "en-staging-window": 0, "es-backup": 0, "es-backup-logs": 0, "db": 0}},
+    {"query": "cuántas aprobaciones hacen falta para integrar un cambio", "expect": ["en-review"], "tag": "en-es", "relevance": {"en-review": 3, "en-review-drafts": 2, "en-review-history": 1, "en-review-hotfix": 0, "auth-rotate": 0, "es-backup-history": 0, "ruff-ci": 0, "en-retention": 0, "en-retention-export": 0, "tests": 0}},
+    {"query": "cuánto tiempo se conservan los registros de auditoría", "expect": ["en-retention"], "tag": "en-es", "relevance": {"en-retention": 3, "en-retention-export": 2, "en-retention-legal": 1, "en-retention-metrics": 0, "es-backup": 0, "es-backup-logs": 0, "es-facturas": 0, "es-facturas-neto": 0, "es-docs": 0, "es-soporte-status": 0, "es-docs-history": 0, "es-backup-history": 0, "es-soporte-tz": 0, "es-soporte": 0}}
   ]
 }

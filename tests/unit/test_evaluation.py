@@ -8,6 +8,7 @@ idempotent seeding, and actionable miss reporting.
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import pytest
 
 from recallum.evaluation import (
     essential_recall_at_3,
+    explicit_zero_rate_at_5,
     irrelevant_rate_at_5,
     load_dataset,
     ndcg_at_5,
@@ -23,6 +25,7 @@ from recallum.evaluation import (
     reciprocal_rank,
     render_report,
     run_eval,
+    unjudged_rate_at_5,
     useful_token_density,
 )
 from recallum.memory.service import MemoryService
@@ -180,25 +183,43 @@ def test_graded_metrics_cover_full_short_empty_and_negatives():
     )
     assert essential_recall_at_3(full, grades) == 1.0
     assert irrelevant_rate_at_5(full, grades) == pytest.approx(0.25)
+    assert explicit_zero_rate_at_5(full, grades) == pytest.approx(0.25)
+    assert unjudged_rate_at_5(full, grades) == 0.0
     assert useful_token_density(full, grades, tokens) == pytest.approx(0.75)
 
     short = ["ess", "support", "context"]
     assert ndcg_at_5(short, grades) == pytest.approx(1.0)
     assert essential_recall_at_3(short, grades) == 1.0
     assert irrelevant_rate_at_5(short, grades) == 0.0
+    assert explicit_zero_rate_at_5(short, grades) == 0.0
+    assert unjudged_rate_at_5(short, grades) == 0.0
     assert useful_token_density(short, grades, tokens) == pytest.approx(1.0)
 
     empty: list[str] = []
     assert ndcg_at_5(empty, grades) == 0.0
     assert essential_recall_at_3(empty, grades) == 0.0
     assert irrelevant_rate_at_5(empty, grades) == 0.0
+    assert explicit_zero_rate_at_5(empty, grades) == 0.0
+    assert unjudged_rate_at_5(empty, grades) == 0.0
     assert useful_token_density(empty, grades, tokens) is None
 
     negatives = ["noise", "ess"]
     assert ndcg_at_5(negatives, grades) < ndcg_at_5(["ess"], grades)
     assert essential_recall_at_3(["noise", "other", "x", "ess"], grades) == 0.0
     assert irrelevant_rate_at_5(negatives, grades) == pytest.approx(0.5)
+    assert explicit_zero_rate_at_5(negatives, grades) == pytest.approx(0.5)
+    assert unjudged_rate_at_5(negatives, grades) == 0.0
     assert useful_token_density(negatives, grades, tokens) == pytest.approx(0.5)
+
+    undeclared = ["ess", "ghost"]
+    assert irrelevant_rate_at_5(undeclared, grades) == pytest.approx(0.5)
+    assert explicit_zero_rate_at_5(undeclared, grades) == 0.0
+    assert unjudged_rate_at_5(undeclared, grades) == pytest.approx(0.5)
+
+    mixed = ["ess", "support", "context", "noise", "ghost"]
+    assert irrelevant_rate_at_5(mixed, grades) == pytest.approx(0.4)
+    assert explicit_zero_rate_at_5(mixed, grades) == pytest.approx(0.2)
+    assert unjudged_rate_at_5(mixed, grades) == pytest.approx(0.2)
 
 
 def test_ndcg_penalizes_omitted_useful_on_short_lists():
@@ -361,6 +382,10 @@ async def test_render_report_keeps_mrr_lines_and_marks_ungraded_unavailable():
     assert "overall" in text
     assert "graded: unavailable" in text
     assert "nDCG@5=0.00" not in text
+    assert report.outcomes[0].explicit_zero_rate_at_5 is None
+    assert report.outcomes[0].unjudged_rate_at_5 is None
+    assert "exp0@5=0.00" not in text
+    assert "unj@5=0.00" not in text
 
 
 async def test_render_report_adds_graded_metrics_only_for_judged_queries():
@@ -372,8 +397,13 @@ async def test_render_report_adds_graded_metrics_only_for_judged_queries():
     assert "nDCG@5" in text
     assert "essential-recall@3" in text
     assert "irrelevant-rate@5" in text
+    assert "exp0@5" in text
+    assert "unj@5" in text
+    assert "diagnostic" in text
     assert "[legacy] 'who handles billing' graded unavailable" in text
     assert report.outcomes[1].ndcg_at_5 is None
+    assert report.outcomes[1].explicit_zero_rate_at_5 is None
+    assert report.outcomes[1].unjudged_rate_at_5 is None
     assert report.ndcg_at_5 == report.outcomes[0].ndcg_at_5
     by_tag = report.by_tag()
     assert by_tag["semantic"][0] == 1
@@ -403,6 +433,56 @@ async def test_present_relevance_treats_undeclared_corpus_keys_as_grade_zero():
     assert "alpha" in outcome.returned
     assert "alpha" in outcome.served_irrelevants
     assert outcome.irrelevant_rate_at_5 > 0.0
+    assert outcome.explicit_zero_rate_at_5 == 0.0
+    assert outcome.unjudged_rate_at_5 == pytest.approx(outcome.irrelevant_rate_at_5)
+    served = outcome.returned[:5]
+    assert "alpha" in served
+    assert unjudged_rate_at_5(served, {"beta": 3}) == pytest.approx(
+        outcome.unjudged_rate_at_5
+    )
+
+
+async def test_mixed_top5_splits_explicit_zero_from_unjudged():
+    payload = {
+        "corpus": [
+            {"key": "alpha", "content": "alpha subsystem owns ingestion"},
+            {"key": "beta", "content": "beta subsystem owns billing"},
+            {"key": "noise", "content": "unrelated gamma cache warmup"},
+        ],
+        "queries": [
+            {
+                "query": "who handles billing",
+                "expect": ["beta"],
+                "tag": "semantic",
+                "relevance": {"beta": 3, "noise": 0},
+            }
+        ],
+    }
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "alpha subsystem owns ingestion": AXIS_A,
+            "beta subsystem owns billing": AXIS_B,
+            "unrelated gamma cache warmup": [0.0, 0.0, 1.0] + [0.0] * 5,
+            "who handles billing": AXIS_B,
+        }
+    )
+    service = MemoryService(repository=FakeMemoryRepository(), embeddings=embedder)
+    report = await run_eval(service, USER, load_dataset(payload), k=5)
+    outcome = report.outcomes[0]
+    served = outcome.returned[:5]
+    assert "noise" in served and "alpha" in served
+    assert outcome.irrelevant_rate_at_5 == pytest.approx(2 / len(served))
+    assert outcome.explicit_zero_rate_at_5 == pytest.approx(1 / len(served))
+    assert outcome.unjudged_rate_at_5 == pytest.approx(1 / len(served))
+    text = render_report(report)
+    assert "irrelevant-rate@5" in text
+    assert "explicit-zero-rate@5" in text or "exp0@5" in text
+    assert "unjudged-rate@5" in text or "unj@5" in text
+    count, _ndcg, _ess, irr, exp0, unj, _density = report.graded_by_tag()["semantic"]
+    assert count == 1
+    assert irr == pytest.approx(outcome.irrelevant_rate_at_5)
+    assert exp0 == pytest.approx(outcome.explicit_zero_rate_at_5)
+    assert unj == pytest.approx(outcome.unjudged_rate_at_5)
 
 
 def test_shipped_dataset_has_relevance_on_every_query_and_language_tag():
@@ -423,3 +503,24 @@ def test_shipped_dataset_has_relevance_on_every_query_and_language_tag():
         for key in query.expect:
             assert query.relevance[key] == 3
         assert set(query.relevance) <= keys
+
+
+BASELINE_TOPK = (
+    Path(__file__).resolve().parents[2]
+    / "openspec"
+    / "changes"
+    / "recalibrate-memory-admission-default"
+    / "baseline-topk.json"
+)
+
+
+def test_baseline_topk_returned_keys_have_explicit_relevance():
+    """Freeze + dataset: every served top-k key is judged (unjudged-rate@5 is 0.0)."""
+    dataset = read_dataset(SHIPPED_DATASET)
+    freeze = json.loads(BASELINE_TOPK.read_text())
+    by_query = {query.query: query for query in dataset.queries}
+    missing: list[tuple[str, str]] = []
+    for item in freeze["queries"]:
+        graded = by_query[item["query"]].relevance or {}
+        missing.extend((item["query"], key) for key in item["returned"] if key not in graded)
+    assert missing == []
