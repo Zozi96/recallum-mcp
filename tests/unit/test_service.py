@@ -280,6 +280,105 @@ async def test_recall_trigram_weight_zero_disables_the_leg_entirely():
     assert result.results == []
 
 
+def test_recall_vector_min_similarity_defaults_disabled_and_is_capped():
+    assert MemoryLimits().recall_vector_min_similarity is None
+    assert MemoryLimits(recall_vector_min_similarity=0.0).recall_vector_min_similarity == 0.0
+    assert MemoryLimits(recall_vector_min_similarity=1.0).recall_vector_min_similarity == 1.0
+    with pytest.raises(ValidationError):
+        MemoryLimits(recall_vector_min_similarity=-0.1)
+    with pytest.raises(ValidationError):
+        MemoryLimits(recall_vector_min_similarity=1.1)
+
+
+def _scripted_service(vectors: dict[str, list[float]], **limit_kwargs) -> MemoryService:
+    return MemoryService(
+        repository=FakeMemoryRepository(),
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(**limit_kwargs),
+    )
+
+
+async def test_recall_vector_min_similarity_none_keeps_weak_neighbors():
+    vectors = {
+        "we deploy with dokploy": [1.0, 0.0],
+        "unrelated favorite color": [0.0, 1.0],
+        "frobnicate widget": [1.0, 0.0],
+    }
+    service = _scripted_service(vectors)
+    await service.remember(USER, content="we deploy with dokploy", category="decision")
+    noise = await service.remember(USER, content="unrelated favorite color", category="preference")
+
+    result = await service.recall(USER, query="frobnicate widget", limit=10)
+    assert noise.memory.id in {r.id for r in result.results}
+
+
+async def test_recall_vector_min_similarity_drops_weak_neighbors_below_limit():
+    vectors = {
+        "we deploy with dokploy": [1.0, 0.0],
+        "unrelated favorite color": [0.0, 1.0],
+        "frobnicate widget": [1.0, 0.0],
+    }
+    service = _scripted_service(vectors, recall_vector_min_similarity=0.5)
+    deploy = await service.remember(USER, content="we deploy with dokploy", category="decision")
+    await service.remember(USER, content="unrelated favorite color", category="preference")
+
+    result = await service.recall(USER, query="frobnicate widget", limit=10)
+    assert [r.id for r in result.results] == [deploy.memory.id]
+    assert len(result.results) < 10
+
+
+async def test_recall_vector_min_similarity_returns_empty_when_nothing_qualifies():
+    vectors = {
+        "we deploy with dokploy": [1.0, 0.0],
+        "frobnicate widget": [0.0, 1.0],
+    }
+    service = _scripted_service(vectors, recall_vector_min_similarity=0.9)
+    await service.remember(USER, content="we deploy with dokploy", category="decision")
+
+    result = await service.recall(USER, query="frobnicate widget", limit=10)
+    assert result.results == []
+
+
+async def test_recall_vector_min_similarity_keeps_admitted_support():
+    vectors = {
+        "we ship with dokploy": [0.99, 0.141421356],
+        "traefik terminates TLS at the edge": [0.92, 0.391918358],
+        "favorite color is blue": [0.0, 1.0],
+        "how do we ship": [1.0, 0.0],
+    }
+    service = _scripted_service(vectors, recall_vector_min_similarity=0.8)
+    essential = await service.remember(USER, content="we ship with dokploy", category="decision")
+    support = await service.remember(
+        USER, content="traefik terminates TLS at the edge", category="constraint"
+    )
+    await service.remember(USER, content="favorite color is blue", category="preference")
+
+    result = await service.recall(USER, query="how do we ship", limit=10)
+    ids = {r.id for r in result.results}
+    assert ids == {essential.memory.id, support.memory.id}
+    assert len(result.results) < 10
+
+
+async def test_recall_vector_threshold_does_not_invent_hits_when_embeddings_fail():
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(recall_vector_min_similarity=0.99)
+    good = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+    stored = await good.remember(USER, content="la base de datos es postgres", category="fact")
+
+    degraded = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(available=False), limits=limits
+    )
+    hit = await degraded.recall(USER, query="postgres")
+    assert hit.mode == "degraded_textual"
+    assert [r.id for r in hit.results] == [stored.memory.id]
+
+    miss = await degraded.recall(USER, query="frobnicate widget")
+    assert miss.mode == "degraded_textual"
+    assert miss.results == []
+
+
 async def test_recall_vector_leg_keeps_rows_predating_provenance_tracking():
     """Unknown provenance is not evidence of drift.
 

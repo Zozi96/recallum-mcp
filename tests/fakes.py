@@ -343,6 +343,7 @@ class FakeMemoryRepository:
         file: str | None = None,
         limit: int,
         trigram_min_word_similarity: float | None = None,
+        vector_min_similarity: float | None = None,
     ) -> CandidatePools:
         capped = min(limit, MAX_CANDIDATES)
         return CandidatePools(
@@ -357,6 +358,7 @@ class FakeMemoryRepository:
                     capped,
                     symbol,
                     file,
+                    vector_min_similarity,
                 )
                 if embedding is not None
                 else []
@@ -393,6 +395,7 @@ class FakeMemoryRepository:
         embedding: list[float] | None,
         embedding_model: str | None,
         trigram_min_word_similarity: float | None,
+        vector_min_similarity: float | None = None,
         static_limit: int,
         dynamic_limit: int,
         dynamic_since: datetime,
@@ -436,6 +439,7 @@ class FakeMemoryRepository:
                 kind=kind,
                 limit=candidate_limit,
                 trigram_min_word_similarity=trigram_min_word_similarity,
+                vector_min_similarity=vector_min_similarity,
             )
             if query is not None
             else CandidatePools(vector=[], text=[], trigram=[])
@@ -554,6 +558,7 @@ class FakeMemoryRepository:
         limit: int,
         symbol: str | None = None,
         file: str | None = None,
+        vector_min_similarity: float | None = None,
     ) -> Sequence[ScoredMemory]:
         # Mirrors the adapter's provenance rule: NULL stays eligible, a
         # positively different model never votes (its cosine would be noise).
@@ -562,6 +567,8 @@ class FakeMemoryRepository:
             for m in self._filtered(user_id, visibility, category, kind, symbol, file)
             if m.embedding_model in (None, embedding_model)
         ]
+        if vector_min_similarity is not None:
+            scored = [item for item in scored if item.score >= vector_min_similarity]
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:limit]
 

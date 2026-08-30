@@ -112,6 +112,7 @@ class MemoryRepositoryContract:
         category=None,
         limit,
         embedding_model="contract-embedding-model",
+        vector_min_similarity=None,
     ):
         """Only the vector pool; a query with no lexemes matches nothing."""
         pools = await repo.search_candidates(
@@ -122,6 +123,7 @@ class MemoryRepositoryContract:
             visibility=visibility,
             category=category,
             limit=limit,
+            vector_min_similarity=vector_min_similarity,
         )
         return pools.vector
 
@@ -607,6 +609,91 @@ class MemoryRepositoryContract:
             )
         }
         assert foreign.id in text_ids
+
+    async def test_search_vector_excludes_neighbors_below_min_similarity(self, repo, user_id):
+        """The cosine floor is applied in the vector query, not after fetch.
+
+        FTS still reaches a below-threshold neighbour; visibility/project
+        isolation is unchanged from the unfiltered vector pool.
+        """
+        query_vec = _angled_vector(0.0)
+        close = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="close semantic neighbour about deploy",
+                embedding=_angled_vector(10.0),
+            ),
+        )
+        far = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="far neighbour about deploy",
+                embedding=_angled_vector(60.0),
+            ),
+        )
+        other_project = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                scope="project",
+                project="other",
+                content="close neighbour in another project about deploy",
+                embedding=_angled_vector(10.0),
+            ),
+        )
+
+        admitted = await self._vector_pool(
+            repo,
+            user_id,
+            query_vec,
+            visibility=MemoryVisibility("global"),
+            limit=10,
+            vector_min_similarity=0.8,
+        )
+        admitted_ids = {r.memory.id for r in admitted}
+        assert close.id in admitted_ids
+        assert far.id not in admitted_ids
+        assert other_project.id not in admitted_ids
+        assert all(r.score >= 0.8 for r in admitted)
+
+        unfiltered = await self._vector_pool(
+            repo, user_id, query_vec, visibility=MemoryVisibility("global"), limit=10
+        )
+        unfiltered_ids = {r.memory.id for r in unfiltered}
+        assert close.id in unfiltered_ids
+        assert far.id in unfiltered_ids
+        assert other_project.id not in unfiltered_ids
+
+        text_ids = {
+            r.memory.id
+            for r in await self._text_pool(
+                repo,
+                user_id,
+                "deploy",
+                visibility=MemoryVisibility("global"),
+                limit=10,
+            )
+        }
+        assert close.id in text_ids
+        assert far.id in text_ids
+        assert other_project.id not in text_ids
+
+        trigram_ids = {
+            r.memory.id
+            for r in (
+                await repo.search_candidates(
+                    user_id,
+                    query="deploy",
+                    embedding=None,
+                    embedding_model=None,
+                    visibility=MemoryVisibility("global"),
+                    limit=10,
+                    trigram_min_word_similarity=0.4,
+                )
+            ).trigram
+        }
+        assert close.id in trigram_ids
+        assert far.id in trigram_ids
+        assert other_project.id not in trigram_ids
 
     # -- search_trigram ------------------------------------------------
 

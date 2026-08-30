@@ -225,11 +225,53 @@ async def test_cli_oversized_password_stops_before_lookup_argon_and_persistence(
 def test_eval_usage_weight_parses_as_float_and_defaults_to_none():
     args = parse(["eval", "--email", "a@b.c", "--dataset", "dataset.json"])
     assert args.usage_weight is None
+    assert args.vector_min_similarity is None
 
     args = parse(
         ["eval", "--email", "a@b.c", "--dataset", "dataset.json", "--usage-weight", "0.3"]
     )
     assert args.usage_weight == 0.3
+
+
+def test_eval_vector_min_similarity_parses_and_rejects_out_of_range():
+    args = parse(
+        [
+            "eval",
+            "--email",
+            "a@b.c",
+            "--dataset",
+            "dataset.json",
+            "--vector-min-similarity",
+            "0.7",
+        ]
+    )
+    assert args.vector_min_similarity == 0.7
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(
+            [
+                "eval",
+                "--email",
+                "a@b.c",
+                "--dataset",
+                "dataset.json",
+                "--vector-min-similarity",
+                "1.1",
+            ]
+        )
+    assert exc_info.value.code == 2
+    with pytest.raises(SystemExit) as out_of_range:
+        build_parser().parse_args(
+            [
+                "eval",
+                "--email",
+                "a@b.c",
+                "--dataset",
+                "dataset.json",
+                "--vector-min-similarity",
+                "-0.1",
+            ]
+        )
+    assert out_of_range.value.code == 2
 
 
 async def test_eval_unknown_email_exits_1(capsys):
@@ -280,6 +322,43 @@ async def test_eval_usage_weight_reaches_service_limits_and_report_tunables(
     assert captured["service"]._limits.recall_usage_weight == 0.3
     out = capsys.readouterr().out
     assert "tunables: recall_usage_weight=0.3" in out
+
+
+async def test_eval_vector_min_similarity_reaches_service_limits_and_report_tunables(
+    monkeypatch, capsys
+):
+    container, _ = build_test_container()
+    await _run(parse(["create-user", "--email", "eval@example.com"]), container)
+    capsys.readouterr()
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_eval(service, user_id, dataset, *, k):
+        captured["service"] = service
+        return EvalReport(outcomes=[], k=k)
+
+    monkeypatch.setattr("recallum.cli.run_eval", fake_run_eval)
+    dataset = Path(__file__).resolve().parents[2] / "scripts" / "eval_dataset.json"
+
+    code = await _run(
+        parse(
+            [
+                "eval",
+                "--email",
+                "eval@example.com",
+                "--dataset",
+                str(dataset),
+                "--vector-min-similarity",
+                "0.7",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    assert captured["service"]._limits.recall_vector_min_similarity == 0.7
+    out = capsys.readouterr().out
+    assert "tunables: recall_vector_min_similarity=0.7" in out
 
 
 def test_bootstrap_requires_project_even_in_dry_run(tmp_path):

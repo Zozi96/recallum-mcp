@@ -40,6 +40,7 @@ from recallum.mcp.server import (
     validate_only_tools_are_exposed,
 )
 from recallum.memory import MemoryValidationError
+from recallum.memory.schemas import RecallResult
 from tests.fakes import FakeEmbeddingClient, build_test_container
 
 EXPECTED_TOOLS = {
@@ -772,6 +773,35 @@ async def test_discovery_announces_exactly_fifteen_tools_and_three_prompts(
     context = next(tool for tool in tools if tool.name == "context")
     assert {"max_tokens", "strategy"} <= set((recall.inputSchema or {}).get("properties", {}))
     assert {"max_tokens", "strategy"} <= set((context.inputSchema or {}).get("properties", {}))
+    forbidden = {
+        "min_similarity",
+        "vector_min_similarity",
+        "recall_vector_min_similarity",
+    }
+    assert not forbidden & set((recall.inputSchema or {}).get("properties", {}))
+    assert not forbidden & set((context.inputSchema or {}).get("properties", {}))
+    assert "maxima" in (recall.description or "")
+    assert "maxima" in (context.description or "")
+
+
+async def test_recall_short_and_empty_results_validate_schema(server: ServerInfo):
+    async with mcp_client(server.url, server.alice_token) as client:
+        empty = await client.call_tool(
+            "recall", {"query": "frobnicate widget xyzzy", "limit": 10}
+        )
+        parsed_empty = RecallResult.model_validate(empty.structured_content)
+        assert parsed_empty.results == []
+
+        await client.call_tool(
+            "remember",
+            {"content": "deploy via dokploy", "category": "decision", "project": "recallum"},
+        )
+        short = await client.call_tool(
+            "recall",
+            {"query": "dokploy", "project": "recallum", "limit": 10},
+        )
+        parsed_short = RecallResult.model_validate(short.structured_content)
+        assert 0 < len(parsed_short.results) < 10
 
 
 async def test_missing_token_is_rejected(server: ServerInfo):

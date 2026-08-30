@@ -116,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override recall_freshness_weight for this run",
     )
+    eval_cmd.add_argument(
+        "--vector-min-similarity",
+        type=_unit_float,
+        default=None,
+        help="Override recall_vector_min_similarity for this run",
+    )
 
     hygiene_cmd = subparsers.add_parser(
         "hygiene",
@@ -261,6 +267,8 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
             overrides["recall_usage_weight"] = args.usage_weight
         if args.freshness_weight is not None:
             overrides["recall_freshness_weight"] = args.freshness_weight
+        if args.vector_min_similarity is not None:
+            overrides["recall_vector_min_similarity"] = args.vector_min_similarity
         if overrides:
             # Same graph, one knob turned: the configured limits with the
             # overrides applied, so an A/B differs only in what was asked.

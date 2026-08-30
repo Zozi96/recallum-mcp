@@ -10,6 +10,8 @@ Skipped when Docker is unavailable or the image cannot be pulled.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
 import time
 import uuid
 
@@ -153,6 +155,115 @@ async def test_recall_still_works_when_embeddings_are_unavailable(container):
 
     assert result.mode == "degraded_textual"
     assert stored.memory.id in {r.id for r in result.results}
+
+
+def _hash(seed: str) -> str:
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _angled_vector(angle_degrees: float, dimensions: int = 768) -> list[float]:
+    radians = math.radians(angle_degrees)
+    vector = [0.0] * dimensions
+    vector[0] = math.cos(radians)
+    vector[1] = math.sin(radians)
+    return vector
+
+
+async def test_vector_min_similarity_excludes_weak_neighbors_in_sql(container):
+    """Below-threshold neighbours stay out of the vector pool; FTS still reaches them."""
+    user_id = await _make_user_with_key(
+        container, f"vector-floor-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    repo = container.memory_repository()
+    query_vec = _angled_vector(0.0)
+    close = await repo.create_memory(
+        user_id,
+        scope="global",
+        project=None,
+        category="fact",
+        content="close semantic neighbour about deploy",
+        content_hash=_hash("vec-close"),
+        embedding=_angled_vector(10.0),
+        embedding_model="contract-embedding-model",
+        importance=5,
+        source_client=None,
+        metadata={},
+    )
+    far = await repo.create_memory(
+        user_id,
+        scope="global",
+        project=None,
+        category="fact",
+        content="far neighbour about deploy",
+        content_hash=_hash("vec-far"),
+        embedding=_angled_vector(60.0),
+        embedding_model="contract-embedding-model",
+        importance=5,
+        source_client=None,
+        metadata={},
+    )
+
+    pools = await repo.search_candidates(
+        user_id,
+        query="",
+        embedding=query_vec,
+        embedding_model="contract-embedding-model",
+        visibility=MemoryVisibility("all"),
+        limit=10,
+        vector_min_similarity=0.8,
+    )
+    vector_ids = {r.memory.id for r in pools.vector}
+    assert close.id in vector_ids
+    assert far.id not in vector_ids
+    assert all(r.score >= 0.8 for r in pools.vector)
+
+    text_pools = await repo.search_candidates(
+        user_id,
+        query="deploy",
+        embedding=None,
+        embedding_model=None,
+        visibility=MemoryVisibility("all"),
+        limit=10,
+    )
+    text_ids = {r.memory.id for r in text_pools.text}
+    assert close.id in text_ids
+    assert far.id in text_ids
+
+
+async def test_recall_vector_threshold_does_not_fill_when_embeddings_unavailable(container):
+    from recallum.embeddings.ollama import EmbeddingError
+
+    user_id = await _make_user_with_key(
+        container, f"vector-degraded-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = MemoryService(
+        repository=container.memory_repository(),
+        embeddings=container.embedding_client(),
+        limits=MemoryLimits(recall_vector_min_similarity=0.99),
+    )
+    stored = await service.remember(
+        user_id,
+        content="Production deploys go through Dokploy and Traefik",
+        category="fact",
+    )
+
+    embedder = container.embedding_client()
+    original_embed = embedder.embed
+
+    async def unavailable(_text: str) -> list[float]:
+        raise EmbeddingError("embedding unavailable")
+
+    embedder.embed = unavailable  # type: ignore[method-assign]
+    try:
+        result = await service.recall(user_id, query="how are deploys handled in production")
+        miss = await service.recall(user_id, query="frobnicate widget xyzzy")
+    finally:
+        embedder.embed = original_embed  # type: ignore[method-assign]
+
+    assert result.mode == "degraded_textual"
+    assert stored.memory.id in {r.id for r in result.results}
+    assert miss.mode == "degraded_textual"
+    assert miss.results == []
 
 
 async def test_remember_records_the_embedding_model(container):

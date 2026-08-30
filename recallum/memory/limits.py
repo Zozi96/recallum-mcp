@@ -150,3 +150,9 @@ class MemoryLimits(BaseModel):
     # misses realistic typos, and short-word transpositions are beyond any
     # trigram threshold.
     trigram_min_word_similarity: float = Field(default=0.4, gt=0.0, le=1.0)
+
+    # Cosine floor for a vector-search candidate before RRF. None disables
+    # the predicate and keeps today's nearest-neighbour pool. A measured
+    # default is pending a real-stack calibration; do not pick a production
+    # number by intuition.
+    recall_vector_min_similarity: float | None = Field(default=None, ge=0.0, le=1.0)

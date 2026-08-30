@@ -987,6 +987,7 @@ class MemoryRepository:
         file: str | None = None,
         limit: int,
         trigram_min_word_similarity: float | None = None,
+        vector_min_similarity: float | None = None,
     ) -> CandidatePools:
         """Every retrieval signal for one query, in a single transaction.
 
@@ -1004,7 +1005,9 @@ class MemoryRepository:
         in; only rows embedded in that space (or predating provenance
         tracking) may take part in the vector pool.
         ``trigram_min_word_similarity`` enables the fuzzy lexical pool; None
-        skips its query entirely. Fusing the pools is deliberately left to
+        skips its query entirely. ``vector_min_similarity`` is an optional
+        cosine floor applied inside the vector query; None keeps today's
+        nearest-neighbour pool. Fusing the pools is deliberately left to
         the caller: it is pure computation over ranked lists, and pushing it
         behind this seam would force every adapter to reimplement it.
         ``symbol``/``file`` restrict every pool to memories carrying a
@@ -1019,7 +1022,12 @@ class MemoryRepository:
             vector: list[ScoredMemory] = []
             if embedding is not None:
                 vector = await self._vector_candidates(
-                    session, embedding, embedding_model, filters, capped
+                    session,
+                    embedding,
+                    embedding_model,
+                    filters,
+                    capped,
+                    vector_min_similarity=vector_min_similarity,
                 )
             text_pool = await self._text_candidates(session, query, filters, capped)
             trigram: list[ScoredMemory] = []
@@ -1036,6 +1044,7 @@ class MemoryRepository:
         embedding_model: str | None,
         filters: list[Any],
         limit: int,
+        vector_min_similarity: float | None = None,
     ) -> list[ScoredMemory]:
         """Nearest neighbours by cosine similarity (1 - distance).
 
@@ -1048,19 +1057,24 @@ class MemoryRepository:
         provenance predates tracking and stays eligible, because treating
         unknown as foreign would blank the vector leg of every migrated
         corpus. The iterative scan keeps filling the limit with comparable
-        rows despite the filter.
+        rows despite the filter. ``vector_min_similarity`` is an optional
+        cosine floor applied in this query; None keeps the unfiltered pool.
         """
         await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
         distance = Memory.embedding.cosine_distance(embedding)
-        score = (literal(1.0) - distance).label("score")
+        similarity = literal(1.0) - distance
+        score = similarity.label("score")
         comparable = or_(
             Memory.embedding_model.is_(None),
             Memory.embedding_model == embedding_model,
         )
+        predicates = [*filters, comparable]
+        if vector_min_similarity is not None:
+            predicates.append(similarity >= vector_min_similarity)
         stmt = (
             select(Memory, score)
             .options(*_light())
-            .where(*filters, comparable)
+            .where(*predicates)
             .order_by(distance)
             .limit(limit)
         )
@@ -1153,6 +1167,7 @@ class MemoryRepository:
         embedding: list[float] | None,
         embedding_model: str | None,
         trigram_min_word_similarity: float | None,
+        vector_min_similarity: float | None = None,
         static_limit: int,
         dynamic_limit: int,
         dynamic_since: datetime,
@@ -1271,7 +1286,12 @@ class MemoryRepository:
                 )
                 if embedding is not None:
                     vector = await self._vector_candidates(
-                        session, embedding, embedding_model, focus_filters, capped
+                        session,
+                        embedding,
+                        embedding_model,
+                        focus_filters,
+                        capped,
+                        vector_min_similarity=vector_min_similarity,
                     )
                 text = await self._text_candidates(session, query, focus_filters, capped)
                 if trigram_min_word_similarity is not None:

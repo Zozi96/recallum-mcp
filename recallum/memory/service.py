@@ -937,7 +937,9 @@ class MemoryService:
         ``max_tokens`` packs a prefix of the ranked hits by a local estimate
         (``ceil(chars/4)`` plus a small per-hit overhead). That count is an
         estimate for server-side packing, not the client model's tokenizer.
-        ``strategy`` stably reorders already-fused candidates by category
+        ``limit`` and ``max_tokens`` are maxima: admission or packing may
+        return fewer items than requested. ``strategy`` stably reorders
+        already-fused candidates by category
         priority and never drops a hit that still fits the budget. ``kind``
         narrows the candidate set to that kind; a NULL (unclassified) memory
         never matches a concrete ``kind`` filter. ``symbol``/``file`` restrict
@@ -982,6 +984,7 @@ class MemoryService:
             file=normalized_file,
             limit=candidate_limit,
             trigram_min_word_similarity=self._trigram_min_similarity(),
+            vector_min_similarity=self._limits.recall_vector_min_similarity,
         )
 
         fused = self._reciprocal_rank_fusion(
@@ -1152,6 +1155,7 @@ class MemoryService:
             embedding=embedding,
             embedding_model=self._embeddings.model,
             trigram_min_word_similarity=self._trigram_min_similarity(),
+            vector_min_similarity=self._limits.recall_vector_min_similarity,
             static_limit=self._limits.profile_static_max_items,
             dynamic_limit=self._limits.profile_dynamic_max_items,
             dynamic_since=datetime.now(UTC)

@@ -8,7 +8,7 @@ from recallum.db.repositories.memory_repo import ProfileGenerationConflict
 from recallum.memory.limits import MemoryLimits
 from recallum.memory.profile_select import items_from_stored, profile_content_hash
 from recallum.memory.service import MemoryService
-from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository
+from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
 from tests.unit.test_service import make_service
 
 USER = uuid.uuid4()
@@ -54,6 +54,43 @@ async def test_focus_does_not_evict_profile():
     profile_ids = {i.id for i in (*ctx.profile.static, *ctx.profile.dynamic)}
     group_ids = {item.id for group in ctx.groups for item in group.items}
     assert profile_ids.isdisjoint(group_ids)
+
+
+async def test_context_vector_min_similarity_keeps_profile_intact():
+    vectors = {
+        "always use type hints": [1.0, 0.0],
+        "the payment service uses FastAPI routers": [0.2, 0.979795897],
+        "unrelated focus query": [0.0, 1.0],
+    }
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=ScriptedEmbeddingClient(vectors),
+        limits=MemoryLimits(recall_vector_min_similarity=0.99),
+    )
+    pref = await service.remember(
+        USER, content="always use type hints", category="preference", importance=9
+    )
+    fact = await service.remember(
+        USER,
+        content="the payment service uses FastAPI routers",
+        category="fact",
+        importance=5,
+        project="pay",
+    )
+    ctx = await service.context(
+        USER,
+        project="pay",
+        focus="unrelated focus query",
+        max_items=5,
+        max_chars=400,
+    )
+    assert ctx.profile.available is True
+    assert any(item.id == pref.memory.id for item in ctx.profile.static)
+    assert ctx.total_available >= 2
+    group_ids = {item.id for group in ctx.groups for item in group.items}
+    assert pref.memory.id not in group_ids
+    assert fact.memory.id in group_ids
 
 
 async def test_forget_removes_from_profile():

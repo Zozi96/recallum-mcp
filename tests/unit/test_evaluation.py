@@ -14,12 +14,16 @@ from pathlib import Path
 import pytest
 
 from recallum.evaluation import (
+    essential_recall_at_3,
+    irrelevant_rate_at_5,
     load_dataset,
+    ndcg_at_5,
     read_dataset,
     recall_fraction,
     reciprocal_rank,
     render_report,
     run_eval,
+    useful_token_density,
 )
 from recallum.memory.service import MemoryService
 from tests.fakes import FakeMemoryRepository, ScriptedEmbeddingClient
@@ -94,6 +98,114 @@ def test_metric_math_pins_the_edges():
     assert reciprocal_rank([], ["z"]) == 0.0
     assert recall_fraction(["a", "b", "c"], ["a", "z"]) == 0.5
     assert recall_fraction([], ["a"]) == 0.0
+
+
+def test_load_dataset_accepts_graded_relevance_and_keeps_expect():
+    dataset = load_dataset(
+        {
+            "corpus": [
+                {"key": "a", "content": "one"},
+                {"key": "b", "content": "two"},
+            ],
+            "queries": [
+                {
+                    "query": "q",
+                    "expect": ["a"],
+                    "relevance": {"a": 3, "b": 0},
+                }
+            ],
+        }
+    )
+    query = dataset.queries[0]
+    assert query.expect == ("a",)
+    assert query.relevance == {"a": 3, "b": 0}
+
+
+def test_load_dataset_treats_absent_relevance_as_ungraded():
+    dataset = load_dataset(
+        {
+            "corpus": [{"key": "a", "content": "one"}],
+            "queries": [{"query": "q", "expect": ["a"]}],
+        }
+    )
+    assert dataset.queries[0].relevance is None
+
+
+def test_load_dataset_rejects_relevance_shape_errors():
+    corpus = [{"key": "a", "content": "one"}]
+    with pytest.raises(ValueError, match="unknown relevance keys"):
+        load_dataset(
+            {
+                "corpus": corpus,
+                "queries": [{"query": "q", "expect": ["a"], "relevance": {"ghost": 3}}],
+            }
+        )
+    with pytest.raises(ValueError, match="must be an int 0..3"):
+        load_dataset(
+            {
+                "corpus": corpus,
+                "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": 4}}],
+            }
+        )
+    with pytest.raises(ValueError, match="must be an int 0..3"):
+        load_dataset(
+            {
+                "corpus": corpus,
+                "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": -1}}],
+            }
+        )
+    with pytest.raises(ValueError, match="must be an int 0..3"):
+        load_dataset(
+            {
+                "corpus": corpus,
+                "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": 1.5}}],
+            }
+        )
+    with pytest.raises(ValueError, match="must be an int 0..3"):
+        load_dataset(
+            {
+                "corpus": corpus,
+                "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": True}}],
+            }
+        )
+
+
+def test_graded_metrics_cover_full_short_empty_and_negatives():
+    grades = {"ess": 3, "support": 2, "context": 1, "noise": 0}
+    tokens = {"ess": 10, "support": 10, "context": 10, "noise": 10}
+
+    full = ["ess", "support", "context", "noise"]
+    assert ndcg_at_5(full, grades) == pytest.approx(
+        ndcg_at_5(["ess", "support", "context"], grades)
+    )
+    assert essential_recall_at_3(full, grades) == 1.0
+    assert irrelevant_rate_at_5(full, grades) == pytest.approx(0.25)
+    assert useful_token_density(full, grades, tokens) == pytest.approx(0.75)
+
+    short = ["ess", "support", "context"]
+    assert ndcg_at_5(short, grades) == pytest.approx(1.0)
+    assert essential_recall_at_3(short, grades) == 1.0
+    assert irrelevant_rate_at_5(short, grades) == 0.0
+    assert useful_token_density(short, grades, tokens) == pytest.approx(1.0)
+
+    empty: list[str] = []
+    assert ndcg_at_5(empty, grades) == 0.0
+    assert essential_recall_at_3(empty, grades) == 0.0
+    assert irrelevant_rate_at_5(empty, grades) == 0.0
+    assert useful_token_density(empty, grades, tokens) is None
+
+    negatives = ["noise", "ess"]
+    assert ndcg_at_5(negatives, grades) < ndcg_at_5(["ess"], grades)
+    assert essential_recall_at_3(["noise", "other", "x", "ess"], grades) == 0.0
+    assert irrelevant_rate_at_5(negatives, grades) == pytest.approx(0.5)
+    assert useful_token_density(negatives, grades, tokens) == pytest.approx(0.5)
+
+
+def test_ndcg_penalizes_omitted_useful_on_short_lists():
+    grades = {"ess": 3, "support": 2}
+    assert ndcg_at_5(["ess"], grades) < 1.0
+    assert essential_recall_at_3(["ess"], grades) == 1.0
+    assert irrelevant_rate_at_5(["ess"], grades) == 0.0
 
 
 def test_load_dataset_fails_loudly_on_shape_errors():
@@ -202,3 +314,112 @@ async def test_run_eval_is_dry_and_reproducible():
     second = render_report(await run_eval(second_service, USER, dataset, k=10))
 
     assert first == second
+
+
+def _graded_payload() -> dict:
+    return {
+        "corpus": [
+            {"key": "alpha", "content": "alpha subsystem owns ingestion"},
+            {"key": "alpha-support", "content": "alpha ingestion retries five times"},
+            {"key": "beta", "content": "beta subsystem owns billing"},
+        ],
+        "queries": [
+            {
+                "query": "who handles ingestion",
+                "expect": ["alpha"],
+                "tag": "semantic",
+                "relevance": {"alpha": 3, "alpha-support": 2, "beta": 0},
+            },
+            {
+                "query": "who handles billing",
+                "expect": ["beta"],
+                "tag": "legacy",
+            },
+        ],
+    }
+
+
+def make_graded_eval_service() -> MemoryService:
+    embedder = ScriptedEmbeddingClient(
+        vectors={
+            "alpha subsystem owns ingestion": AXIS_A,
+            "alpha ingestion retries five times": AXIS_A,
+            "beta subsystem owns billing": AXIS_B,
+            "who handles ingestion": AXIS_A,
+            "who handles billing": AXIS_B,
+        }
+    )
+    return MemoryService(repository=FakeMemoryRepository(), embeddings=embedder)
+
+
+async def test_render_report_keeps_mrr_lines_and_marks_ungraded_unavailable():
+    service, _ = make_eval_service()
+    report = await run_eval(service, USER, load_dataset(DATASET), k=1)
+    text = render_report(report)
+    assert "MRR" in text
+    assert "R@1" in text
+    assert "overall" in text
+    assert "graded: unavailable" in text
+    assert "nDCG@5=0.00" not in text
+
+
+async def test_render_report_adds_graded_metrics_only_for_judged_queries():
+    report = await run_eval(make_graded_eval_service(), USER, load_dataset(_graded_payload()), k=5)
+    text = render_report(report)
+    assert "MRR" in text
+    assert "R@5" in text
+    assert "graded (judged 1/2):" in text
+    assert "nDCG@5" in text
+    assert "essential-recall@3" in text
+    assert "irrelevant-rate@5" in text
+    assert "[legacy] 'who handles billing' graded unavailable" in text
+    assert report.outcomes[1].ndcg_at_5 is None
+    assert report.ndcg_at_5 == report.outcomes[0].ndcg_at_5
+    by_tag = report.by_tag()
+    assert by_tag["semantic"][0] == 1
+    assert by_tag["legacy"] == (1, 1.0, 1.0)
+    assert "legacy" not in report.graded_by_tag()
+
+
+async def test_present_relevance_treats_undeclared_corpus_keys_as_grade_zero():
+    payload = {
+        "corpus": [
+            {"key": "alpha", "content": "alpha subsystem owns ingestion"},
+            {"key": "beta", "content": "beta subsystem owns billing"},
+        ],
+        "queries": [
+            {
+                "query": "who handles billing",
+                "expect": ["beta"],
+                "tag": "semantic",
+                "relevance": {"beta": 3},
+            }
+        ],
+    }
+    service, _ = make_eval_service()
+    report = await run_eval(service, USER, load_dataset(payload), k=5)
+    outcome = report.outcomes[0]
+    assert outcome.graded
+    assert "alpha" in outcome.returned
+    assert "alpha" in outcome.served_irrelevants
+    assert outcome.irrelevant_rate_at_5 > 0.0
+
+
+def test_shipped_dataset_has_relevance_on_every_query_and_language_tag():
+    dataset = read_dataset(SHIPPED_DATASET)
+    assert all(query.relevance is not None for query in dataset.queries)
+    by_tag = {query.tag for query in dataset.queries}
+    for tag in ("es-es", "es-en", "en-en", "en-es", "semantic", "exact", "typo", "identifier"):
+        assert tag in by_tag
+        assert all(
+            query.relevance is not None
+            for query in dataset.queries
+            if query.tag == tag
+        )
+    used_grades = {grade for query in dataset.queries for grade in query.relevance.values()}
+    assert {0, 1, 2, 3} <= used_grades
+    keys = {item.key for item in dataset.corpus}
+    for query in dataset.queries:
+        for key in query.expect:
+            assert query.relevance[key] == 3
+        assert set(query.relevance) <= keys
