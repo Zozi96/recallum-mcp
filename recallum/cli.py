@@ -180,6 +180,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Persist candidates via remember_batch instead of printing them (default: dry-run)",
     )
 
+    list_projects = subparsers.add_parser(
+        "list-projects",
+        help=(
+            "List a user's project keys with active memory counts; the audit "
+            "step before a reassign-project (spots fragmented or stale keys)"
+        ),
+    )
+    list_projects.add_argument("--email", required=True)
+
+    reassign = subparsers.add_parser(
+        "reassign-project",
+        help=(
+            "Move every active memory from one project key to another; the "
+            "supervised fix for key fragmentation after a move, fork or rename"
+        ),
+    )
+    reassign.add_argument("--email", required=True)
+    reassign.add_argument("--from", dest="from_project", required=True, help="Current key")
+    reassign.add_argument("--to", dest="to_project", required=True, help="Target key")
+
     return parser
 
 
@@ -388,6 +408,36 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
                 f"(cap is {MAX_CANDIDATES})",
                 file=sys.stderr,
             )
+        return 0
+
+    if args.command == "list-projects":
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        rows = await container.memory_repository().list_project_counts(user.id)
+        if not rows:
+            print("no project-scoped memories")
+            return 0
+        for project, count in rows:
+            print(f"{project}  {count} active")
+        return 0
+
+    if args.command == "reassign-project":
+        user = await container.user_repository().get_by_email(args.email.lower())
+        if user is None:
+            print(f"error: user '{args.email}' does not exist", file=sys.stderr)
+            return 1
+        try:
+            result = await container.memory_service().reassign_project(
+                user.id, from_project=args.from_project, to_project=args.to_project
+            )
+        except MemoryValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"moved={result.moved} conflicts={len(result.conflicts)}")
+        for conflict in result.conflicts:
+            print(f"  conflict (content already active under target): {conflict}")
         return 0
 
     return 2  # pragma: no cover - argparse enforces known commands

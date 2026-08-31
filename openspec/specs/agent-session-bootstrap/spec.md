@@ -5,9 +5,20 @@ Definir cómo el plugin prepara a un agente al iniciar o reanudar sesión: clave
 proyecto, inyección de contexto, visibilidad de fallos del MCP y guía de delegación.
 ## Requirements
 ### Requirement: Clave canónica de proyecto robusta
-El hook de sesión MUST derivar una clave de proyecto opaca y estable: a partir del remote `origin`
+El hook de sesión MUST derivar una clave de proyecto opaca y estable: del archivo ancla
+`.recallum-project` comprometido en el repositorio cuando existe, a partir del remote `origin`
 cuando existe, de cualquier otro remote configurado cuando `origin` falta, y de la ruta raíz del
-repositorio sólo como último recurso.
+repositorio sólo como último recurso. La derivación MUST existir una sola vez como código
+ejecutable (`recallum_hook.py project-key`); las reglas y skills MUST apuntar a ese comando en
+lugar de re-especificar el algoritmo.
+
+#### Scenario: Ancla comprometida en el repositorio
+- **WHEN** el repositorio o un directorio padre contiene `.recallum-project` con contenido `anchor:<hex>` válido
+- **THEN** la clave es ese ancla, con precedencia sobre cualquier remote, y es idéntica en toda máquina que clone el repositorio
+
+#### Scenario: Ancla malformada
+- **WHEN** existe `.recallum-project` pero su contenido no cumple el formato `anchor:<hex>`
+- **THEN** el hook ignora el ancla y deriva la clave por la vía normal, sin escalar a anclas de directorios padre
 
 #### Scenario: Repositorio con origin
 - **WHEN** el repositorio tiene remote `origin`
@@ -17,9 +28,25 @@ repositorio sólo como último recurso.
 - **WHEN** el repositorio no tiene `origin` pero sí otro remote configurado
 - **THEN** el hook usa ese remote para derivar la misma forma de clave `remote:`
 
+#### Scenario: Normalización de host insensible a mayúsculas
+- **WHEN** el remote pertenece a un host con rutas insensibles a mayúsculas (p. ej. github.com, gitlab.com, bitbucket.org)
+- **THEN** host y ruta se normalizan en minúsculas, de modo que `github.com/Owner/Repo` y `github.com/owner/repo` derivan la misma clave
+
+#### Scenario: Puerto no por defecto
+- **WHEN** la URL del remote usa un puerto distinto del por defecto de su esquema
+- **THEN** el canonical incluye `<host>:<puerto>`, evitando colisiones entre servidores distintos en el mismo host
+
 #### Scenario: Repositorio sin remotes
 - **WHEN** el repositorio no tiene ningún remote
 - **THEN** el hook deriva una clave `local:` a partir de la ruta raíz resuelta
+
+#### Scenario: Fallo transitorio de git con caché
+- **WHEN** git no responde (timeout o binario ausente) y el checkout ya derivó una clave sana antes
+- **THEN** el hook reutiliza la clave cacheada en el git dir en lugar de degradar a una clave `local:` por subdirectorio
+
+#### Scenario: Fallo transitorio de git sin caché
+- **WHEN** git no responde y no existe clave cacheada
+- **THEN** el hook cae a la clave por ruta como mejor estimación estable, sin cachearla, para que una ejecución sana posterior pueda derivar la clave `remote:`
 
 ### Requirement: Digest de contexto opcional al iniciar sesión
 Cuando la configuración opt-in del digest está presente, el hook de sesión MUST intentar obtener un

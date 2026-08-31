@@ -893,6 +893,14 @@ class FakeMemoryRepository:
             self._bump(user_id)
         return moved, [m.id for m in conflicts]
 
+    async def list_project_counts(self, user_id: uuid.UUID) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {}
+        for memory in self._active(user_id):
+            if memory.scope != "project":
+                continue
+            counts[memory.project] = counts.get(memory.project, 0) + 1
+        return sorted(counts.items())
+
     async def update_attributes(
         self,
         user_id: uuid.UUID,

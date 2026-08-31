@@ -1521,6 +1521,57 @@ class MemoryRepositoryContract:
         assert (await repo.get_active(user_id, colliding.id)).project == "alpha"
         assert (await repo.get_active(other_user_id, foreign.id)).project == "alpha"
 
+    async def test_list_project_counts_reports_active_buckets_per_user(
+        self, repo, user_id, other_user_id
+    ):
+        deleted = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="alpha fact now deleted",
+                content_hash=_hash("counts-alpha-deleted"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="alpha fact still active",
+                content_hash=_hash("counts-alpha-active"),
+                scope="project",
+                project="alpha",
+            ),
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="beta fact",
+                content_hash=_hash("counts-beta"),
+                scope="project",
+                project="beta",
+            ),
+        )
+        await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="global fact, never a project bucket",
+                content_hash=_hash("counts-global"),
+                scope="global",
+            ),
+        )
+        await repo.create_memory(
+            other_user_id,
+            **self._kwargs(
+                content="foreign gamma fact",
+                content_hash=_hash("counts-foreign"),
+                scope="project",
+                project="gamma",
+            ),
+        )
+        await repo.soft_delete(user_id, deleted.id)
+
+        assert await repo.list_project_counts(user_id) == [("alpha", 1), ("beta", 1)]
+
     # -- graph_snapshot --------------------------------------------------
 
     @staticmethod

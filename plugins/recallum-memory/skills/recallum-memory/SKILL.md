@@ -71,14 +71,26 @@ Translating an existing, still-true memory is not a reason to call `update`.
 
 1. Use the opaque canonical project key supplied by the Recallum session hook. If the hook context
    is absent (including a Cursor session that drops `sessionStart` context), derive the same key
-   exactly:
-   - Resolve the workspace to its Git top-level. Use `origin`, or the first remote reported by
-     `git remote` when `origin` is absent.
-   - For a parseable URL or SCP-style remote, normalize to `<lowercase-host>/<path>` after removing
-     leading/trailing path slashes and one trailing `.git`. SHA-256 hash that UTF-8 string, take the
-     first 16 lowercase hex characters, and prefix `remote:`.
-   - With no parseable remote, SHA-256 hash the absolute Git root (or absolute workspace when it is
-     not a repository), take the first 12 lowercase hex characters, and prefix `local:`.
+   with the bundled executable source of truth:
+   `python3 <plugin>/hooks/recallum_hook.py project-key <workspace>` — the plugin root is the
+   directory containing `hooks/` (e.g. under `$CURSOR_PLUGIN_ROOT` in Cursor, `$PLUGIN_ROOT` in
+   Codex, `$CLAUDE_PLUGIN_ROOT` in Claude Code). Only when that script cannot be run, apply the
+   same algorithm by hand:
+   - A valid `.recallum-project` file (one line, `anchor:<16-64 lowercase hex>`) at the Git
+     top-level or any parent directory is the key; it takes precedence over every other source
+     and is identical on every machine that clones the repository. `python3 <plugin>/hooks/recallum_hook.py init`
+     creates it.
+   - Otherwise resolve the workspace to its Git top-level. Use `origin`, or the first remote
+     reported by `git remote` when `origin` is absent.
+   - For a parseable URL or SCP-style remote, normalize to `<lowercase-host>/<path>` — path
+     lowercased on case-insensitive hosts (github.com, gitlab.com, bitbucket.org), non-default
+     port kept as `<host>:<port>` — after removing leading/trailing path slashes and one trailing
+     `.git`. SHA-256 hash that UTF-8 string, take the first 16 lowercase hex characters, and
+     prefix `remote:`.
+   - With no parseable remote, SHA-256 hash the absolute Git root (or absolute workspace when it
+     is not a repository), take the first 12 lowercase hex characters, and prefix `local:`.
+   - When git itself fails transiently (timeout, missing binary), reuse the key cached in the
+     git dir (`recallum-project-key`) before falling back to a `local:` path key.
    The only scopes are `global` and `project`: use `global` only for durable information that truly
    applies across projects, such as a general user preference.
 2. At session start or resume, call `context` with `project` — unless the session hook already

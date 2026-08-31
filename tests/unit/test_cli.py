@@ -730,3 +730,86 @@ async def test_bootstrap_cap_truncation_reports_note_to_operator(tmp_path, capsy
     err = capsys.readouterr().err
     assert "omitted" in err
     assert "cap is 10" in err
+
+
+async def test_list_projects_reports_keys_with_active_counts(capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "pat@example.com"]), container)
+    user = list(fakes["users"].users.values())[0]
+    service = container.memory_service()
+    await service.remember(user.id, content="alpha one", category="fact", project="local:aaa")
+    await service.remember(user.id, content="alpha two", category="fact", project="local:aaa")
+    await service.remember(user.id, content="beta one", category="fact", project="remote:bbb")
+    await service.remember(user.id, content="global fact", category="fact")
+    capsys.readouterr()
+
+    code = await _run(parse(["list-projects", "--email", "pat@example.com"]), container)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "local:aaa  2 active" in out
+    assert "remote:bbb  1 active" in out
+    assert "global" not in out
+
+
+async def test_list_projects_unknown_user_fails(capsys):
+    container, _ = build_test_container()
+
+    code = await _run(parse(["list-projects", "--email", "ghost@example.com"]), container)
+
+    assert code == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+async def test_reassign_project_moves_memories_between_keys(capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "sam@example.com"]), container)
+    user = list(fakes["users"].users.values())[0]
+    service = container.memory_service()
+    await service.remember(user.id, content="orphaned fact", category="fact", project="local:old")
+    capsys.readouterr()
+
+    code = await _run(
+        parse(
+            [
+                "reassign-project",
+                "--email",
+                "sam@example.com",
+                "--from",
+                "local:old",
+                "--to",
+                "remote:new",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 0
+    assert "moved=1 conflicts=0" in capsys.readouterr().out
+    assert await container.memory_repository().list_project_counts(user.id) == [
+        ("remote:new", 1)
+    ]
+
+
+async def test_reassign_project_rejects_identical_keys(capsys):
+    container, fakes = build_test_container()
+    await _run(parse(["create-user", "--email", "sam@example.com"]), container)
+    capsys.readouterr()
+
+    code = await _run(
+        parse(
+            [
+                "reassign-project",
+                "--email",
+                "sam@example.com",
+                "--from",
+                "local:same",
+                "--to",
+                "local:same",
+            ]
+        ),
+        container,
+    )
+
+    assert code == 1
+    assert "identical" in capsys.readouterr().err

@@ -38,6 +38,21 @@ def _load_doctor():
     return module
 
 
+def _load_hook():
+    """Import the hook as a module so its pure key functions can be unit-tested.
+
+    End-to-end behaviour stays subprocess-driven via run_hook; normalization
+    tables and cache predicates are cheaper and clearer exercised directly.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("recallum_hook", HOOK)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 CODEX_MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CLAUDE_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 GROK_MANIFEST = PLUGIN_ROOT / "plugin.json"
@@ -642,6 +657,128 @@ class HookTests(unittest.TestCase):
             self.assertIn("project='remote:", context)
             self.assertNotIn("ignore previous instructions", context)
 
+    def test_anchor_file_takes_precedence_over_remote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.com/owner/repo.git",
+                ],
+                check=True,
+            )
+            anchor = "anchor:" + "a" * 32
+            (root / ".recallum-project").write_text(anchor + "\n", encoding="utf-8")
+            result = run_hook("session", json.dumps({"cwd": str(root)}))
+            context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(f"project='{anchor}'", context)
+
+    def test_anchor_is_found_from_a_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            anchor = "anchor:" + "b" * 32
+            (root / ".recallum-project").write_text(anchor + "\n", encoding="utf-8")
+            nested = root / "sub" / "dir"
+            nested.mkdir(parents=True)
+            result = run_hook("session", json.dumps({"cwd": str(nested)}))
+            context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(f"project='{anchor}'", context)
+
+    def test_malformed_anchor_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".recallum-project").write_text("not-a-key\n", encoding="utf-8")
+            result = run_hook("session", json.dumps({"cwd": str(root)}))
+            context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("project='local:", context)
+            self.assertNotIn("not-a-key", context)
+
+    def test_successful_derivation_caches_the_key_in_the_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.com/owner/repo.git",
+                ],
+                check=True,
+            )
+            result = run_hook("session", json.dumps({"cwd": str(root)}))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            cached = (
+                (root / ".git" / "recallum-project-key").read_text(encoding="utf-8").strip()
+            )
+            self.assertTrue(cached.startswith("remote:"))
+            context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(f"project='{cached}'", context)
+
+    def test_project_key_command_matches_the_session_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.com/owner/repo.git",
+                ],
+                check=True,
+            )
+            result = subprocess.run(
+                ["python3", str(HOOK), "project-key", str(root)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            key = result.stdout.strip()
+            self.assertTrue(key.startswith("remote:"))
+            session = run_hook("session", json.dumps({"cwd": str(root)}))
+            context = json.loads(session.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(f"project='{key}'", context)
+
+    def test_init_creates_an_idempotent_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            first = subprocess.run(
+                ["python3", str(HOOK), "init", str(root)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            key = first.stdout.strip()
+            self.assertRegex(key, r"^anchor:[0-9a-f]{32}$")
+            second = subprocess.run(
+                ["python3", str(HOOK), "init", str(root)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(second.stdout.strip(), key)
+            self.assertEqual(
+                (root / ".recallum-project").read_text(encoding="utf-8").strip(), key
+            )
+
     def test_matching_english_and_spanish_prompts_emit_context(self) -> None:
         for prompt in (
             "Remember that we use UTC.",
@@ -676,6 +813,88 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+
+class RemoteKeyTests(unittest.TestCase):
+    """Normalization table for `_remote_key`: one canonical form per project."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.hook = _load_hook()
+
+    def test_https_and_scp_remotes_derive_the_same_key(self) -> None:
+        self.assertEqual(
+            self.hook._remote_key("https://github.com/Owner/Repo.git"),
+            self.hook._remote_key("git@github.com:Owner/Repo.git"),
+        )
+
+    def test_case_insensitive_host_lowercases_the_path(self) -> None:
+        self.assertEqual(
+            self.hook._remote_key("https://github.com/Owner/Repo.git"),
+            self.hook._remote_key("https://github.com/owner/repo.git"),
+        )
+
+    def test_case_sensitive_host_preserves_the_path_case(self) -> None:
+        self.assertNotEqual(
+            self.hook._remote_key("https://git.example.com/Owner/Repo.git"),
+            self.hook._remote_key("https://git.example.com/owner/repo.git"),
+        )
+
+    def test_non_default_port_distinguishes_servers_on_one_host(self) -> None:
+        self.assertNotEqual(
+            self.hook._remote_key("https://git.example.com/owner/repo.git"),
+            self.hook._remote_key("https://git.example.com:8443/owner/repo.git"),
+        )
+
+    def test_default_port_is_dropped(self) -> None:
+        self.assertEqual(
+            self.hook._remote_key("https://git.example.com/owner/repo.git"),
+            self.hook._remote_key("https://git.example.com:443/owner/repo.git"),
+        )
+
+    def test_unparseable_remote_yields_no_key(self) -> None:
+        self.assertIsNone(self.hook._remote_key("not a url at all"))
+
+
+class CachedKeyTests(unittest.TestCase):
+    """The git-dir cache keeps one checkout on one key across git outages."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.hook = _load_hook()
+
+    def test_cached_key_is_read_back_from_a_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            self.hook._write_cached_key(root, "remote:abc123")
+            nested = root / "sub"
+            nested.mkdir()
+            self.assertEqual(self.hook._read_cached_key(nested), "remote:abc123")
+
+    def test_garbage_cache_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            (root / ".git" / "recallum-project-key").write_text(
+                "garbage\n", encoding="utf-8"
+            )
+            self.assertIsNone(self.hook._read_cached_key(root))
+
+    def test_write_without_git_dir_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.hook._write_cached_key(root, "remote:abc123")
+            self.assertFalse((root / "recallum-project-key").exists())
+
+    def test_worktree_gitdir_pointer_is_followed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "wt")
+            real = Path(directory, "real-git")
+            root.mkdir()
+            real.mkdir()
+            (root / ".git").write_text(f"gitdir: {real}\n", encoding="utf-8")
+            self.assertEqual(self.hook._git_dir(root), real)
 
 
 class _StubMCPHandler(http.server.BaseHTTPRequestHandler):

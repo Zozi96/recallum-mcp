@@ -1911,6 +1911,26 @@ class MemoryRepository:
                 await self._increment_generation(session, user_id)
             return int(moved.rowcount or 0), conflicts
 
+    async def list_project_counts(self, user_id: uuid.UUID) -> Sequence[tuple[str, int]]:
+        """Distinct project keys with their active memory counts, for key audits.
+
+        The audit question is "which keys hold this user's memories" — the
+        answer spots fragmentation (`local:` keys for repos that now have a
+        remote, stale keys from renamed paths) before a supervised reassign.
+        """
+        async with self._sessions.for_user(user_id) as session:
+            rows = await session.execute(
+                select(Memory.project, func.count())
+                .where(
+                    Memory.user_id == user_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.scope == "project",
+                )
+                .group_by(Memory.project)
+                .order_by(Memory.project)
+            )
+            return [(str(project), int(count)) for project, count in rows]
+
     # ------------------------------------------------------------------
     # materialized profiles
     # ------------------------------------------------------------------
