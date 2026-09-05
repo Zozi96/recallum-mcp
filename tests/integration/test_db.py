@@ -407,9 +407,9 @@ async def test_remember_batch_shares_one_transaction(container):
 
     assert result.failed == 0
     assert result.stored == 3
-    # One shared persistence transaction, then three rebuild transactions
-    # (generation read, profile candidate list, profile upsert).
-    assert begins == 4
+    # One shared persistence transaction. The profile rebuild is enqueued and
+    # its transactions run on the background worker, outside this listen window.
+    assert begins == 1
     # Two savepoints per created item: one isolating the item write, one
     # isolating the advisory similar check inside it.
     assert nested == 6

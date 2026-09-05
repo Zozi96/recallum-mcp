@@ -26,6 +26,7 @@ from recallum.db.repositories.user_repo import UserRepository
 from recallum.db.repositories.web_session_repo import WebSessionRepository
 from recallum.db.session import SessionProvider
 from recallum.embeddings.ollama import OllamaEmbeddingClient
+from recallum.memory.profile_rebuild import ProfileRebuildQueue
 from recallum.memory.service import MemoryService
 from recallum.skills.service import SkillService
 from recallum.telemetry.buffer import TelemetryBuffer
@@ -180,11 +181,17 @@ class Container(containers.DeclarativeContainer):
         embeddings=embedding_client,
     )
 
+    profile_rebuild_queue = providers.Singleton(
+        ProfileRebuildQueue,
+        batch_size=16,
+        buffer_limit=1024,
+    )
     memory_service = providers.Singleton(
         MemoryService,
         repository=memory_repository,
         embeddings=embedding_client,
         limits=config.limits,
+        profile_rebuild_queue=profile_rebuild_queue,
     )
     skill_service = providers.Singleton(
         SkillService,

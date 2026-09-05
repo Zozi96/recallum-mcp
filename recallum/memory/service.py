@@ -46,6 +46,7 @@ from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.context import SessionContextBudget
 from recallum.memory.language import LANGUAGE_WARNING, looks_non_english
 from recallum.memory.limits import MemoryLimits
+from recallum.memory.profile_rebuild import ProfileRebuildQueue
 from recallum.memory.profile_select import (
     apply_profile_budget,
     items_from_stored,
@@ -108,10 +109,14 @@ class MemoryService:
         repository: MemoryRepository,
         embeddings: OllamaEmbeddingClient,
         limits: MemoryLimits | None = None,
+        profile_rebuild_queue: ProfileRebuildQueue | None = None,
     ) -> None:
         self._repo = repository
         self._embeddings = embeddings
         self._limits = limits if limits is not None else MemoryLimits()
+        self._profile_rebuild_queue = profile_rebuild_queue
+        if profile_rebuild_queue is not None:
+            profile_rebuild_queue.bind(self._rebuild_profiles_for_keys)
 
     # ------------------------------------------------------------------
     # remember
@@ -646,7 +651,7 @@ class MemoryService:
             except Exception:
                 logger.warning("could not list project profiles after batch", exc_info=True)
         if profile_keys:
-            await self._rebuild_profiles_for_keys(user_id, list(profile_keys))
+            await self._schedule_profile_rebuild(user_id, list(profile_keys))
 
         return RememberBatchResult(
             results=[o for o in outcomes if o is not None],
@@ -897,7 +902,7 @@ class MemoryService:
                 "project; retry the migration"
             ) from exc
         if moved:
-            await self._rebuild_profiles_for_keys(user_id, [normalized_from, normalized_to])
+            await self._schedule_profile_rebuild(user_id, [normalized_from, normalized_to])
         return ReassignResult(
             from_project=normalized_from,
             to_project=normalized_to,
@@ -1658,8 +1663,19 @@ class MemoryService:
             built_at=row.built_at,
         )
 
+    async def _schedule_profile_rebuild(
+        self, user_id: uuid.UUID, keys: Sequence[str | None]
+    ) -> None:
+        """Enqueue affected keys; never rebuilds inline and never fails the write."""
+        if self._profile_rebuild_queue is None:
+            return
+        try:
+            await self._profile_rebuild_queue.enqueue(user_id, keys)
+        except Exception:
+            logger.warning("could not enqueue profile rebuild; write kept", exc_info=True)
+
     async def _rebuild_profiles_for_memory(self, user_id: uuid.UUID, memory: Memory) -> None:
-        """Best-effort eager rebuild of keys this memory can affect."""
+        """Record keys this memory can affect for background rebuild."""
         if memory.scope == "project" and memory.project:
             keys: list[str | None] = [memory.project]
         else:
@@ -1668,7 +1684,7 @@ class MemoryService:
             except Exception:
                 logger.warning("could not list project profiles after mutation", exc_info=True)
                 keys = [None]
-        await self._rebuild_profiles_for_keys(user_id, keys)
+        await self._schedule_profile_rebuild(user_id, keys)
 
     async def _rebuild_profiles_for_keys(
         self, user_id: uuid.UUID, keys: Sequence[str | None]

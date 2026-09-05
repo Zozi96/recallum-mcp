@@ -41,6 +41,7 @@ def test_lifespan_health_and_clean_shutdown():
 
         # MCP mount is present.
         assert app.state.mcp_server is not None
+        assert client.app.state.container.profile_rebuild_queue().running is True
         client.portal.call(
             client.app.state.container.telemetry_buffer().record,
             ToolActivityEvent(

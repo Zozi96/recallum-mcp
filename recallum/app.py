@@ -101,22 +101,31 @@ class _LifecycleCoordinator:
 
     def __init__(self, container: Container) -> None:
         self._container = container
-        self._telemetry = None
-        self._telemetry_attempted = False
+        self._workers: list[object] = []
+        self._stopped: set[int] = set()
 
-    def register_telemetry(self, telemetry) -> None:
-        self._telemetry = telemetry
+    def register_worker(self, worker) -> None:
+        self._workers.append(worker)
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         failures: list[BaseException] = []
         if exc is not None:
             failures.append(exc)
-        if self._telemetry is not None and not self._telemetry_attempted:
-            self._telemetry_attempted = True
+        async def stop_one(index: int, worker) -> BaseException | None:
+            if index in self._stopped:
+                return None
+            self._stopped.add(index)
             try:
-                await self._telemetry.stop()
+                await worker.stop()
             except BaseException as error:
-                failures.append(error)
+                return error
+            return None
+
+        if self._workers:
+            results = await asyncio.gather(
+                *(stop_one(index, worker) for index, worker in enumerate(self._workers))
+            )
+            failures.extend(error for error in results if error is not None)
         try:
             await shutdown_container(self._container)
         except BaseException as error:
@@ -297,7 +306,10 @@ def create_app(settings: Settings | None = None, container: Container | None = N
             telemetry = resolved_container.telemetry_buffer()
             await telemetry.start()
             # Registration is synchronous immediately after successful start.
-            coordinator.register_telemetry(telemetry)
+            coordinator.register_worker(telemetry)
+            profiles = resolved_container.profile_rebuild_queue()
+            await profiles.start()
+            coordinator.register_worker(profiles)
             yield
 
     app = FastAPI(

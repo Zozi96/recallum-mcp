@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 
 import pytest
@@ -11,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from recallum.db.repositories.memory_repo import ProfileGenerationConflict
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory.limits import MemoryLimits
+from recallum.memory.profile_rebuild import ProfileRebuildQueue
 from recallum.memory.profile_select import items_from_stored, profile_content_hash
 from recallum.memory.service import MemoryService
 from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbeddingClient
@@ -19,13 +22,49 @@ from tests.unit.test_service import make_service
 USER = uuid.uuid4()
 
 
+async def _eventually(predicate, timeout=1.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.005)
+
+
+def _queued_service() -> tuple[MemoryService, FakeMemoryRepository, ProfileRebuildQueue]:
+    repo = FakeMemoryRepository()
+    queue = ProfileRebuildQueue(1, 8)
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        profile_rebuild_queue=queue,
+    )
+    return service, repo, queue
+
+
+async def test_remember_returns_without_inline_profile_rebuild():
+    service, repo, _ = make_service()
+    rebuilds = 0
+    original = service._rebuild_profiles_for_keys
+
+    async def spy(*args, **kwargs):
+        nonlocal rebuilds
+        rebuilds += 1
+        return await original(*args, **kwargs)
+
+    service._rebuild_profiles_for_keys = spy  # type: ignore[method-assign]
+    remembered = await service.remember(
+        USER, content="prefer conventional commits", category="preference", importance=7
+    )
+    assert remembered.created is True
+    assert rebuilds == 0
+    assert (USER, "") not in repo.profiles
+
+
 async def test_remember_preference_lands_in_profile_and_context():
     service, repo, _ = make_service()
     remembered = await service.remember(
         USER, content="prefer conventional commits", category="preference", importance=7
     )
     assert remembered.created is True
-    assert (USER, "") in repo.profiles
 
     ctx = await service.context(USER)
     assert ctx.profile.available is True
@@ -102,11 +141,10 @@ async def test_forget_removes_from_profile():
     service, repo, _ = make_service()
     remembered = await service.remember(USER, content="temporary preference", category="preference")
     mid = remembered.memory.id
-    assert mid in repo.profiles[(USER, "")].source_memory_ids
-
     result = await service.forget(USER, mid)
     assert result.forgotten is True
-    assert mid not in repo.profiles[(USER, "")].source_memory_ids
+    block = await service.get_profile(USER)
+    assert mid not in block.source_memory_ids
 
 
 async def test_rebuild_failure_does_not_roll_back_remember():
@@ -117,6 +155,74 @@ async def test_rebuild_failure_does_not_roll_back_remember():
     )
     assert result.created is True
     assert len(repo.rows) == 1
+
+
+async def test_worker_rebuild_failure_does_not_fail_remember(caplog):
+    service, repo, queue = _queued_service()
+    repo.profile_rebuild_failures = 1
+    await queue.start()
+    with caplog.at_level(logging.WARNING, logger="recallum.memory"):
+        result = await service.remember(
+            USER, content="still stored on worker profile failure", category="preference"
+        )
+        assert result.created is True
+        await _eventually(lambda: repo.profile_rebuild_failures == 0)
+    await queue.stop()
+    assert len(repo.rows) == 1
+    assert "profile rebuild failed after memory mutation; write kept" in caplog.text
+
+
+async def test_worker_rebuilds_enqueued_keys():
+    service, repo, queue = _queued_service()
+    await queue.start()
+    remembered = await service.remember(
+        USER, content="prefer black formatter", category="preference"
+    )
+    await _eventually(lambda: (USER, "") in repo.profiles)
+    await queue.stop()
+    assert remembered.memory.id in repo.profiles[(USER, "")].source_memory_ids
+
+
+async def test_lazy_read_rebuilds_while_worker_has_not_run():
+    service, repo, queue = _queued_service()
+    remembered = await service.remember(
+        USER, content="constraint: no force push", category="constraint"
+    )
+    assert queue.pending_count >= 1
+    assert queue.running is False
+    assert (USER, "") not in repo.profiles
+    block = await service.get_profile(USER)
+    assert block.available is True
+    assert any(item.id == remembered.memory.id for item in block.static)
+    ctx = await service.context(USER)
+    assert ctx.profile.available is True
+    assert any(item.id == remembered.memory.id for item in ctx.profile.static)
+
+
+async def test_mutations_do_not_rebuild_inline():
+    service, repo, _ = make_service()
+    rebuilds = 0
+    original = service._rebuild_profiles_for_keys
+
+    async def spy(*args, **kwargs):
+        nonlocal rebuilds
+        rebuilds += 1
+        return await original(*args, **kwargs)
+
+    service._rebuild_profiles_for_keys = spy  # type: ignore[method-assign]
+    first = await service.remember(USER, content="first preference", category="preference")
+    second = await service.remember(USER, content="second preference", category="preference")
+    await service.update(USER, first.memory.id, importance=8)
+    await service.merge(
+        USER,
+        source_ids=[first.memory.id, second.memory.id],
+        content="merged preference",
+        category="preference",
+    )
+    merged_id = next(row.id for row in repo.rows.values() if not row.is_deleted)
+    await service.reconfirm(USER, merged_id)
+    await service.forget(USER, merged_id)
+    assert rebuilds == 0
 
 
 async def test_context_degrades_when_profile_unavailable():
@@ -241,6 +347,7 @@ async def test_served_digest_covers_live_dynamic_and_built_at_stays_static():
     fact = await service.remember(
         USER, content="the auth service uses Granian", category="fact", importance=1
     )
+    await service.get_profile(USER)
     stored = repo.profiles[(USER, "")]
     static_hash = profile_content_hash(items_from_stored(stored.static_items), [])
     assert stored.content_hash == static_hash
@@ -297,7 +404,6 @@ async def test_project_profile_is_combined_without_cross_project_memory():
 async def test_failed_eager_attribute_update_is_repaired_lazily():
     service, repo, _ = make_service()
     remembered = await service.remember(USER, content="old preference", category="preference")
-    repo.profile_rebuild_failures = 1
     await service.update(USER, remembered.memory.id, category="constraint")
     repaired = await service.get_profile(USER)
     assert repaired.static[0].category == "constraint"

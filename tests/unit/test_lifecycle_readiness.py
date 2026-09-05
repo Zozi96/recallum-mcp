@@ -220,17 +220,18 @@ def test_readiness_probes_run_concurrently_and_return_stable_503() -> None:
     )
     app = create_app(settings, container)
 
-    started = time.monotonic()
     with TestClient(app) as client:
+        started = time.monotonic()
         response = client.get("/readyz")
-    elapsed = time.monotonic() - started
+        elapsed = time.monotonic() - started
 
     assert response.status_code == 503
     assert response.json() == {
         "status": "unavailable",
         "checks": {"database": "unavailable", "embeddings": "unavailable"},
     }
-    assert elapsed < 0.2
+    # Bound against the 10s probe sleeps, not TestClient lifespan (extra workers).
+    assert elapsed < 1.0
 
 
 def test_readiness_barrier_proves_both_probes_start_concurrently() -> None:
