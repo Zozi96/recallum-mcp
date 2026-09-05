@@ -26,7 +26,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from recallum.boundary_types import StrictImportance, StrictNonNegativeOffset, StrictPositiveLimit
@@ -291,14 +291,27 @@ class MemoryService:
         )
 
     @staticmethod
-    def _is_dedup_integrity_error(exc: IntegrityError) -> bool:
-        """True when the error is a collision on the active-memory dedup index."""
+    def _pg_integrity_attr(exc: IntegrityError, name: str) -> object:
+        """Read a PG error field from the DBAPI orig or its asyncpg cause."""
         orig = getattr(exc, "orig", None)
-        if orig is not None:
-            constraint = getattr(orig, "constraint_name", "") or ""
-            if "uq_memories_active_dedup" in constraint:
-                return True
-        return "uq_memories_active_dedup" in str(exc)
+        cause = getattr(orig, "__cause__", None) if orig is not None else None
+        for candidate in (orig, cause):
+            if candidate is None:
+                continue
+            value = getattr(candidate, name, None)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _is_dedup_integrity_error(cls, exc: IntegrityError) -> bool:
+        """True when the error is a unique violation of the active-memory dedup index."""
+        if cls._pg_integrity_attr(exc, "constraint_name") != "uq_memories_active_dedup":
+            return False
+        sqlstate = cls._pg_integrity_attr(exc, "sqlstate")
+        if sqlstate is None:
+            return True
+        return isinstance(sqlstate, str) and sqlstate == "23505"
 
     def _embedding_http_limit(self) -> int:
         """Bound per-item embed retries to the shared HTTP client's pool."""
@@ -1216,7 +1229,10 @@ class MemoryService:
                 max_items=min(effective_max_items, self._limits.profile_context_max_items),
                 max_chars=min(effective_max_chars, self._limits.profile_context_max_chars),
             )
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, (OSError, SQLAlchemyError)):
+                record_sanitized_failure(logger, exc, message="Profile assembly failed")
+                raise
             logger.warning("profile assembly failed; context continues", exc_info=True)
             profile_block = ProfileBlock(available=False, project=normalized_project)
 
@@ -1535,7 +1551,10 @@ class MemoryService:
         normalized = self._normalize_project(project)
         try:
             return await self._ensure_profile(user_id, project=normalized)
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, (OSError, SQLAlchemyError)):
+                record_sanitized_failure(logger, exc, message="Profile read failed")
+                raise
             logger.warning("profile read failed; returning unavailable", exc_info=True)
             return ProfileBlock(available=False, project=normalized)
 

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
+import pytest
+from sqlalchemy.exc import OperationalError
+
 from recallum.db.repositories.memory_repo import ProfileGenerationConflict
+from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory.limits import MemoryLimits
 from recallum.memory.profile_select import items_from_stored, profile_content_hash
 from recallum.memory.service import MemoryService
@@ -128,6 +133,46 @@ async def test_context_degrades_when_profile_unavailable():
     assert ctx.profile.available is False
     # Groups still assemble.
     assert ctx.total_available >= 1
+
+
+async def test_get_profile_propagates_database_error_instead_of_unavailable(caplog):
+    service, repo, _ = make_service()
+
+    async def boom(*_a, **_k):
+        raise OperationalError("get_profile", {}, OSError("connection refused"))
+
+    repo.get_profile = boom  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR, logger="recallum.memory"):
+        with pytest.raises(OperationalError):
+            await service.get_profile(USER)
+    assert "Profile read failed" in caplog.text
+
+
+async def test_context_propagates_database_error_during_profile_assembly(caplog):
+    service, repo, _ = make_service()
+    await service.remember(USER, content="a fact about x", category="fact", importance=4)
+
+    async def boom(*_a, **_k):
+        raise OperationalError("upsert_profile", {}, OSError("db down"))
+
+    repo.upsert_profile = boom  # type: ignore[method-assign]
+    repo.profiles.clear()
+    with caplog.at_level(logging.ERROR, logger="recallum.memory"):
+        with pytest.raises(OperationalError):
+            await service.context(USER)
+    assert "Profile assembly failed" in caplog.text
+
+
+async def test_get_profile_degrades_on_embedding_error():
+    service, repo, _ = make_service()
+
+    async def boom(*_a, **_k):
+        raise EmbeddingError("ollama down")
+
+    service.rebuild_profile = boom  # type: ignore[method-assign]
+    repo.profiles.clear()
+    block = await service.get_profile(USER)
+    assert block.available is False
 
 
 async def test_context_records_usage_for_profile_items():

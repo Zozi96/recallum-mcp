@@ -72,6 +72,86 @@ async def test_remember_exact_duplicate_returns_existing():
     assert len(repo.rows) == 1
 
 
+class _UniqueOrig(Exception):
+    """Driver orig: structured unique violation whose message omits the index name."""
+
+    sqlstate = "23505"
+    constraint_name = "uq_memories_active_dedup"
+
+    def __str__(self) -> str:
+        return "duplicate key value violates unique constraint"
+
+
+class _OtherUniqueOrig(Exception):
+    sqlstate = "23505"
+    constraint_name = "memories_pkey"
+
+    def __str__(self) -> str:
+        return "duplicate key value violates unique constraint"
+
+
+def test_dedup_classifier_uses_sqlstate_when_message_omits_index_name():
+    """A unique violation must classify as dedup without matching error text."""
+    exc = IntegrityError("INSERT", {}, _UniqueOrig())
+    assert "uq_memories_active_dedup" not in str(exc)
+    assert MemoryService._is_dedup_integrity_error(exc) is True
+
+
+def test_dedup_classifier_reads_constraint_from_asyncpg_cause():
+    """SQLAlchemy asyncpg copies sqlstate onto orig but leaves constraint on __cause__."""
+
+    class Adapted(Exception):
+        sqlstate = "23505"
+
+        def __str__(self) -> str:
+            return "duplicate key value violates unique constraint"
+
+    adapted = Adapted()
+    adapted.__cause__ = _UniqueOrig()
+    exc = IntegrityError("INSERT", {}, adapted)
+    assert MemoryService._is_dedup_integrity_error(exc) is True
+
+
+def test_dedup_classifier_falls_back_to_constraint_name_without_sqlstate():
+    class Orig(Exception):
+        constraint_name = "uq_memories_active_dedup"
+
+        def __str__(self) -> str:
+            return "driver message without sqlstate"
+
+    exc = IntegrityError("INSERT", {}, Orig())
+    assert MemoryService._is_dedup_integrity_error(exc) is True
+
+
+def test_dedup_classifier_ignores_unstructured_error_text():
+    """The former str(exc) substring fallback must not classify a collision."""
+    exc = IntegrityError("create_memory", {}, Exception("uq_memories_active_dedup: duplicate key"))
+    assert MemoryService._is_dedup_integrity_error(exc) is False
+
+
+async def test_remember_retries_sqlstate_dedup_without_index_name_in_message():
+    service, repo, _ = make_service()
+    first = await service.remember(USER, content="racy fact", category="fact")
+    finds = {"n": 0}
+    original_find = repo.find_active_by_hash
+
+    async def miss_once(*args, **kwargs):
+        finds["n"] += 1
+        if finds["n"] == 1:
+            return None
+        return await original_find(*args, **kwargs)
+
+    async def raise_structured(*args, **kwargs):
+        raise IntegrityError("create_memory", {}, _UniqueOrig())
+
+    repo.find_active_by_hash = miss_once
+    repo.create_memory = raise_structured
+    second = await service.remember(USER, content="racy fact", category="fact")
+    assert second.created is False
+    assert second.memory.id == first.memory.id
+    assert second.memory.reconfirm_count == 1
+
+
 async def test_remember_re_raises_non_dedup_integrity_error():
     """Only the dedup index race is retried; other constraint violations propagate."""
     service, repo, _ = make_service()
@@ -82,6 +162,20 @@ async def test_remember_re_raises_non_dedup_integrity_error():
     repo.create_memory = failing_create
     with pytest.raises(IntegrityError, match="fk_user_id"):
         await service.remember(USER, content="orphaned content", category="fact")
+
+
+async def test_remember_does_not_retry_other_unique_violation():
+    service, repo, _ = make_service()
+    calls = {"n": 0}
+
+    async def failing_create(*args, **kwargs):
+        calls["n"] += 1
+        raise IntegrityError("create_memory", {}, _OtherUniqueOrig())
+
+    repo.create_memory = failing_create
+    with pytest.raises(IntegrityError):
+        await service.remember(USER, content="orphaned content", category="fact")
+    assert calls["n"] == 1
 
 
 async def test_remember_dedup_path_accumulates_reconfirm_count():

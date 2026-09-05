@@ -55,6 +55,14 @@ _STOPWORDS = frozenset(
 )
 
 
+class _ActiveDedupViolation(Exception):
+    sqlstate = "23505"
+    constraint_name = "uq_memories_active_dedup"
+
+    def __str__(self) -> str:
+        return "uq_memories_active_dedup: duplicate key"
+
+
 class FakeEmbeddingClient:
     """Deterministic hash-seeded vectors; availability is configurable."""
 
@@ -247,11 +255,7 @@ class FakeMemoryRepository:
                 and (existing.project or "") == (project or "")
                 and existing.content_hash == digest
             ):
-                raise IntegrityError(
-                    "create_memory",
-                    {},
-                    Exception("uq_memories_active_dedup: duplicate key"),
-                )
+                raise IntegrityError("create_memory", {}, _ActiveDedupViolation())
         metadata = kwargs.pop("metadata", {})
         anchors = kwargs.pop("anchors", None) or ()
         memory = Memory(

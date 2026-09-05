@@ -972,6 +972,26 @@ async def test_deduplication_returns_existing_memory(container):
         assert count == 1
 
 
+async def test_concurrent_remember_dedup_classifies_unique_violation(container):
+    """A real unique-violation race retries as reconfirmation, not a second row."""
+    user_id = await _make_user_with_key(container, f"dedup-race-{uuid.uuid4().hex[:8]}@example.com")
+    service = container.memory_service()
+    results = await asyncio.gather(
+        service.remember(user_id, content="same concurrent fact", category="fact"),
+        service.remember(user_id, content="same concurrent fact", category="fact"),
+    )
+    assert {result.memory.id for result in results} == {results[0].memory.id}
+    assert sum(result.created for result in results) == 1
+    engine = container.engine()
+    async with engine.connect() as connection:
+        await connection.execute(
+            text("SELECT set_config('app.current_user_id', :uid, true)"),
+            {"uid": str(user_id)},
+        )
+        count = (await connection.execute(text("SELECT count(*) FROM memories"))).scalar_one()
+        assert count == 1
+
+
 async def test_isolation_between_two_users(container):
     alice_id = await _make_user_with_key(container, f"alice-{uuid.uuid4().hex[:8]}@example.com")
     bob_id = await _make_user_with_key(container, f"bob-{uuid.uuid4().hex[:8]}@example.com")
