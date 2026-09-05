@@ -13,7 +13,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, Request, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
@@ -41,6 +41,11 @@ from recallum.mcp.server import (
     validate_only_tools_are_exposed,
 )
 from recallum.telemetry.http import RequestTelemetryMiddleware
+from recallum.telemetry.metrics import (
+    MetricsSnapshot,
+    metrics_access_allowed,
+    presented_metrics_token,
+)
 from recallum.web.admin import create_admin_router
 from recallum.web.auth import build_web_authenticator, create_auth_router
 from recallum.web.self_service import create_self_service_router
@@ -133,10 +138,60 @@ async def _bounded_probe(probe, timeout_seconds: float) -> bool:
         return False
 
 
+async def _probe_dependencies(
+    container: Container, timeout_seconds: float, aggregate_timeout_seconds: float
+) -> tuple[bool, bool]:
+    """Run PostgreSQL and Ollama probes; unfinished checks count as down."""
+
+    async def database_probe() -> bool:
+        return await container.database_readiness().is_ready()
+
+    async def embeddings_probe() -> bool:
+        return await container.embedding_client().is_available()
+
+    tasks = {
+        "database": asyncio.create_task(
+            _bounded_probe(database_probe, timeout_seconds),
+            name="recallum-readiness-database",
+        ),
+        "embeddings": asyncio.create_task(
+            _bounded_probe(embeddings_probe, timeout_seconds),
+            name="recallum-readiness-embeddings",
+        ),
+    }
+    try:
+        database_ok, embeddings_ok = await asyncio.wait_for(
+            asyncio.gather(tasks["database"], tasks["embeddings"]),
+            aggregate_timeout_seconds,
+        )
+    except Exception:
+        def completed(name: str) -> bool:
+            task = tasks[name]
+            if not task.done() or task.cancelled():
+                return False
+            try:
+                return bool(task.result())
+            except BaseException:
+                return False
+
+        # Preserve a completed healthy result when the other dependency
+        # exhausts the aggregate budget; only unfinished checks are down.
+        database_ok = completed("database")
+        embeddings_ok = completed("embeddings")
+    finally:
+        for task in tasks.values():
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return bool(database_ok), bool(embeddings_ok)
+
+
 def create_health_router(container: Container, settings: Settings | None = None) -> APIRouter:
-    """Operational endpoints: /healthz and /readyz."""
+    """Operational endpoints: /healthz, /readyz, and operator-only /metrics."""
     router = APIRouter(tags=["health"])
-    readiness = settings.readiness if settings is not None else Settings().readiness
+    resolved = settings if settings is not None else Settings()
+    readiness = resolved.readiness
+    metrics_token = resolved.telemetry.metrics_token.get_secret_value()
 
     @router.get("/healthz", summary="Liveness probe")
     async def healthz() -> LivenessResponse:
@@ -148,47 +203,11 @@ def create_health_router(container: Container, settings: Settings | None = None)
         responses={503: {"model": ReadinessResponse}},
     )
     async def readyz() -> ReadinessResponse:
-        async def database_probe() -> bool:
-            return await container.database_readiness().is_ready()
-
-        async def embeddings_probe() -> bool:
-            return await container.embedding_client().is_available()
-
-        tasks = {
-            "database": asyncio.create_task(
-                _bounded_probe(database_probe, readiness.per_dependency_timeout_seconds),
-                name="recallum-readiness-database",
-            ),
-            "embeddings": asyncio.create_task(
-                _bounded_probe(embeddings_probe, readiness.per_dependency_timeout_seconds),
-                name="recallum-readiness-embeddings",
-            ),
-        }
-        try:
-            database_ok, embeddings_ok = await asyncio.wait_for(
-                asyncio.gather(tasks["database"], tasks["embeddings"]),
-                readiness.aggregate_timeout_seconds,
-            )
-        except Exception:
-            def completed(name: str) -> bool:
-                task = tasks[name]
-                if not task.done() or task.cancelled():
-                    return False
-                try:
-                    return bool(task.result())
-                except BaseException:
-                    return False
-
-            # Preserve a completed healthy result when the other dependency
-            # exhausts the aggregate budget; only unfinished checks are down.
-            database_ok = completed("database")
-            embeddings_ok = completed("embeddings")
-        finally:
-            for task in tasks.values():
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
-
+        database_ok, embeddings_ok = await _probe_dependencies(
+            container,
+            readiness.per_dependency_timeout_seconds,
+            readiness.aggregate_timeout_seconds,
+        )
         checks = CheckStatus(
             database="ok" if database_ok else "unavailable",
             embeddings="ok" if embeddings_ok else "unavailable",
@@ -200,6 +219,39 @@ def create_health_router(container: Container, settings: Settings | None = None)
         if body.status != "ready":
             return JSONResponse(content=body.model_dump(), status_code=503)
         return body
+
+    @router.get(
+        "/metrics",
+        summary="Operator-only in-memory operational metrics",
+        responses={401: {"description": "Not an operator"}},
+    )
+    async def metrics(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_recallum_metrics_token: str | None = Header(default=None),
+    ) -> MetricsSnapshot:
+        presented = presented_metrics_token(authorization, x_recallum_metrics_token)
+        # Loopback is the TCP peer only; never X-Forwarded-For / attributed client_ip.
+        peer = request.client.host if request.client is not None else None
+        if not metrics_access_allowed(
+            expected_token=metrics_token,
+            presented_token=presented,
+            client_host=peer,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+            )
+        database_ok, embeddings_ok = await _probe_dependencies(
+            container,
+            readiness.per_dependency_timeout_seconds,
+            readiness.aggregate_timeout_seconds,
+        )
+        return container.telemetry_buffer().snapshot(
+            {
+                "database": "ok" if database_ok else "unavailable",
+                "embeddings": "ok" if embeddings_ok else "unavailable",
+            }
+        )
 
     return router
 

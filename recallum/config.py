@@ -100,6 +100,9 @@ class TelemetrySettings(BaseModel):
     flush_interval_seconds: float = Field(default=5.0, gt=0, le=300)
     buffer_limit: int = Field(default=1_000, ge=1, le=100_000)
     retention_days: int = Field(default=90, ge=1, le=366)
+    # Empty: GET /metrics is TCP-loopback only. Compose sets a token so
+    # docker-bridge and private-network scrapes can authenticate.
+    metrics_token: SecretStr = SecretStr("")
 
     @model_validator(mode="after")
     def validate_buffer_capacity(self) -> TelemetrySettings:
@@ -403,7 +406,7 @@ class Settings(BaseSettings):
                 "key_entropy_bytes": self.auth.key_entropy_bytes,
                 "identity_cache_seconds": self.auth.identity_cache_seconds,
             },
-            "telemetry": self.telemetry.model_dump(),
+            "telemetry": self.telemetry.model_dump(exclude={"metrics_token"}),
             "web": self.web.model_dump(),
             "limits": self.limits,
             "boundary": self.boundary.model_dump(),

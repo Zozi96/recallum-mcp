@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 from recallum.telemetry.events import ToolActivityEvent
+from recallum.telemetry.metrics import WRITE_TOOLS, MetricsSnapshot, ToolLatencySnapshot
 from recallum.telemetry.repository import TelemetryRepository
 
 logger = logging.getLogger("recallum.telemetry")
@@ -42,10 +43,69 @@ class TelemetryBuffer:
         self._worker: asyncio.Task[None] | None = None
         self._closing = False
         self.dropped_events = 0
+        self.flush_failures = 0
+        self.observed_calls = 0
+        self.degraded_calls = 0
+        self.write_calls = 0
+        self.embedding_unavailable_writes = 0
+        self.tool_calls: dict[str, int] = {}
+        self.tool_duration_ms: dict[str, int] = {}
 
     @property
     def pending_count(self) -> int:
         return len(self._pending)
+
+    def snapshot(
+        self, readiness: dict[str, str] | None = None
+    ) -> MetricsSnapshot:
+        """Read in-memory counters; readiness is supplied by the health router."""
+        tools = [
+            ToolLatencySnapshot(
+                tool_name=name,
+                calls=self.tool_calls[name],
+                duration_ms_total=self.tool_duration_ms.get(name, 0),
+                duration_ms_avg=(
+                    self.tool_duration_ms.get(name, 0) / self.tool_calls[name]
+                    if self.tool_calls[name]
+                    else 0.0
+                ),
+            )
+            for name in sorted(self.tool_calls)
+        ]
+        observed = self.observed_calls
+        writes = self.write_calls
+        checks = readiness or {"database": "unavailable", "embeddings": "unavailable"}
+        return MetricsSnapshot(
+            dropped_events=self.dropped_events,
+            flush_failures=self.flush_failures,
+            pending_events=self.pending_count,
+            observed_calls=observed,
+            degraded_calls=self.degraded_calls,
+            degraded_ratio=(self.degraded_calls / observed) if observed else 0.0,
+            write_calls=writes,
+            embedding_unavailable_writes=self.embedding_unavailable_writes,
+            embedding_unavailable_write_ratio=(
+                (self.embedding_unavailable_writes / writes) if writes else 0.0
+            ),
+            tools=tools,
+            readiness={
+                "database": "ok" if checks.get("database") == "ok" else "unavailable",
+                "embeddings": "ok" if checks.get("embeddings") == "ok" else "unavailable",
+            },
+        )
+
+    def _observe(self, event: ToolActivityEvent) -> None:
+        self.observed_calls += 1
+        self.tool_calls[event.tool_name] = self.tool_calls.get(event.tool_name, 0) + 1
+        self.tool_duration_ms[event.tool_name] = (
+            self.tool_duration_ms.get(event.tool_name, 0) + event.duration_ms
+        )
+        if event.degraded:
+            self.degraded_calls += 1
+        if event.tool_name in WRITE_TOOLS:
+            self.write_calls += 1
+            if event.embedding_unavailable:
+                self.embedding_unavailable_writes += 1
 
     async def record(self, event: ToolActivityEvent) -> None:
         """Enqueue one event; this method never calls the repository."""
@@ -54,6 +114,7 @@ class TelemetryBuffer:
                 self._pending.popleft()
                 self.dropped_events += 1
             self._pending.append(event)
+            self._observe(event)
             if len(self._pending) >= self._batch_size:
                 self._wake.set()
 
@@ -86,6 +147,7 @@ class TelemetryBuffer:
         except Exception:
             logger.warning("tool activity batch flush failed", exc_info=True)
             async with self._lock:
+                self.flush_failures += 1
                 combined = batch + list(self._pending)
                 overflow = max(0, len(combined) - self._buffer_limit)
                 self.dropped_events += overflow

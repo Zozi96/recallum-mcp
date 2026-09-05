@@ -16,5 +16,6 @@ class ToolActivityEvent:
     result_count: int
     degraded: bool
     failed: bool
+    embedding_unavailable: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     id: uuid.UUID = field(default_factory=uuid.uuid4)

@@ -69,6 +69,7 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__TELEMETRY__FLUSH_INTERVAL_SECONDS` | `5` | Maximum delay before pending activity is flushed |
 | `RECALLUM__TELEMETRY__BUFFER_LIMIT` | `1000` | Maximum in-memory events; overflow drops the oldest |
 | `RECALLUM__TELEMETRY__RETENTION_DAYS` | `90` | Age after which persisted activity is purged |
+| `RECALLUM__TELEMETRY__METRICS_TOKEN` | empty | Operator token for `GET /metrics`; required off loopback (compose sets it) |
 | `RECALLUM__RUNTIME__WORKERS` | `1` | Granian workers; must stay `1` while MCP is stateful |
 | `RECALLUM__RUNTIME__MCP_STATELESS_HTTP` | `false` | Reserved flag only; does not unlock `workers > 1` until FastMCP is wired for stateless HTTP |
 | `RECALLUM__LIMITS__*` | see `src/recallum/config.py` | Content/metadata/retrieval limits |
@@ -119,6 +120,34 @@ only content-free metadata in memory; one lifecycle-owned worker performs batch
 writes and periodic retention purges. An orderly shutdown attempts a final
 flush. A process crash or prolonged database outage may lose the oldest pending
 events by design and never prevents an MCP tool call from completing.
+
+## Operational metrics (`GET /metrics`)
+
+`GET /metrics` is an operator-only JSON snapshot of in-memory process counters:
+telemetry drops, flush failures, per-tool latency, degraded-recall ratio,
+embedding-unavailable write ratio, and the current readiness probe results. It
+is not an MCP tool, does not accept agent API keys, and never includes memory
+content, user identifiers, queries, or tokens.
+
+Access:
+
+- Local compose still publishes Recallum on `127.0.0.1:8000` only, but the
+  process sees the docker-bridge peer, not loopback. Set
+  `RECALLUM__TELEMETRY__METRICS_TOKEN` (compose files include a placeholder).
+- Dokploy/Traefik excludes `/metrics` from the public Host router; scrape on
+  the private network with the same token.
+- Loopback without a token is only the TCP peer (`request.client.host`).
+  `X-Forwarded-For: 127.0.0.1` never grants access.
+- Send `Authorization: Bearer <token>` or `X-Recallum-Metrics-Token: <token>`.
+  An agent `rcl_…` key does not authorize this endpoint.
+
+Counters are per process. `RECALLUM__RUNTIME__WORKERS` must stay `1`; multiple
+workers would each expose a partial view with no aggregation.
+
+```bash
+curl -sS -H "Authorization: Bearer $RECALLUM__TELEMETRY__METRICS_TOKEN" \
+  http://127.0.0.1:8000/metrics
+```
 
 **Important:** the application database user owns Recallum's tables but must
 never be a superuser or have `BYPASSRLS`. On a fresh volume,

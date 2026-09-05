@@ -33,7 +33,8 @@ are generated locally with Ollama, storage is PostgreSQL with pgvector.
 - **Atomic memories only**: preferences, decisions, constraints, facts — never
   full conversations. Global and per-project scopes. Exact duplicates are
   deduplicated.
-- **Operational endpoints**: `/healthz` (liveness) and `/readyz` (readiness).
+- **Operational endpoints**: `/healthz` (liveness), `/readyz` (readiness), and
+  operator-only `GET /metrics` (in-memory counters; not an MCP surface).
 
 ## Stack
 

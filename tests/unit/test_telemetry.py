@@ -9,14 +9,17 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import ValidationError
 
 from recallum.auth.identity import Identity, identity_scope
 from recallum.config import Settings, TelemetrySettings
 from recallum.db.models import ToolActivity
+from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE
 from recallum.telemetry.buffer import TelemetryBuffer
 from recallum.telemetry.events import ToolActivityEvent
+from recallum.telemetry.metrics import metrics_access_allowed
 from recallum.telemetry.middleware import UsageTelemetryMiddleware
 from tests.fakes import FakeTelemetryRepository
 
@@ -115,6 +118,9 @@ async def test_buffer_drops_oldest_and_flushes_on_shutdown():
     await buffer.record(second)
     await buffer.record(third)
     assert buffer.dropped_events == 1
+    snap = buffer.snapshot({"database": "ok", "embeddings": "ok"})
+    assert snap.dropped_events == 1
+    assert snap.dropped_events > 0
     await buffer.start()
     await buffer.stop()
     assert [row.tool_name for row in repository.events] == ["second", "third"]
@@ -131,6 +137,8 @@ async def test_flush_failure_is_requeued_and_never_escapes_record():
     await buffer.record(event())
     assert await buffer.flush() is False
     assert buffer.pending_count == 1
+    assert buffer.flush_failures == 1
+    assert buffer.snapshot({"database": "unavailable", "embeddings": "ok"}).flush_failures == 1
 
 
 async def test_middleware_records_success_error_degradation_project_and_count():
@@ -227,3 +235,124 @@ async def test_fake_aggregate_is_user_and_time_scoped_and_purges_old_only():
     assert aggregate.by_project == {"a": 1}
     assert await repository.purge_before(now - timedelta(days=90)) == 1
     assert len(repository.events) == 2
+
+
+def test_metrics_token_never_accepts_agent_bearer_and_loopback_is_local_only():
+    assert metrics_access_allowed(
+        expected_token="operator-secret",
+        presented_token="rcl_agent-key",
+        client_host="127.0.0.1",
+    ) is False
+    assert metrics_access_allowed(
+        expected_token="operator-secret",
+        presented_token="operator-secret",
+        client_host="203.0.113.9",
+    ) is True
+    assert metrics_access_allowed(
+        expected_token="",
+        presented_token=None,
+        client_host="127.0.0.1",
+    ) is True
+    assert metrics_access_allowed(
+        expected_token="",
+        presented_token="rcl_agent-key",
+        client_host="127.0.0.1",
+    ) is False
+    assert metrics_access_allowed(
+        expected_token="",
+        presented_token=None,
+        client_host="testserver",
+    ) is False
+
+
+async def test_snapshot_reports_seeded_latency_and_degraded_ratio():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    await buffer.record(event(tool="recall"))
+    await buffer.record(
+        ToolActivityEvent(
+            user_id=uuid.uuid4(),
+            tool_name="recall",
+            project=None,
+            duration_ms=10,
+            result_count=1,
+            degraded=True,
+            failed=False,
+        )
+    )
+    snap = buffer.snapshot({"database": "ok", "embeddings": "unavailable"})
+    assert snap.observed_calls == 2
+    assert snap.degraded_calls == 1
+    assert snap.degraded_ratio == 0.5
+    assert snap.tools[0].tool_name == "recall"
+    assert snap.tools[0].calls == 2
+    assert snap.tools[0].duration_ms_total == 12
+    assert snap.readiness == {"database": "ok", "embeddings": "unavailable"}
+    dumped = snap.model_dump()
+    assert "user_id" not in dumped
+    assert "query" not in dumped
+    assert "content" not in dumped
+    assert "token" not in dumped
+
+
+async def test_middleware_marks_embedding_unavailable_writes_in_snapshot():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    middleware = UsageTelemetryMiddleware(buffer)
+    context = SimpleNamespace(
+        message=SimpleNamespace(name="remember_batch", arguments={}),
+    )
+
+    async def call(_context):
+        return ToolResult(
+            structured_content={
+                "items": [{"error": EMBEDDING_UNAVAILABLE_MESSAGE}, {"created": True}]
+            }
+        )
+
+    with identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())):
+        await middleware.on_call_tool(context, call)
+    snap = buffer.snapshot({"database": "ok", "embeddings": "unavailable"})
+    assert snap.write_calls == 1
+    assert snap.embedding_unavailable_writes == 1
+    assert snap.embedding_unavailable_write_ratio == 1.0
+    assert snap.degraded_calls == 0
+
+
+async def test_remember_toolerror_counts_as_embedding_unavailable_write():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    middleware = UsageTelemetryMiddleware(buffer)
+    context = SimpleNamespace(message=SimpleNamespace(name="remember", arguments={}))
+
+    async def boom(_context):
+        raise ToolError(EMBEDDING_UNAVAILABLE_MESSAGE)
+
+    with identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())):
+        with pytest.raises(ToolError, match="^embedding service unavailable$"):
+            await middleware.on_call_tool(context, boom)
+    snap = buffer.snapshot({"database": "ok", "embeddings": "unavailable"})
+    assert snap.write_calls == 1
+    assert snap.embedding_unavailable_writes == 1
+    assert snap.degraded_calls == 0
+    assert snap.observed_calls == 1
+
+
+async def test_degraded_write_is_not_an_embedding_unavailable_marker():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    await buffer.record(
+        ToolActivityEvent(
+            user_id=uuid.uuid4(),
+            tool_name="remember",
+            project=None,
+            duration_ms=1,
+            result_count=1,
+            degraded=True,
+            failed=False,
+        )
+    )
+    snap = buffer.snapshot({"database": "ok", "embeddings": "ok"})
+    assert snap.write_calls == 1
+    assert snap.degraded_calls == 1
+    assert snap.embedding_unavailable_writes == 0

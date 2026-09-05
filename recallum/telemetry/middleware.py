@@ -9,11 +9,14 @@ import unicodedata
 from collections.abc import Callable
 from typing import Any
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from recallum.auth.identity import require_identity
+from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE
 from recallum.telemetry.buffer import TelemetryBuffer
 from recallum.telemetry.events import ToolActivityEvent
+from recallum.telemetry.metrics import WRITE_TOOLS
 
 logger = logging.getLogger("recallum.telemetry")
 MAX_RECORDED_PROJECT_CHARS = 200
@@ -38,6 +41,30 @@ def _result_metrics(result: Any) -> tuple[int, bool, bool]:
         if isinstance(value, bool):
             return int(value), degraded, failed
     return 0, degraded, failed
+
+
+def _is_embedding_unavailable_error(tool_name: str, exc: BaseException) -> bool:
+    return (
+        tool_name in WRITE_TOOLS
+        and isinstance(exc, ToolError)
+        and str(exc) == EMBEDDING_UNAVAILABLE_MESSAGE
+    )
+
+
+def _embedding_unavailable_write(tool_name: str, result: Any) -> bool:
+    if tool_name not in WRITE_TOOLS:
+        return False
+    structured = getattr(result, "structured_content", None) or {}
+    if structured.get("error") == EMBEDDING_UNAVAILABLE_MESSAGE:
+        return True
+    for key in ("results", "items"):
+        value = structured.get(key)
+        if isinstance(value, list) and any(
+            isinstance(item, dict) and item.get("error") == EMBEDDING_UNAVAILABLE_MESSAGE
+            for item in value
+        ):
+            return True
+    return False
 
 
 def _safe_project(value: object) -> str | None:
@@ -69,12 +96,28 @@ class UsageTelemetryMiddleware(Middleware):
         project_value = arguments.get("project") if isinstance(arguments, dict) else None
         try:
             result = await call_next(context)
-        except Exception:
-            await self._emit(started, tool_name, _safe_project(project_value), 0, False, True)
+        except Exception as exc:
+            await self._emit(
+                started,
+                tool_name,
+                _safe_project(project_value),
+                0,
+                False,
+                True,
+                _is_embedding_unavailable_error(tool_name, exc),
+            )
             raise
         result_count, degraded, failed = _result_metrics(result)
         project = _safe_project(project_value)
-        await self._emit(started, tool_name, project, result_count, degraded, failed)
+        await self._emit(
+            started,
+            tool_name,
+            project,
+            result_count,
+            degraded,
+            failed,
+            _embedding_unavailable_write(tool_name, result),
+        )
         return result
 
     async def _emit(
@@ -85,6 +128,7 @@ class UsageTelemetryMiddleware(Middleware):
         result_count: int,
         degraded: bool,
         failed: bool,
+        embedding_unavailable: bool = False,
     ) -> None:
         try:
             elapsed = max(0, self._clock_ns() - started)
@@ -97,6 +141,7 @@ class UsageTelemetryMiddleware(Middleware):
                     result_count=result_count,
                     degraded=degraded,
                     failed=failed,
+                    embedding_unavailable=embedding_unavailable,
                 )
             )
         except Exception:

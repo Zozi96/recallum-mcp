@@ -8,7 +8,11 @@ services:
     environment:
       RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:recallum@postgres:5432/recallum
       RECALLUM__OLLAMA__URL: http://ollama:11434
+      # Host publish is loopback-only; the token is still required because the
+      # container sees the docker-bridge peer, not 127.0.0.1.
+      RECALLUM__TELEMETRY__METRICS_TOKEN: change-me
     ports:
+      # Loopback-only publish: GET /metrics is not a public surface.
       - "127.0.0.1:8000:8000"
     depends_on:
       postgres:

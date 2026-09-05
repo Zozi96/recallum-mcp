@@ -14,6 +14,7 @@ services:
     environment:
       RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:CHANGE_ME@postgres:5432/recallum
       RECALLUM__OLLAMA__URL: http://ollama:11434
+      RECALLUM__TELEMETRY__METRICS_TOKEN: CHANGE_ME
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -24,7 +25,8 @@ services:
     restart: unless-stopped
     labels:
       traefik.enable: "true"
-      traefik.http.routers.recallum.rule: Host(`recallum.example.com`)
+      # /metrics stays off the public router; scrape on the private network.
+      traefik.http.routers.recallum.rule: Host(`recallum.example.com`) && !Path(`/metrics`)
       traefik.http.routers.recallum.entrypoints: websecure
       traefik.http.routers.recallum.tls.certresolver: letsencrypt
       traefik.http.services.recallum.loadbalancer.server.port: "8000"
