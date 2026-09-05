@@ -55,12 +55,18 @@ def _embedding_unavailable_write(tool_name: str, result: Any) -> bool:
     if tool_name not in WRITE_TOOLS:
         return False
     structured = getattr(result, "structured_content", None) or {}
+    if structured.get("embedding_degraded") is True:
+        return True
     if structured.get("error") == EMBEDDING_UNAVAILABLE_MESSAGE:
         return True
     for key in ("results", "items"):
         value = structured.get(key)
         if isinstance(value, list) and any(
-            isinstance(item, dict) and item.get("error") == EMBEDDING_UNAVAILABLE_MESSAGE
+            isinstance(item, dict)
+            and (
+                item.get("error") == EMBEDDING_UNAVAILABLE_MESSAGE
+                or item.get("embedding_degraded") is True
+            )
             for item in value
         ):
             return True

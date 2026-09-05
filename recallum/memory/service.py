@@ -2,7 +2,8 @@
 
 Business rules implemented here:
 - ``remember`` embeds before persisting; an exact active duplicate returns the
-  existing row instead of inserting a second one.
+  existing row instead of inserting a second one. Embedding unavailability
+  stores a marker vector and sets ``embedding_degraded`` instead of failing.
 - ``recall`` fuses vector and textual candidates with Reciprocal Rank Fusion
   and degrades to textual-only (flagged) when Ollama cannot embed the query.
 - ``context`` produces a compact, category-grouped budget-aware snapshot.
@@ -13,6 +14,7 @@ Business rules implemented here:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -131,6 +133,7 @@ class MemoryService:
         source_type: str | None = None,
         source_ref: str | None = None,
         embedding: list[float] | None = None,
+        embedding_degraded: bool = False,
         rebuild: bool = True,
         anchors: Sequence[Mapping[str, str]] | None = None,
     ) -> RememberResult:
@@ -214,6 +217,7 @@ class MemoryService:
                 memory=_to_memory_out(current),
                 created=False,
                 language_warning=language_warning,
+                embedding_degraded=False,
             )
 
         if validated_kind == "todo" and expires_at is None:
@@ -221,8 +225,18 @@ class MemoryService:
                 "kind='todo' requires ttl_seconds; durable todos are not supported"
             )
 
-        if embedding is None:
-            embedding = await self._embeddings.embed(normalized)
+        stored_model = self._embeddings.model
+        if embedding_degraded:
+            embedding = [0.0] * self._embeddings.dimensions
+            stored_model = EMBEDDING_UNAVAILABLE_MESSAGE
+        elif embedding is None:
+            try:
+                embedding = await self._embeddings.embed(normalized)
+            except EmbeddingError as exc:
+                record_sanitized_failure(logger, exc, message="Memory write embedding unavailable")
+                embedding = [0.0] * self._embeddings.dimensions
+                stored_model = EMBEDDING_UNAVAILABLE_MESSAGE
+                embedding_degraded = True
         elif not isinstance(embedding, list) or len(embedding) != self._embeddings.dimensions:
             raise EmbeddingError(
                 f"expected embedding with {self._embeddings.dimensions} dimensions"
@@ -237,7 +251,7 @@ class MemoryService:
             content=normalized,
             content_hash=digest,
             embedding=embedding,
-            embedding_model=self._embeddings.model,
+            embedding_model=stored_model,
             importance=validated_importance,
             source_client=source_client,
             metadata=validated_metadata,
@@ -251,13 +265,17 @@ class MemoryService:
         # Compute the similar advisory before any commit: once the session is
         # committed the SET LOCAL RLS context is gone, and a fresh transaction
         # would not see the just-written row.
-        similar = await self._similar_to(
-            user_id,
-            embedding,
-            scope=scope,
-            project=normalized_project,
-            exclude_id=memory.id,
-            session=session,
+        similar = (
+            []
+            if embedding_degraded
+            else await self._similar_to(
+                user_id,
+                embedding,
+                scope=scope,
+                project=normalized_project,
+                exclude_id=memory.id,
+                session=session,
+            )
         )
 
         if session is not None and rebuild:
@@ -269,6 +287,7 @@ class MemoryService:
             created=True,
             similar=similar,
             language_warning=language_warning,
+            embedding_degraded=embedding_degraded,
         )
 
     @staticmethod
@@ -280,6 +299,15 @@ class MemoryService:
             if "uq_memories_active_dedup" in constraint:
                 return True
         return "uq_memories_active_dedup" in str(exc)
+
+    def _embedding_http_limit(self) -> int:
+        """Bound per-item embed retries to the shared HTTP client's pool."""
+        http = getattr(self._embeddings, "_http", None)
+        limits = getattr(http, "limits", None)
+        max_connections = getattr(limits, "max_connections", None)
+        if isinstance(max_connections, int) and max_connections > 0:
+            return max_connections
+        return 100
 
     async def remember(
         self,
@@ -296,6 +324,7 @@ class MemoryService:
         source_type: str | None = None,
         source_ref: str | None = None,
         embedding: list[float] | None = None,
+        embedding_degraded: bool = False,
         rebuild: bool = True,
         anchors: Sequence[Mapping[str, str]] | None = None,
     ) -> RememberResult:
@@ -331,6 +360,7 @@ class MemoryService:
                         source_type=source_type,
                         source_ref=source_ref,
                         embedding=embedding,
+                        embedding_degraded=embedding_degraded,
                         rebuild=rebuild,
                         anchors=anchors,
                     )
@@ -342,6 +372,7 @@ class MemoryService:
                     raise
                 if attempt == 2:
                     raise
+        raise RuntimeError("remember retry loop exited without returning")
 
     def _language_warning(self, normalized: str) -> str | None:
         """Advisory hint that ``normalized`` content looks non-English.
@@ -377,6 +408,8 @@ class MemoryService:
         the caller its memory was not stored when it was.
         """
         if self._limits.similar_max_results == 0:
+            return []
+        if not embedding or all(component == 0.0 for component in embedding):
             return []
         try:
             if session is not None:
@@ -459,19 +492,28 @@ class MemoryService:
                 seen_texts.add(normalized)
                 unique_texts.append(normalized)
 
-        text_to_vector: dict[str, list[float] | None] = {}
+        text_to_vector: dict[str, list[float]] = {}
+        degraded_texts: set[str] = set()
         if unique_texts:
             try:
                 vectors = await self._embeddings.embed_batch(unique_texts)
                 for text, vector in zip(unique_texts, vectors, strict=True):
                     text_to_vector[text] = vector
             except EmbeddingError:
-                for text in unique_texts:
-                    try:
-                        text_to_vector[text] = await self._embeddings.embed(text)
-                    except EmbeddingError as exc:
-                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
-                        text_to_vector[text] = None
+                semaphore = asyncio.Semaphore(self._embedding_http_limit())
+
+                async def _embed_one(text: str) -> None:
+                    async with semaphore:
+                        try:
+                            text_to_vector[text] = await self._embeddings.embed(text)
+                        except EmbeddingError as exc:
+                            record_sanitized_failure(
+                                logger, exc, message="Memory batch item failure"
+                            )
+                            text_to_vector[text] = [0.0] * self._embeddings.dimensions
+                            degraded_texts.add(text)
+
+                await asyncio.gather(*(_embed_one(text) for text in unique_texts))
 
         profile_keys: set[str | None] = set()
         has_global = False
@@ -484,12 +526,6 @@ class MemoryService:
                     if entry is None:
                         continue
                     item, normalized = entry
-                    vector = text_to_vector.get(normalized)
-                    if vector is None:
-                        outcomes[index] = RememberBatchItemOutcome(
-                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
-                        )
-                        continue
                     try:
                         result = await self.remember(
                             user_id,
@@ -504,11 +540,10 @@ class MemoryService:
                             source_type=item.source_type,
                             source_ref=item.source_ref,
                             anchors=(
-                                [a.model_dump() for a in item.anchors]
-                                if item.anchors
-                                else None
+                                [a.model_dump() for a in item.anchors] if item.anchors else None
                             ),
-                            embedding=vector,
+                            embedding=text_to_vector.get(normalized),
+                            embedding_degraded=normalized in degraded_texts,
                             rebuild=False,
                         )
                     except MemoryValidationError as exc:
@@ -525,6 +560,7 @@ class MemoryService:
                         memory=result.memory,
                         similar=result.similar,
                         language_warning=result.language_warning,
+                        embedding_degraded=result.embedding_degraded,
                     )
                     if result.memory is not None:
                         if result.memory.scope == "project" and result.memory.project:
@@ -536,12 +572,6 @@ class MemoryService:
                     if entry is None:
                         continue
                     item, normalized = entry
-                    vector = text_to_vector.get(normalized)
-                    if vector is None:
-                        outcomes[index] = RememberBatchItemOutcome(
-                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
-                        )
-                        continue
                     try:
                         async with session.begin_nested():
                             result = await self._remember_in_session(
@@ -558,11 +588,10 @@ class MemoryService:
                                 source_type=item.source_type,
                                 source_ref=item.source_ref,
                                 anchors=(
-                                    [a.model_dump() for a in item.anchors]
-                                    if item.anchors
-                                    else None
+                                    [a.model_dump() for a in item.anchors] if item.anchors else None
                                 ),
-                                embedding=vector,
+                                embedding=text_to_vector.get(normalized),
+                                embedding_degraded=normalized in degraded_texts,
                                 rebuild=False,
                             )
                     except MemoryValidationError as exc:
@@ -589,6 +618,7 @@ class MemoryService:
                         memory=result.memory,
                         similar=result.similar,
                         language_warning=result.language_warning,
+                        embedding_degraded=result.embedding_degraded,
                     )
                     if result.memory is not None:
                         if result.memory.scope == "project" and result.memory.project:
@@ -1238,7 +1268,9 @@ class MemoryService:
             stale_before=self._stale_cutoff(),
             exclude_ids=set(profile_block.source_memory_ids),
             profile_item_count=profile_count,
-            profile_items_by_category=profile_items_by_category,
+            profile_items_by_category={
+                str(category): count for category, count in profile_items_by_category.items()
+            },
         )
         result = result.model_copy(update={"profile": profile_block})
         served = [

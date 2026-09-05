@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -12,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import ScoredMemory
+from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE
 from recallum.embeddings.ollama import EmbeddingError
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.limits import MemoryLimits
@@ -43,6 +47,8 @@ async def test_remember_creates_global_memory():
     assert result.memory.scope == "global"
     assert result.memory.project is None
     assert result.memory.content == "prefiero tabs"
+    assert result.embedding_degraded is False
+    assert result.model_dump()["embedding_degraded"] is False
     assert len(repo.rows) == 1
 
 
@@ -182,11 +188,19 @@ async def test_remember_rejects_invalid_metadata(metadata, max_bytes, max_keys):
         await service.remember(USER, content="ok", category="fact", metadata=metadata)
 
 
-async def test_remember_fails_without_embedding_and_stores_nothing():
+async def test_remember_degrades_when_embeddings_unavailable(caplog):
     service, repo, _ = make_service(embedder=FakeEmbeddingClient(available=False))
-    with pytest.raises(EmbeddingError):
-        await service.remember(USER, content="algo", category="fact")
-    assert repo.rows == {}
+    with caplog.at_level(logging.WARNING):
+        result = await service.remember(USER, content="algo", category="fact")
+    assert result.created is True
+    assert result.embedding_degraded is True
+    assert result.similar == []
+    assert result.model_dump()["embedding_degraded"] is True
+    assert len(repo.rows) == 1
+    stored = next(iter(repo.rows.values()))
+    assert stored.content == "algo"
+    assert stored.embedding_model == EMBEDDING_UNAVAILABLE_MESSAGE
+    assert "similar-memory" not in caplog.text
 
 
 async def test_recall_hybrid_fusion_ranks_consensus_first():
@@ -707,6 +721,34 @@ async def test_remember_batch_outcomes_carry_language_warning():
     assert result.failed == 0
     assert result.results[0].language_warning is not None
     assert result.results[1].language_warning is None
+
+
+async def test_remember_batch_degraded_fallback_overlaps_embedding_retries():
+    delay = 0.15
+    item_count = 4
+
+    class SlowUnavailableEmbedder(FakeEmbeddingClient):
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            raise EmbeddingError("batch embed unavailable")
+
+        async def embed(self, text: str) -> list[float]:
+            await asyncio.sleep(delay)
+            raise EmbeddingError("item embed unavailable")
+
+    service, repo, _ = make_service(embedder=SlowUnavailableEmbedder(dimensions=8))
+    items = [
+        RememberBatchItem(content=f"degraded fact {index}", category="fact")
+        for index in range(item_count)
+    ]
+    started = time.perf_counter()
+    result = await service.remember_batch(USER, items=items)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < delay * item_count * 0.7
+    assert result.failed == 0
+    assert result.stored == item_count
+    assert all(outcome.embedding_degraded for outcome in result.results)
+    assert len(repo.rows) == item_count
 
 
 async def test_remember_batch_embeds_unique_contents_once():

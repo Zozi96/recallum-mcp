@@ -46,12 +46,13 @@ async def test_embedding_error_has_exact_public_message_and_no_details(caplog, m
     monkeypatch.setattr(errors, "get_context", lambda: _RequestContext())
 
     @errors.translates_domain_errors
-    async def failing_tool():
+    async def update():
+        # update has no write-embedding degradation; EmbeddingError stays public.
         raise EmbeddingError(sentinel)
 
     with caplog.at_level(logging.ERROR, logger="recallum.mcp"):
         with pytest.raises(ToolError, match="^embedding service unavailable$") as failure:
-            await failing_tool()
+            await update()
 
     assert failure.value.__cause__ is None
     assert failure.value.__context__ is None

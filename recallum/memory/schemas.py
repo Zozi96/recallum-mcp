@@ -130,12 +130,17 @@ class RememberResult(BaseModel):
     and dedup hash both operate on the stored text. It is advisory only: the
     write always succeeds regardless, and the field is set on both created
     and deduplicated outcomes.
+
+    ``embedding_degraded`` is True when the memory was stored without a real
+    embedding because the embedding service was unavailable. The row is still
+    persisted (with a marker vector) and can be reindexed later.
     """
 
     memory: MemoryOut
     created: bool
     similar: list[SimilarMemory] = Field(default_factory=list)
     language_warning: str | None = None
+    embedding_degraded: bool = False
 
 
 class RememberBatchItem(BaseModel):
@@ -158,12 +163,14 @@ class RememberBatchItemOutcome(BaseModel):
 
     Exactly one of ``memory`` or ``error`` is set. ``created``, ``similar``
     and ``language_warning`` mean the same as in ``RememberResult``.
+    ``embedding_degraded`` is the same flag as on ``RememberResult``.
     """
 
     created: bool = False
     memory: MemoryOut | None = None
     similar: list[SimilarMemory] = Field(default_factory=list)
     language_warning: str | None = None
+    embedding_degraded: bool = False
     error: str | None = None
 
 
@@ -315,9 +322,7 @@ class ContextResult(BaseModel):
 
     project: str | None = None
     focus: str | None = None
-    profile: ProfileBlock = Field(
-        default_factory=lambda: ProfileBlock(available=False)
-    )
+    profile: ProfileBlock = Field(default_factory=lambda: ProfileBlock(available=False))
     groups: list[ContextGroup]
     total_items: int
     total_available: int

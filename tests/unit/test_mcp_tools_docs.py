@@ -197,6 +197,18 @@ def test_allowlist_is_the_runtime_source_of_truth():
     assert ALLOWLIST is runtime.EXPECTED_TOOLS
 
 
+def test_remember_tool_docs_declare_degraded_embedding_result():
+    """Drift gate: remember/remember_batch docs must advertise write degradation."""
+    source = (REPO_ROOT / "recallum" / "mcp" / "server.py").read_text(encoding="utf-8")
+    remember_doc = source.split("async def remember(", 1)[1].split("async def remember_batch(", 1)[
+        0
+    ]
+    batch_doc = source.split("async def remember_batch(", 1)[1].split("async def recall(", 1)[0]
+    for doc in (remember_doc, batch_doc):
+        assert "embedding_degraded" in doc
+        assert "degraded" in doc
+
+
 def test_reverting_readme_to_nine_tools_fails_naming_document_and_mismatch(tmp_path):
     root = _copy_real_docs(tmp_path)
     readme = root / "README.md"

@@ -109,7 +109,6 @@ disable_error_code = ["no-any-return", "attr-defined"]
 [[tool.mypy.overrides]]
 module = [
   "recallum.http_boundary",
-  "recallum.memory.service",
   "recallum.memory.context",
   "recallum.auth.web_sessions",
   "recallum.telemetry.repository",

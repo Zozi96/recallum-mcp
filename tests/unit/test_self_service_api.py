@@ -114,7 +114,7 @@ def test_memories_are_session_scoped_and_responses_are_filtered():
         body = created.json()
         memory_id = body["memory"]["id"]
         assert fakes["memories"].rows[uuid.UUID(memory_id)].user_id == alice.id
-        assert "embedding" not in created.text
+        assert "embedding" not in body["memory"]
         assert "hash" not in created.text
         assert (
             client.post(
@@ -304,8 +304,8 @@ def test_embedding_degradation_and_key_ownership():
             "/api/v1/me/memories",
             json={"content": "Needs vector", "category": "fact"},
         )
-        assert unavailable.status_code == 503
-        assert unavailable.json()["detail"]["code"] == "embeddings_unavailable"
+        assert unavailable.status_code == 201
+        assert unavailable.json()["embedding_degraded"] is True
         assert "ollama" not in unavailable.text.lower()
         assert "http://" not in unavailable.text.lower()
 

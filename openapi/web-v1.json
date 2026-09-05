@@ -1822,10 +1822,15 @@
         "type": "object"
       },
       "RememberResult": {
-        "description": "Outcome of ``remember``; ``created`` is False for deduplicated stores.\n\n``similar`` lists pre-existing memories about the same subject. They are\nsurfaced here, at the moment the potential conflict is created, because\nthis is the only point where they are otherwise invisible: the caller sees\nits own new memory and nothing else. Nothing is resolved automatically --\nsuperseding one memory with another is always an explicit ``update``.\n\n``language_warning`` is set when the content looks like it may not be in\nEnglish -- the corpus policy is English-only, since the full-text index\nand dedup hash both operate on the stored text. It is advisory only: the\nwrite always succeeds regardless, and the field is set on both created\nand deduplicated outcomes.",
+        "description": "Outcome of ``remember``; ``created`` is False for deduplicated stores.\n\n``similar`` lists pre-existing memories about the same subject. They are\nsurfaced here, at the moment the potential conflict is created, because\nthis is the only point where they are otherwise invisible: the caller sees\nits own new memory and nothing else. Nothing is resolved automatically --\nsuperseding one memory with another is always an explicit ``update``.\n\n``language_warning`` is set when the content looks like it may not be in\nEnglish -- the corpus policy is English-only, since the full-text index\nand dedup hash both operate on the stored text. It is advisory only: the\nwrite always succeeds regardless, and the field is set on both created\nand deduplicated outcomes.\n\n``embedding_degraded`` is True when the memory was stored without a real\nembedding because the embedding service was unavailable. The row is still\npersisted (with a marker vector) and can be reindexed later.",
         "properties": {
           "created": {
             "title": "Created",
+            "type": "boolean"
+          },
+          "embedding_degraded": {
+            "default": false,
+            "title": "Embedding Degraded",
             "type": "boolean"
           },
           "language_warning": {

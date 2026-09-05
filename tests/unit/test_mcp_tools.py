@@ -581,9 +581,11 @@ async def test_authenticated_batch_embedding_failure_is_partial_and_sanitized():
         )
         wire = response.content.decode("utf-8", "replace")
         assert response.status_code == 200
-        assert '"stored":1' in wire
-        assert '"failed":1' in wire
-        assert '"error":"embedding service unavailable"' in wire
+        assert '"stored":2' in wire
+        assert '"failed":0' in wire
+        assert '"embedding_degraded":true' in wire
+        assert '"error":"embedding service unavailable"' not in wire
+        assert content_sentinel in wire
 
         await info.buffer.flush()
         telemetry = repr(info.telemetry.events)
@@ -592,10 +594,13 @@ async def test_authenticated_batch_embedding_failure_is_partial_and_sanitized():
             for record in handler.records
             for value in (*vars(record).values(), record.args)
         ]
-        for sentinel in forbidden:
+        provider_secrets = forbidden[:-1]
+        for sentinel in provider_secrets:
             assert sentinel not in wire
             assert all(sentinel not in value for value in log_values)
             assert sentinel not in telemetry
+        assert all(content_sentinel not in value for value in log_values)
+        assert content_sentinel not in telemetry
 
         diagnostic = next(record for record in handler.records if record.name == "recallum.memory")
         assert diagnostic.failure_class.endswith("EmbeddingError")

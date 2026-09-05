@@ -213,7 +213,10 @@ def build_mcp_server(container: Container) -> FastMCP:
         declares structured code references (`{type, identifier}`, type one
         of file/symbol/module) so `recall` can later filter by `symbol` or
         `file`; Recallum does not parse a repository or build a code graph,
-        so an identifier is stored verbatim, exactly as given.
+        so an identifier is stored verbatim, exactly as given. When the
+        embedding service is unavailable the write still succeeds:
+        `embedding_degraded` is true and the memory is stored with a marker
+        vector that `recallum-admin reembed` can restamp later.
         """
         return await memory_service().remember(
             require_identity().user_id,
@@ -243,7 +246,9 @@ def build_mcp_server(container: Container) -> FastMCP:
         memories. Items succeed or fail independently; read each outcome's
         `similar` and `language_warning` fields and reconcile as you would
         for remember. Prefer a few high-signal items over a recap; the batch
-        is capped small on purpose.
+        is capped small on purpose. When embeddings are unavailable an item
+        is still stored and its outcome has `embedding_degraded` true, same
+        as remember — it is not a per-item error.
         """
         return await memory_service().remember_batch(
             require_identity().user_id,
@@ -263,9 +268,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         file: str | None = None,
         limit: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
-        strategy: Literal[
-            "coding", "debugging", "planning", "review", "architecture"
-        ]
+        strategy: Literal["coding", "debugging", "planning", "review", "architecture"]
         | None = None,
     ) -> RecallResult:
         """Search memories by meaning, exact terms and close spellings.
@@ -319,9 +322,7 @@ def build_mcp_server(container: Container) -> FastMCP:
         max_items: StrictPositiveLimit | None = None,
         max_chars: StrictPositiveLimit | None = None,
         max_tokens: StrictPositiveLimit | None = None,
-        strategy: Literal[
-            "coding", "debugging", "planning", "review", "architecture"
-        ]
+        strategy: Literal["coding", "debugging", "planning", "review", "architecture"]
         | None = None,
     ) -> ContextResult:
         """Get compact session context: always-on profile plus project snapshot.

@@ -338,6 +338,30 @@ async def test_remember_toolerror_counts_as_embedding_unavailable_write():
     assert snap.observed_calls == 1
 
 
+async def test_middleware_marks_remember_embedding_degraded_as_write_degradation():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    middleware = UsageTelemetryMiddleware(buffer)
+    context = SimpleNamespace(message=SimpleNamespace(name="remember", arguments={}))
+
+    async def call(_context):
+        return ToolResult(
+            structured_content={
+                "memory": {"id": "1"},
+                "created": True,
+                "embedding_degraded": True,
+            }
+        )
+
+    with identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())):
+        await middleware.on_call_tool(context, call)
+    snap = buffer.snapshot({"database": "ok", "embeddings": "unavailable"})
+    assert snap.write_calls == 1
+    assert snap.embedding_unavailable_writes == 1
+    assert snap.embedding_unavailable_write_ratio == 1.0
+    assert snap.degraded_calls == 0
+
+
 async def test_degraded_write_is_not_an_embedding_unavailable_marker():
     repository = FakeTelemetryRepository()
     buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
