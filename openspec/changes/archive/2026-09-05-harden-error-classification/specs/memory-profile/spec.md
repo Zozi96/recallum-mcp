@@ -18,3 +18,14 @@ Si al leer el perfil o al armar `context` no existe fila materializada, o la gen
 #### Scenario: Generation coincidente no reconstruye static
 - **WHEN** existe fila materializada cuya generación coincide con la del usuario
 - **THEN** el sistema no reconstruye el static y sirve esa fila más el dynamic ensamblado en lectura
+
+### Requirement: Generation sólo por mutación de corpus
+El contador de generación del usuario MUST incrementarse cuando una mutación cambie el conjunto de memorias activas o la elegibilidad del slice static (guardado, reconfirmación, actualización, sustitución, fusión, borrado o reasignación de proyecto). Registrar que una memoria fue recuperada por `recall` (contador y `last_recalled_at`) MUST NOT incrementar esa generación ni marcar el perfil materializado como desactualizado. El incremento de generación es la señal que deja las claves pendientes; la reconstrucción propia puede ser diferida.
+
+#### Scenario: Recall no ensucia generation
+- **WHEN** un usuario llama `recall` y se registra uso en las memorias servidas
+- **THEN** la generación del usuario no cambia y la fila materializada del perfil permanece válida para el slice static
+
+#### Scenario: Remember sí incrementa generation
+- **WHEN** un usuario guarda una memoria nueva
+- **THEN** la generación del usuario incrementa y las claves de perfil afectadas quedan pendientes de reconstrucción static

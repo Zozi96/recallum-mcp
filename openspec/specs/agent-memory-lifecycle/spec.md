@@ -24,7 +24,10 @@ El sistema MUST permitir que un usuario autenticado guarde una memoria atómica 
 ### Requirement: Deduplicación exacta
 El sistema MUST evitar memorias activas duplicadas para el mismo usuario, ámbito y contenido
 normalizado, y MUST registrar la fecha de reconfirmación cuando un contenido idéntico vuelve a
-guardarse, exponiéndola en las respuestas como señal de frescura.
+guardarse, exponiéndola en las respuestas como señal de frescura. La violación del índice de dedup
+MUST clasificarse por el código estructurado del motor (SQLSTATE de PostgreSQL para violación de
+unicidad) y por el nombre de la restricción cuando el driver lo expone, MUST NOT compararse por el
+texto libre del mensaje de error.
 
 #### Scenario: Recordar el mismo hecho dos veces
 - **WHEN** un usuario guarda nuevamente una memoria activa con el mismo contenido normalizado y ámbito
@@ -33,6 +36,14 @@ guardarse, exponiéndola en las respuestas como señal de frescura.
 #### Scenario: Reconfirmación con huella temporal
 - **WHEN** un contenido idéntico a una memoria activa vuelve a guardarse
 - **THEN** la memoria existente registra la fecha de reconfirmación y las respuestas posteriores la incluyen
+
+#### Scenario: Clasificación estructural de la colisión de dedup
+- **WHEN** la base de datos rechaza una inserción por el índice de dedup activo
+- **THEN** el sistema reconoce la colisión por su código SQLSTATE y restricción, y la reintenta como reconfirmación sin depender del texto del error
+
+#### Scenario: Otro IntegrityError no se reintenta como dedup
+- **WHEN** la base de datos lanza un `IntegrityError` por una restricción distinta a la de dedup
+- **THEN** el error NO se reintenta ni se etiqueta como reconfirmación; se propaga
 
 ### Requirement: Enumeración privada
 El sistema MUST permitir enumerar únicamente las memorias activas del usuario autenticado mediante filtros y límites acotados.
@@ -80,7 +91,9 @@ escritura.
 ### Requirement: Captura por lotes
 El sistema MUST permitir guardar varias memorias atómicas en una sola operación acotada, aplicando a
 cada ítem las mismas validaciones, deduplicación y aviso de similares que al guardado individual, y
-MUST devolver el resultado de cada ítem de forma independiente con éxito parcial.
+MUST devolver el resultado de cada ítem de forma independiente con éxito parcial. Cuando varios
+ítems degradan por indisponibilidad de embeddings, el sistema MUST acotar el tiempo total del lote
+solapando los reintentos en lugar de ejecutarlos en serie; los resultados por ítem no cambian.
 
 #### Scenario: Lote válido
 - **WHEN** un agente envía un lote dentro del límite con ítems válidos
@@ -88,11 +101,30 @@ MUST devolver el resultado de cada ítem de forma independiente con éxito parci
 
 #### Scenario: Lote con un ítem inválido
 - **WHEN** un ítem del lote es inválido o su embedding falla
-- **THEN** ese ítem devuelve su error y los demás ítems se procesan igualmente
+- **THEN** ese ítem devuelve su resultado degradado o su error y los demás ítems se procesan igualmente
+
+#### Scenario: Lote degradado con embeddings caídos
+- **WHEN** todos los ítems de un lote degradan porque el servicio de embeddings no responde
+- **THEN** el tiempo total de la operación es del orden de un único timeout, no de N timeouts en serie
 
 #### Scenario: Lote fuera de límite
 - **WHEN** el lote excede el máximo de ítems permitido o llega vacío
 - **THEN** el sistema rechaza la operación completa sin persistir nada
+
+### Requirement: Degradación uniforme de escritura ante embeddings no disponibles
+Cuando el servicio de embeddings no está disponible, el guardado individual MUST degradar igual que el lote: la memoria MUST almacenarse con el marcador de embedding no disponible y el resultado MUST declarar que la escritura fue degradada. El sistema MUST NOT rechazar el guardado por indisponibilidad de embeddings mientras PostgreSQL esté operativo. Cuando el servicio de embeddings se recupera, el operador CAN reindexar los marcadores con el CLI de re-embed existente.
+
+#### Scenario: Remember con Ollama caído
+- **WHEN** un usuario guarda una memoria y el servicio de embeddings no responde
+- **THEN** la memoria queda almacenada con marcador de embedding no disponible y el resultado declara la escritura degradada, sin error hacia el cliente
+
+#### Scenario: Remember con Ollama disponible
+- **WHEN** un usuario guarda una memoria y el servicio de embeddings funciona
+- **THEN** la memoria se almacena con su embedding y el resultado no declara degradación
+
+#### Scenario: Reindexación posterior recupera el embedding
+- **WHEN** el operador ejecuta el CLI de re-embed tras una escritura degradada y el servicio de embeddings ya responde
+- **THEN** la memoria pasa a tener embedding real sin cambios en su contenido
 
 ### Requirement: Aviso de idioma no inglés
 Al guardar una memoria, el sistema MUST advertir cuando el contenido parece no estar en inglés,
