@@ -10,7 +10,7 @@
 # the existing Dokploy/Traefik network (external) to your setup.
 services:
   recallum:
-    image: recallum:latest
+    image: recallum:1.0.0  # versión pineada: bump explícito en cada release del runbook
     environment:
       RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:CHANGE_ME@postgres:5432/recallum
       RECALLUM__OLLAMA__URL: http://ollama:11434
@@ -30,7 +30,7 @@ services:
       traefik.http.services.recallum.loadbalancer.server.port: "8000"
 
   migrate:
-    image: recallum:latest
+    image: recallum:1.0.0  # versión pineada: bump explícito en cada release del runbook
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment:
       RECALLUM__DATABASE__URL: postgresql+asyncpg://recallum:CHANGE_ME@postgres:5432/recallum
@@ -63,7 +63,7 @@ services:
       retries: 20
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.12.6  # fijada: sustituye a :latest
     volumes:
       - recallum-ollama:/root/.ollama
     networks:

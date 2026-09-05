@@ -6,13 +6,35 @@ Deployment and maintenance runbook for the VPS (Ubuntu 24.04, Docker, Dokploy, T
 
 | Service    | Image                    | Memory limit | Exposure       |
 |------------|--------------------------|--------------|----------------|
-| recallum   | `recallum:latest` (deploy/Dockerfile) | 512 MiB | HTTPS only, via Traefik |
+| recallum   | `recallum:1.0.0` (deploy/Dockerfile) | 512 MiB | HTTPS only, via Traefik |
 | postgres   | `pgvector/pgvector:pg17` | 2 GiB        | private network only |
-| ollama     | `ollama/ollama:latest`   | 1.5 GiB      | private network only |
+| ollama     | `ollama/ollama:0.12.6`   | 1.5 GiB      | private network only |
 
 PostgreSQL and Ollama never publish ports; they are reachable only from the
 private compose/Dokploy network. See `deploy/dokploy-compose.yml` for the
 Traefik labels (adjust the `Host(...)` rule).
+
+## Image update policy
+
+Deploy images are pinned to immutable references in `deploy/Dockerfile`
+(`python:3.14-slim` by digest) and in `deploy/docker-compose.yml` /
+`deploy/dokploy-compose.yml` (`pgvector/pgvector:pg17` by digest comment,
+`ollama/ollama:0.12.6` by tag). No deploy reference uses `:latest`.
+
+Bump procedure (deliberate, reviewed):
+
+1. Check the upstream digest for the tag you want:
+   `docker buildx imagetools inspect <image>:<tag>` → take the top-level
+   `Digest:`.
+2. Update the reference in the compose/Dockerfile, keeping a comment with the
+   resolved tag/digest next to it.
+3. Re-run the supported compose gate: `bash scripts/check_compose_supported.sh`
+   plus `docker compose -f deploy/docker-compose.yml config` to confirm the
+   pull succeeds.
+4. Merge via PR so the bump is reviewed like any other change.
+
+Cadence suggestion: review security-relevant digests monthly, and after any
+upstream security advisory for Postgres, Ollama or the Python base image.
 
 ## Embedding model (persistent download)
 

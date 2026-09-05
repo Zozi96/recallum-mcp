@@ -58,6 +58,7 @@ uv run pytest tests/unit                 # fast, no external services
 uv run pytest tests/unit/test_mcp_tools_docs.py # MCP tool-surface docs gate
 uv run pytest tests/integration          # needs Docker (pgvector container)
 uv run ruff check recallum tests
+uv run mypy recallum                      # type check (baseline: pyproject.toml)
 ```
 
 ## Deployment

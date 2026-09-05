@@ -170,11 +170,12 @@ class SessionContextBudget:
 
         omitted_by_category: dict[str, int] = {}
         if total_available_by_category:
-            served_by_category = {group.category: len(group.items) for group in groups}
+            served_by_category = {str(group.category): len(group.items) for group in groups}
             for category, available in total_available_by_category.items():
-                served = served_by_category.get(category, 0) + (
+                profile_items = (
                     profile_items_by_category.get(category, 0) if profile_items_by_category else 0
                 )
+                served = served_by_category.get(category, 0) + profile_items
                 gap = available - served
                 if gap > 0:
                     omitted_by_category[category] = gap

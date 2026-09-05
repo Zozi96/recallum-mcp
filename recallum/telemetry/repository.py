@@ -134,4 +134,5 @@ class TelemetryRepository:
             result = await session.execute(
                 delete(ToolActivity).where(ToolActivity.created_at < cutoff)
             )
-            return int(result.rowcount or 0)
+            return int(result.rowcount or 0)  # type: ignore[attr-defined]
+            # SQLAlchemy Result declara rowcount en runtime; el stub de tipo no lo expone.

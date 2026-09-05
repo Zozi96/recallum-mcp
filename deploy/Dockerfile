@@ -1,6 +1,6 @@
 # Recallum application image.
 # Python 3.14 to match the project's requires-python and the VPS host.
-FROM python:3.14-slim AS runtime
+FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6 AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # uv for deterministic installs from the lockfile.
-COPY --from=ghcr.io/astral-sh/uv:0.9.27 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.27@sha256:143b40f4ab56a780f43377604702107b5a35f83a4453daf1e4be691358718a6a /uv /usr/local/bin/uv
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY recallum ./recallum

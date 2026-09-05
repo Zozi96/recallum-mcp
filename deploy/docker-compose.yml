@@ -30,7 +30,7 @@ services:
   # and there is only one ordering to get right.
 
   postgres:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg17  # digest: sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     environment:
       POSTGRES_USER: recallum_admin
       POSTGRES_PASSWORD: recallum_admin
@@ -52,7 +52,7 @@ services:
     # Intentionally no published ports: private network only.
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.12.6  # fijada: sustituye a :latest; digest de referencia sha256:32931b46719f673c05fdbaa81ccb26da18ea4a1c57590a754874ab28ba269eb2
     volumes:
       - ollama:/root/.ollama
     networks:
