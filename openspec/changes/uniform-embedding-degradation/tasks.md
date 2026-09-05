@@ -18,5 +18,5 @@
 ## 4. Validación global
 
 - [x] 4.1 Ejecutar `uv run pytest tests/unit -q` completo y corregir regresiones. Verificación: suite unitaria verde.
-- [ ] 4.2 Ejecutar la integración relevante (`tests/integration/test_db.py` y contrato de repositorio) si hay base de datos disponible. Verificación: tests de integración verdes o marcados según su marker si no hay PostgreSQL.
+- [x] 4.2 Ejecutar la integración relevante (`tests/integration/test_db.py` y contrato de repositorio) si hay base de datos disponible. Verificación: tests de integración verdes o marcados según su marker si no hay PostgreSQL.
 - [x] 4.3 Resolver los supresores de tipado de `recallum/memory/service.py` (`[assignment]`, `[arg-type]`, `[return]` en la baseline de mypy) al completar la degradación uniforme. Verificación: `uv run mypy recallum` sin esos supresores.
