@@ -1,6 +1,6 @@
 [project]
 name = "recallum"
-version = "0.25.0"
+version = "0.26.0"
 description = "Private, self-hosted persistent memory for AI coding agents, exposed over MCP."
 readme = "README.md"
 requires-python = ">=3.14"
