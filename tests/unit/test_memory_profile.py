@@ -441,3 +441,215 @@ async def test_rebuild_retries_generation_cas_and_forget_wins():
     repo.upsert_profile = race_once  # type: ignore[method-assign]
     block = await service.rebuild_profile(USER)
     assert remembered.memory.id not in block.source_memory_ids
+
+
+async def _two_slot_corpus(service: MemoryService, repo: FakeMemoryRepository):
+    constraint = await service.remember(
+        USER, content="never force-push main", category="constraint", importance=2
+    )
+    unrelated = await service.remember(
+        USER, content="lunch is at noon in the cafeteria", category="fact", importance=1
+    )
+    matching = await service.remember(
+        USER, content="the auth service uses Granian", category="fact", importance=1
+    )
+    await repo.mark_recalled(USER, [unrelated.memory.id])
+    return constraint, unrelated, matching
+
+
+async def test_high_importance_fact_and_decision_never_static():
+    service, repo, _ = make_service()
+    fact = await service.remember(
+        USER, content="critical architecture fact", category="fact", importance=10
+    )
+    decision = await service.remember(
+        USER, content="we chose FastAPI", category="decision", importance=10
+    )
+    block = await service.get_profile(USER)
+    static_ids = {item.id for item in block.static}
+    assert fact.memory.id not in static_ids
+    assert decision.memory.id not in static_ids
+
+
+async def test_low_importance_constraint_is_static_despite_fact_sql_limit():
+    limits = MemoryLimits(profile_static_max_items=2, profile_static_min_importance=8)
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo,
+        embeddings=FakeEmbeddingClient(dimensions=8),
+        limits=limits,
+    )
+    for index in range(4):
+        await service.remember(
+            USER, content=f"critical fact {index}", category="fact", importance=10
+        )
+    constraint = await service.remember(
+        USER, content="low constraint still static", category="constraint", importance=1
+    )
+    block = await service.get_profile(USER)
+    assert any(item.id == constraint.memory.id for item in block.static)
+    assert all(item.category != "fact" for item in block.static)
+
+
+async def test_focused_context_two_slot_corpus():
+    service, repo, _ = make_service()
+    constraint, unrelated, matching = await _two_slot_corpus(service, repo)
+    ctx = await service.context(
+        USER, focus="auth service Granian", max_items=2, max_chars=400
+    )
+    assert [item.id for item in ctx.profile.static] == [constraint.memory.id]
+    assert ctx.profile.dynamic == []
+    group_ids = {item.id for group in ctx.groups for item in group.items}
+    assert matching.memory.id in group_ids
+    assert unrelated.memory.id not in group_ids
+    assert unrelated.memory.id not in {item.id for item in ctx.profile.static}
+
+
+async def test_focused_context_two_slot_corpus_textual_degradation():
+    repo = FakeMemoryRepository()
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(available=False)
+    )
+    constraint, unrelated, matching = await _two_slot_corpus(service, repo)
+    ctx = await service.context(
+        USER, focus="auth service Granian", max_items=2, max_chars=400
+    )
+    assert [item.id for item in ctx.profile.static] == [constraint.memory.id]
+    assert ctx.profile.dynamic == []
+    group_ids = {item.id for group in ctx.groups for item in group.items}
+    assert matching.memory.id in group_ids
+    assert unrelated.memory.id not in group_ids
+
+
+async def test_context_blank_focus_keeps_recency_dynamic():
+    service, repo, _ = make_service()
+    pref = await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="payment webhooks retry twice", category="fact", importance=1
+    )
+    await service.get_profile(USER)
+    await repo.mark_recalled(USER, [fact.memory.id])
+    for focus in (None, "", "   "):
+        ctx = await service.context(USER, focus=focus)
+        assert any(item.id == pref.memory.id for item in ctx.profile.static)
+        assert [item.id for item in ctx.profile.dynamic] == [fact.memory.id]
+
+
+async def test_get_profile_keeps_dynamic_when_context_focus_empties_it():
+    service, repo, _ = make_service()
+    await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="payment webhooks retry twice", category="fact", importance=1
+    )
+    await service.get_profile(USER)
+    await repo.mark_recalled(USER, [fact.memory.id])
+    focused = await service.context(USER, focus="payment webhooks retry")
+    block = await service.get_profile(USER)
+    assert focused.profile.dynamic == []
+    assert [item.id for item in block.dynamic] == [fact.memory.id]
+
+
+async def test_focused_context_empties_dynamic_on_hot_and_cold_paths():
+    service, repo, _ = make_service()
+    await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="payment webhooks retry twice", category="fact", importance=1
+    )
+    await repo.mark_recalled(USER, [fact.memory.id])
+    await service.get_profile(USER)
+    hot = await service.context(USER, focus="payment webhooks retry")
+    assert hot.profile.dynamic == []
+    assert hot.profile.digest == profile_content_hash(hot.profile.static, [])
+    repo.profiles.clear()
+    cold = await service.context(USER, focus="payment webhooks retry")
+    assert cold.profile.dynamic == []
+    assert cold.profile.digest == profile_content_hash(cold.profile.static, [])
+    group_ids = {item.id for group in cold.groups for item in group.items}
+    assert fact.memory.id in group_ids
+
+
+async def test_focused_context_recent_relevant_still_recoverable():
+    service, repo, _ = make_service()
+    await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="the auth service uses Granian", category="fact", importance=1
+    )
+    await repo.mark_recalled(USER, [fact.memory.id])
+    ctx = await service.context(
+        USER, focus="auth service Granian", max_items=5, max_chars=400
+    )
+    assert ctx.profile.dynamic == []
+    group_ids = {item.id for group in ctx.groups for item in group.items}
+    assert fact.memory.id in group_ids
+    assert fact.memory.id not in {item.id for item in ctx.profile.static}
+
+
+async def test_focused_context_budget_exhausted_by_static():
+    service, _, _ = make_service()
+    first = await service.remember(
+        USER, content="never force-push main", category="constraint", importance=5
+    )
+    second = await service.remember(
+        USER, content="no secrets in logs", category="constraint", importance=4
+    )
+    matching = await service.remember(
+        USER, content="the auth service uses Granian", category="fact", importance=1
+    )
+    ctx = await service.context(
+        USER, focus="auth service Granian", max_items=2, max_chars=400
+    )
+    assert {item.id for item in ctx.profile.static} == {first.memory.id, second.memory.id}
+    assert ctx.profile.dynamic == []
+    assert ctx.groups == []
+    assert ctx.total_items == 2
+    assert matching.memory.id not in ctx.profile.source_memory_ids
+    assert ctx.omitted >= 1
+
+
+async def test_focused_context_zero_matches_still_empties_dynamic():
+    service, repo, _ = make_service()
+    await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    unrelated = await service.remember(
+        USER, content="lunch is at noon in the cafeteria", category="fact", importance=1
+    )
+    await repo.mark_recalled(USER, [unrelated.memory.id])
+    ctx = await service.context(
+        USER, focus="quantum entanglement experiments", max_items=5, max_chars=400
+    )
+    assert ctx.profile.dynamic == []
+    group_ids = {item.id for group in ctx.groups for item in group.items}
+    assert unrelated.memory.id in group_ids
+
+
+async def test_focused_context_dedup_omitted_built_at_and_usage():
+    service, repo, _ = make_service()
+    constraint, unrelated, matching = await _two_slot_corpus(service, repo)
+    first = await service.get_profile(USER)
+    built_at = first.built_at
+    generation = repo.generations[USER]
+    ctx = await service.context(
+        USER, focus="auth service Granian", max_items=2, max_chars=400
+    )
+    profile_ids = {item.id for item in (*ctx.profile.static, *ctx.profile.dynamic)}
+    group_ids = {item.id for group in ctx.groups for item in group.items}
+    assert constraint.memory.id in profile_ids
+    assert constraint.memory.id not in group_ids
+    assert matching.memory.id in group_ids
+    assert matching.memory.id not in profile_ids
+    assert ctx.omitted_by_category == {"fact": 1}
+    assert ctx.profile.built_at == built_at
+    assert repo.generations[USER] == generation
+    assert ctx.profile.digest == profile_content_hash(ctx.profile.static, [])
+    assert repo.rows[constraint.memory.id].context_count >= 1
+    assert repo.rows[matching.memory.id].context_count >= 1
+    assert repo.rows[unrelated.memory.id].context_count == 0

@@ -65,7 +65,32 @@ semantic leg carries the search.
 Keep verbatim whatever only means something as written — identifiers, commands, file paths, error
 strings, and terms the user explicitly defined. A preference *about* another language is itself
 stored in English: `User-facing documentation is written in Spanish`, not the Spanish sentence.
-Translating an existing, still-true memory is not a reason to call `update`.
+Translating an existing, still-true memory is not a reason to call `update`. The server does not
+translate queries or memories; do not rewrite existing memories for language.
+
+«¿qué decidimos sobre MemoryService.context?» becomes
+`What did we decide about MemoryService.context?`, with the symbol intact. Keep
+`MemoryService.context`, `recallum/memory/service.py`, and `uv run pytest` verbatim inside the
+English query. Answer the user in their language.
+
+## Recall examples
+
+These are MCP tool arguments, not a Python API. `P` is the canonical project key from the session
+hook — never invent a key or copy one from another workspace. `scope="project"` requires `project`.
+Anchors (`symbol` / `file`) filter before ranking; an empty list can mean no matching anchors, not
+that the identifier never appears in text. The no-filter variant (identifier kept in `query` only)
+is an option when relevant, not a mandatory second call. A known memory UUID is `get_memory`, not
+`symbol`.
+
+| Intent | Minimal args |
+| --- | --- |
+| Project + globals | `recall(query="Context budget decisions", project=P, limit=3)` |
+| Project only | `recall(query="Context budget decisions", project=P, scope="project", limit=3)` |
+| Globals only | `recall(query="Preferred coding conventions", scope="global", limit=3)` |
+| Symbol | `recall(query="Context budget decisions", project=P, symbol="MemoryService.context", limit=3)` |
+| File | `recall(query="Context budget decisions", project=P, file="recallum/memory/service.py", limit=3)` |
+| Mention without anchor | `recall(query="Decisions about MemoryService.context", project=P, limit=3)` |
+| Known UUID | `get_memory(memory_id=M)` |
 
 ## Workflow
 

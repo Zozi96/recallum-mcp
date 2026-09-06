@@ -1203,6 +1203,103 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(_StubMCPHandler.requests, [])
 
 
+_RECALL_EXAMPLE_CALLS = (
+    'recall(query="Context budget decisions", project=P, limit=3)',
+    'recall(query="Context budget decisions", project=P, scope="project", limit=3)',
+    'recall(query="Preferred coding conventions", scope="global", limit=3)',
+    'recall(query="Context budget decisions", project=P, symbol="MemoryService.context", limit=3)',
+    'recall(query="Context budget decisions", project=P, file="recallum/memory/service.py", limit=3)',
+    'recall(query="Decisions about MemoryService.context", project=P, limit=3)',
+    "get_memory(memory_id=M)",
+)
+_GUIDANCE_SURFACES = (
+    PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md",
+    PLUGIN_ROOT / "rules" / "recallum-memory.mdc",
+    REPO_ROOT / "docs" / "clients.md",
+)
+
+
+class SkillContractTests(unittest.TestCase):
+    def _surfaces(self) -> dict[str, str]:
+        return {path.name: path.read_text(encoding="utf-8") for path in _GUIDANCE_SURFACES}
+
+    def test_memory_skill_contract_covers_mid_task_checkpoints(self) -> None:
+        text = " ".join(
+            (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        required = (
+            "project + active objective + current subsystem/hypothesis/decision",
+            "limit=3",
+            "equivalent query keys",
+            "fail-open",
+            "current code and instructions win",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_recall_examples_match_on_skill_rule_and_clients(self) -> None:
+        for name, text in self._surfaces().items():
+            collapsed = " ".join(text.split())
+            for example in _RECALL_EXAMPLE_CALLS:
+                with self.subTest(surface=name, example=example):
+                    self.assertIn(example, text)
+            self.assertIn("project=P", text)
+            self.assertNotIn('project="', text)
+            self.assertNotIn("project='", text)
+            self.assertIn("MCP tool arguments, not a Python API", collapsed)
+            self.assertIn('`scope="project"` requires `project`', collapsed)
+            self.assertIn("not a mandatory second call", collapsed)
+            self.assertIn("known memory UUID is `get_memory`, not `symbol`", collapsed)
+
+    def test_recall_language_example_preserves_literals_without_server_translation(
+        self,
+    ) -> None:
+        for name, text in self._surfaces().items():
+            collapsed = " ".join(text.split())
+            with self.subTest(surface=name):
+                self.assertIn(
+                    "¿qué decidimos sobre MemoryService.context?",
+                    collapsed,
+                )
+                self.assertIn(
+                    "What did we decide about MemoryService.context?",
+                    collapsed,
+                )
+                self.assertIn("MemoryService.context", collapsed)
+                self.assertIn("recallum/memory/service.py", collapsed)
+                self.assertIn("uv run pytest", collapsed)
+                self.assertIn("server does not translate", collapsed)
+                self.assertTrue(
+                    "do not rewrite existing memories for language" in collapsed
+                    or "must not be rewritten for language" in collapsed
+                )
+
+    def test_recall_guidance_keeps_checkpoint_client_and_fail_open_policy(self) -> None:
+        surfaces = self._surfaces()
+        for name, text in surfaces.items():
+            collapsed = " ".join(text.split())
+            with self.subTest(surface=name):
+                self.assertIn("limit=3", collapsed)
+                self.assertIn("fail-open", collapsed)
+                self.assertIn("equivalent quer", collapsed)
+        skill = surfaces["SKILL.md"]
+        rule = surfaces["recallum-memory.mdc"]
+        clients = surfaces["clients.md"]
+        self.assertIn(CODEX_PREFIX, skill)
+        self.assertIn(CLAUDE_PREFIX, skill)
+        self.assertIn(GROK_PREFIX, skill)
+        self.assertIn(DEVIN_PREFIX, skill)
+        self.assertIn("client-visible tool names", rule)
+        self.assertIn(CODEX_PREFIX.rstrip("_") + "__*", clients)
+        self.assertIn("search_tool", clients)
+        self.assertIn("Available Tools", clients)
+        self.assertIn("always take precedence", rule)
+        self.assertIn("always take precedence", clients)
+
+
 class ManifestTests(unittest.TestCase):
     def _load(self, path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))

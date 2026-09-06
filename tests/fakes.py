@@ -842,12 +842,9 @@ class FakeMemoryRepository:
         dynamic_since: datetime,
         static_min_importance: int = 8,
     ):
+        del static_min_importance  # obsolete; category gates static before LIMIT
         rows = self._filtered(user_id, visibility, None)
-        static = [
-            m
-            for m in rows
-            if m.category in {"preference", "constraint"} or m.importance >= static_min_importance
-        ]
+        static = [m for m in rows if m.category in {"preference", "constraint"}]
         dynamic = [
             m
             for m in rows

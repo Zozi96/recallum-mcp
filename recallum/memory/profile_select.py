@@ -46,7 +46,10 @@ def _confirmed_at(memory: Memory) -> datetime:
 
 
 def _is_static_eligible(memory: Memory, *, min_importance: int) -> bool:
-    return memory.category in _STATIC_CATEGORIES or memory.importance >= min_importance
+    # profile_static_min_importance is accepted but unused; importance only
+    # sorts already-eligible preference/constraint candidates.
+    del min_importance
+    return memory.category in _STATIC_CATEGORIES
 
 
 def _is_dynamic_eligible(memory: Memory, *, since: datetime) -> bool:

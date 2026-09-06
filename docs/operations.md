@@ -74,6 +74,11 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__RUNTIME__MCP_STATELESS_HTTP` | `false` | Reserved flag only; does not unlock `workers > 1` until FastMCP is wired for stateless HTTP |
 | `RECALLUM__LIMITS__*` | see `src/recallum/config.py` | Content/metadata/retrieval limits |
 
+`RECALLUM__LIMITS__PROFILE_STATIC_MIN_IMPORTANCE` is still accepted so existing
+deployments keep parsing. It is obsolete and has **no effect** on static
+profile eligibility: static is preference/constraint only, with importance
+used only to order those candidates.
+
 The public MCP boundary is configured under `RECALLUM__BOUNDARY__*`. Set
 `RECALLUM__ENVIRONMENT=production` only with explicit, non-wildcard JSON arrays
 for hosts, origins, and trusted proxy networks; production startup rejects
@@ -167,6 +172,13 @@ Alembic owns the schema. The application never runs `create_all()`. The image's
 entrypoint (`deploy/entrypoint.sh`) runs `alembic upgrade head` and then `exec`s
 the server, so **every** way of starting the container migrates first — compose,
 Dokploy, or a bare `docker run`. Nothing to remember per deployment.
+
+For the profile-policy change (`0020_invalidate_memory_profiles`), do not mix
+old and new workers: **stop every old Recallum process**, run the migration,
+then start the new version. `0020` marks all `memory_profiles` rows
+`generation=-1` (source memories and skills stay identical) so the first read
+rebuilds under preference/constraint-only static. An old process left running
+can rebuild a valid cache under the previous rule between migrate and start.
 
 If migrations fail, the entrypoint retries (`RECALLUM_MIGRATION_ATTEMPTS`,
 default 10, `RECALLUM_MIGRATION_RETRY_SECONDS` apart) to absorb a database that
@@ -635,9 +647,33 @@ with `./scripts/purge_deleted.sh 30`.
 
 ## Rollback
 
-1. Remove the Traefik route (or disable the router label) for Recallum.
-2. Redeploy the previous Recallum image tag.
-3. Migrations are additive; volumes are preserved — rollback never deletes data.
+For a version that includes `0020_invalidate_memory_profiles`:
+
+1. Stop every new Recallum process (remove the Traefik route or disable the
+   router label so traffic cannot hit a mixed pair).
+2. Downgrade `0020` (`alembic downgrade 0019_memory_code_anchors`). That
+   **re-invalidates** `memory_profiles` (`generation=-1` again); it does not
+   restore previous static contents. Source memories and skills stay intact.
+   The previous static policy returns on rebuild after the old version starts.
+3. Start the previous Recallum image tag.
+
+Volumes are preserved. Do not treat this as a schema-only additive rollback:
+skipping the `0020` downgrade leaves profiles that a new process already
+rebuilt under the new rule.
+
+### MCP unexpected errors
+
+Unexpected tool and profile-resource failures return
+`internal server error (reference: mcp-<32 lowercase hex>)`. The same
+`mcp-` + 32-hex value is the sanitized log `correlation` / `correlation_id`
+field (`MCP operation failure class=... correlation=mcp-...`). Grep existing
+operator logs for that reference; there is no public lookup header, store, or
+endpoint. HTTP `X-Request-ID` stays a separate contract.
+
+Do **not** blindly retry a mutation whose result is uncertain after an
+unexpected error — the write may have committed before the failure. Inspect
+the correlated log, then verify state (`get_memory` / `list_memories`) before
+repeating the call.
 
 ## Post-deploy smoke test (task 6.6)
 

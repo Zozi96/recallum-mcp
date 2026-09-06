@@ -1229,6 +1229,14 @@ class MemoryService:
                 profile_block = self._profile_block_from_row(
                     snapshot.profile, project=normalized_project, dynamic=dynamic
                 )
+            if normalized_focus is not None:
+                profile_block = profile_block.model_copy(
+                    update={
+                        "dynamic": [],
+                        "source_memory_ids": [item.id for item in profile_block.static],
+                        "digest": profile_content_hash(profile_block.static, []),
+                    }
+                )
             profile_block = self._cap_profile_block(
                 profile_block,
                 max_items=min(effective_max_items, self._limits.profile_context_max_items),

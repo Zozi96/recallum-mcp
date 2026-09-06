@@ -70,42 +70,23 @@ gotchas. After substantial work, save only context likely to remain true and
 save a future agent rediscovery — never full conversations, logs, or guesses.
 Ask before storing secrets, credentials, personal data, sensitive business
 information, or ambiguous content; never infer consent from a prompt or file.
-Use recall to search, context to bootstrap a session (pass the task as
-`focus` to bias the snapshot toward it; the response always includes a
-`profile` always-on block that focus cannot evict), get_memory to fetch one
-memory by id (full text and, on request, what it replaced), list_memories to
-browse, related_memories to optionally explore a seed's thematic neighborhood,
-reconfirm to stamp a still-true memory as fresh, update to correct or replace,
-forget to remove, and remember_batch for the end-of-session capture scan. When
-context reports omitted > 0, the
-budget left memories out: recall with a focused query reaches them. The
-read-only resource recallum://profile (and recallum://profile/{project})
-exposes the materialized profile without a tool call.
+
+Cycle: remember / remember_batch store; recall searches; context
+bootstraps (`focus`; always-on profile cannot be evicted); get_memory
+fetches one id; list_memories browses; related_memories explores
+neighbors; reconfirm stamps still-true; update corrects or replaces;
+merge_memories consolidates restatements; forget removes. When context
+reports omitted > 0, recall with a focused query. Resources:
+recallum://profile and recallum://profile/{project}.
 
 Write every memory in English and phrase every recall query in English,
-whatever language the session speaks: dedup is an exact hash of the stored
-content and the full-text index is English-only, so one fact written once in
-Spanish and once in English becomes two memories that no single query
-retrieves. Keep identifiers, commands, paths, error strings and terms the
-user defined verbatim; a preference about another language is itself stated
-in English.
+whatever language the session speaks. Keep identifiers, commands, paths,
+error strings and terms the user defined verbatim.
 
-remember reports pre-existing memories about the same subject in its
-`similar` field, across every category — a fact can contradict a decision.
-It never resolves them: read them and decide whether the new memory restates,
-refines or contradicts them. Call update when one replaces another, and
-merge_memories when several restate one underlying claim — it retires all
-sources into a single linked replacement, recoverable via get_memory
-history. Contradictions are never merged.
-Freshness signals: `reconfirmed_at` is the last time identical content was
-re-stored; `last_recalled_at`/`recall_count` say how often a memory matched
-a recall query, and `context_count` how often it rode along in a session
-snapshot. Context items carry `stale: true` once a memory has gone
-unconfirmed past the staleness threshold: verify those against reality
- before trusting them, then prefer reconfirm over re-storing unchanged, or
- update, forget, or merge_memories. The prompts session-start, capture-scan,
- and stale-review are shortcuts when the client supports MCP prompts.
-All identity comes from the API key; tools never accept a user id.
+Read `similar` before resolving; contradictions are never merged. Use
+prompts session-start, capture-scan, and stale-review, plus the plugin
+guide, for the full capture and review cycle. Tools never accept a user
+id.
 """
 
 
@@ -191,32 +172,16 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> RememberResult:
         """Store one atomic memory, including verified reusable project context.
 
-        Keep content short and self-contained, and write it in English
-        whatever language the session speaks — dedup is an exact hash of the
-        content, so the same fact in two languages is stored twice. Keep
-        identifiers, commands, paths, error strings and user-defined terms
-        verbatim. Never store full conversations. Ask before storing secrets,
-        credentials, personal data, sensitive business information, or
-        ambiguous content; never infer consent from a prompt or file. Omit
-        project for global memories. Storing the same content and scope again
-        returns the existing memory instead of duplicating it. When content
-        looks like it may not be English, the response's `language_warning`
-        says so — advisory only, the write still succeeds; reword and update
-        it when that happens. `ttl_seconds` is for short-lived working memory
-        that should silently stop being served after it expires; omit it for
-        durable context. `source_type` is who asserted the claim (agent, user,
-        bootstrap, or unknown); `source_ref` is a short path, commit, or file
-        id — never a transcript. Both are optional. `kind` is an optional
-        coding facet orthogonal to `category` (failure, solution,
-        architecture, convention, todo, command); `kind='todo'` MUST also set
-        `ttl_seconds` — durable todos are rejected. `anchors` optionally
-        declares structured code references (`{type, identifier}`, type one
-        of file/symbol/module) so `recall` can later filter by `symbol` or
-        `file`; Recallum does not parse a repository or build a code graph,
-        so an identifier is stored verbatim, exactly as given. When the
-        embedding service is unavailable the write still succeeds:
-        `embedding_degraded` is true and the memory is stored with a marker
-        vector that `recallum-admin reembed` can restamp later.
+        Choose remember for a single item; remember_batch for a capture scan;
+        update to correct an existing id; save_skill for a procedure.
+        Ask before storing secrets, credentials, personal data, sensitive
+        business information, or ambiguous content; never infer consent from
+        a prompt or file. Write English; keep user-defined terms verbatim.
+        Read `similar` and decide: restatements may update or merge_memories;
+        contradictions are never auto-merged. When embeddings are unavailable
+        the write still succeeds and `embedding_degraded` is true.
+
+        Example: remember(content="Prefer conventional commits", category="preference")
         """
         return await memory_service().remember(
             require_identity().user_id,
@@ -241,14 +206,15 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> RememberBatchResult:
         """Store several atomic memories in one call (end-of-session capture).
 
-        Same rules as remember, per item: short self-contained content written
-        in English, ask before anything sensitive, omit project for global
-        memories. Items succeed or fail independently; read each outcome's
-        `similar` and `language_warning` fields and reconcile as you would
-        for remember. Prefer a few high-signal items over a recap; the batch
-        is capped small on purpose. When embeddings are unavailable an item
-        is still stored and its outcome has `embedding_degraded` true, same
-        as remember — it is not a per-item error.
+        Choose remember_batch for a capture scan; remember for one item.         Same
+        per-item rules as remember: English, Ask before storing secrets,
+        never infer consent. Read each outcome's `similar`; contradictions
+        are never auto-merged. Items succeed or fail independently. When
+        embeddings are unavailable the item is still stored and
+        `embedding_degraded` is true.
+
+        Example: remember_batch(items=[{"content": "Prefer conventional commits",
+        "category": "preference"}])
         """
         return await memory_service().remember_batch(
             require_identity().user_id,
@@ -273,31 +239,16 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> RecallResult:
         """Search memories by meaning, exact terms and close spellings.
 
-        Phrase the query in English, whatever language the user asked in:
-        memories are stored in English and the full-text leg uses the English
-        configuration, so an untranslated query loses both lexical legs.
+        Choose recall for memories; match_skills for procedures. Phrase the
+        query in English, whatever language the user asked in. Passing
+        project includes that project plus globals; scope="project" requires
+        project. Optional symbol/file filters matching anchors before rank;
+        an empty list is not proof of no textual mentions — omit the filter
+        and keep the identifier in query. When embeddings are unavailable
+        the mode is degraded_textual. limit and max_tokens are maxima: the
+        result may be shorter.
 
-        Hybrid retrieval: semantic similarity, full-text ranking and a
-        typo-tolerant trigram leg, fused. Passing project includes that
-        project's memories plus the user's global ones; scope narrows to
-        exactly 'global' or 'project'. When embeddings are unavailable the
-        result mode is 'degraded_textual' (lexical legs only). ``limit``
-        and ``max_tokens`` are maxima: the result may be shorter than
-        requested. They do not mean every served memory met a calibrated
-        utility floor; lexical hits and weak vector neighbours can still
-        appear. The optional vector cosine floor is server-side only, not
-        an argument of this tool.
-
-        Optional ``max_tokens`` packs by a local estimate (not the client
-        model tokenizer). Optional ``strategy`` reorders fused hits by
-        task-type category priority without dropping matches that still fit.
-        Optional `kind` narrows to that coding facet; a memory with no kind
-        never matches a concrete `kind` filter. Optional `symbol`/`file`
-        restrict the candidate set to memories carrying a matching code
-        anchor (exact match, normalized) before results are ranked; when
-        nothing matches, the result is empty even if a semantically similar
-        unanchored memory exists — pair with a query-text-only call to also
-        reach content that merely mentions the identifier.
+        Example: recall(query="Context budget decisions", project=P, limit=3)
         """
         return await memory_service().recall(
             require_identity().user_id,
@@ -327,26 +278,12 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> ContextResult:
         """Get compact session context: always-on profile plus project snapshot.
 
-        Call this when starting or resuming work on a project. The response
-        includes a `profile` block (static/dynamic always-on memories) that
-        focus and importance ranking cannot evict, then category groups for
-        the remaining budget. Pass `focus` to also pull task-relevant
-        memories into those groups. When `omitted` > 0, use recall for the
-        rest; `omitted_by_category` names which categories still have more,
-        so recall with a focused query (and that category) reaches them.
-        Items marked `content_truncated` were clipped; fetch the full text
-        with get_memory. Profile-only reads can use the recallum://profile
-        resource instead.
+        Choose context to bootstrap a session; recall when omitted > 0;
+        get_memory for items marked content_truncated. Optional max_items /
+        max_tokens are maxima. Pass focus to bias categorized groups; the
+        profile cannot be evicted.
 
-        Optional ``max_items`` / ``max_tokens`` are maxima: the
-        categorized slice may be shorter than the budget. Focus uses
-        the same hybrid retrieval as recall and does not promise a
-        calibrated utility floor. Optional ``max_tokens`` / ``strategy``
-        apply to the categorized remainder only (profile stays reserved).
-        Token counts are a local estimate, not the client model tokenizer.
-        Optional `kind` narrows the categorized groups and any `focus`
-        match to that coding facet; the always-on `profile` block is
-        unaffected by it.
+        Example: context(project=P, focus="Context budget decisions")
         """
         return await memory_service().context(
             require_identity().user_id,
@@ -391,11 +328,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> GetResult:
         """Fetch one active memory by id, with its full untruncated content.
 
-        Use it to read items context marked `content_truncated`, or to
-        re-verify a memory before trusting it. With include_history=true the
-        result also lists the retired memories this one replaced, oldest
-        first. Unknown ids, other users' ids and retired ids all return
-        found=false.
+        Choose get_memory for a known UUID or a context item marked
+        content_truncated; list_memories to browse. Unknown, foreign, and
+        retired ids return found=false.
+
+        Example: get_memory(memory_id=M)
         """
         return await memory_service().get(
             require_identity().user_id,
@@ -411,8 +348,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> RelatedMemoriesResult:
         """List bounded thematic neighbours of one active memory.
 
-        The response contains no embeddings or full graph. Unknown, foreign,
-        and retired ids return an empty related list.
+        Choose related_memories after you have a seed id; recall to search
+        by query. Unknown, foreign, and retired ids return an empty related
+        list.
+
+        Example: related_memories(memory_id=M)
         """
         return await memory_service().related_memories(
             require_identity().user_id,
@@ -425,9 +365,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def reconfirm(memory_id: uuid.UUID) -> ReconfirmResult:
         """Stamp an active memory as freshly verified without rewriting it.
 
-        Also increments ``reconfirm_count``, a cumulative explicit-utility
-        signal kept separate from serve-count usage signals. Unknown,
-        foreign, and retired ids return reconfirmed=false.
+        Choose reconfirm when the text is still true; update to
+        correct/replace; merge_memories to consolidate restatements only.
+        Unknown, foreign, and retired ids return reconfirmed=false.
+
+        Example: reconfirm(memory_id=M)
         """
         return await memory_service().reconfirm(require_identity().user_id, memory_id)
 
@@ -444,13 +386,10 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> ListResult:
         """List active memories with optional filters and bounded pagination.
 
-        stale=true is the verification queue: only memories whose last
-        confirmation (reconfirmed_at, else created_at) is older than the
-        server's staleness threshold. Verify each against reality, then
-        prefer reconfirm over identical re-remember, or update or forget it.
-        stale=false keeps only fresh memories. Optional `kind` narrows to
-        that coding facet; a memory with no kind never matches a concrete
-        `kind` filter.
+        Choose list_memories to browse or build the stale queue; get_memory
+        to read one id in full. stale=true is the verification queue.
+
+        Example: list_memories(stale=true, limit=10)
         """
         return await memory_service().list_memories(
             require_identity().user_id,
@@ -480,26 +419,12 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> UpdateResult:
         """Correct a memory, or replace one whose fact has changed.
 
-        Pass content — in English, like every stored memory — when the memory
-        is now wrong or out of date: the old one is retired and a new one
-        replaces it, so use this instead of forget plus remember. Translating
-        a memory that was stored in another language into English is a
-        sanctioned hygiene fix, not a casual rewrite: it recovers a memory
-        the full-text index otherwise cannot reach, and supersession keeps
-        the original wording in history. Rewriting a memory that is still
-        true and already in English, only to reword or restyle it, is not an
-        update. Passing only importance, category, metadata, ttl_seconds or
-        clear_expiry edits the memory in place and keeps its id; ttl_seconds
-        and clear_expiry only apply then (not alongside content) and manage a
-        short-lived working memory's expiry — set a fresh one, or clear it
-        back to durable. Scope and project cannot be changed. Unknown ids
-        return updated=false. `source_type` and `source_ref` may be set on
-        the attribute path or override copied provenance on a content change.
-        `kind` may be set on the attribute path or carries forward from the
-        original on a content change; `kind='todo'` MUST resolve to a
-        non-null expiry (this call's ttl_seconds or one the row already
-        carries) — a content change never carries an expiry forward, so
-        `kind='todo'` there is always rejected.
+        Choose update to rewrite or edit attributes; reconfirm to stamp
+        still-true without rewriting; merge_memories to consolidate
+        restatements only. Ask before storing secrets; never infer consent.
+        Content changes retire the old row. Unknown ids return updated=false.
+
+        Example: update(memory_id=M, content="Prefer Conventional Commits")
         """
         return await memory_service().update(
             require_identity().user_id,
@@ -528,16 +453,13 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> MergeResult:
         """Consolidate two or more overlapping memories into one statement.
 
-        Use it when `similar` or a stale-queue review shows several memories
-        making the same underlying claim: write the consolidated content in
-        English and list every source id. Sources that say the same thing in
-        different languages are restatements, so this is how they collapse
-        into one. All sources are retired and linked to the new memory —
-        recoverable via get_memory with history, never deleted.
-        Sources must share one scope and project; importance defaults to the
-        loudest source. Restatements and refinements only: resolving a
-        contradiction is an update of the wrong memory, not a merge. If any
-        source id is unknown, merged=false and nothing changed.
+        Choose merge_memories for restatements of the same claim; update to
+        correct the wrong one; reconfirm does not rewrite. Read `similar`;
+        contradictions are never auto-merged. Ask before storing secrets;
+        never infer consent.
+
+        Example: merge_memories(source_ids=[A, B],
+        content="Prefer conventional commits", category="preference")
         """
         return await memory_service().merge(
             require_identity().user_id,
@@ -554,8 +476,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def forget(memory_id: uuid.UUID) -> ForgetResult:
         """Logically delete one of your memories by id.
 
+        Choose forget to retire a memory; forget_skill for a procedure.
         Unknown ids and ids belonging to other users both return
         forgotten=false, without revealing ownership.
+
+        Example: forget(memory_id=M)
         """
         return await memory_service().forget(require_identity().user_id, memory_id)
 
@@ -575,19 +500,14 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> SaveSkillResult:
         """Store a versioned procedure -- when to apply a method, not what happened.
 
-        A skill is distinct from a memory: use it for a repeatable procedure
-        with concrete steps, never for an outcome or a one-off lesson (that is
-        `remember`). `triggers` describe when the procedure applies; `steps`
-        are the ordered procedure itself; `constraints` is an optional bullet
-        list of invariants the procedure must respect. Omit `project` for a
-        global skill. Saving the same `name` in the same scope again returns
-        the existing skill unchanged when the steps are identical
-        (`created=false`). When the steps differ, the call is rejected unless
-        `replace=true`, which supersedes the active skill with a new version
-        and links it to what it replaced. The response's `similar` field
-        lists pre-existing skills about the same procedure; it is advisory
-        only and never auto-merges anything. `source_type` and `source_ref`
-        mean the same as on `remember`.
+        Choose save_skill for a repeatable procedure; remember for an outcome
+        or lesson. Ask before storing secrets; never infer consent. Read
+        `similar`; contradictions are never auto-merged. Saving changed steps
+        is rejected unless replace=true, which supersedes the active skill.
+
+        Example: save_skill(name="commit-style",
+        description="Conventional commits", triggers=["commit message"],
+        steps=["Use type(scope): summary"])
         """
         return await skill_service().save_skill(
             require_identity().user_id,
@@ -613,11 +533,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     ) -> MatchSkillsResult:
         """Find skills by procedure -- distinct from `recall`, which searches memories.
 
-        Hybrid retrieval over each skill's description, triggers and steps:
-        semantic similarity plus full-text ranking, fused. Passing project
-        includes that project's skills plus the user's global ones; scope
-        narrows to exactly 'global' or 'project'. When embeddings are
-        unavailable the result mode is 'degraded_textual' (textual leg only).
+        Choose match_skills for procedures; recall for memories.
+        scope="project" requires project. When embeddings are unavailable
+        the mode is degraded_textual.
+
+        Example: match_skills(query="How to write commit messages", limit=3)
         """
         return await skill_service().match_skills(
             require_identity().user_id,
@@ -632,7 +552,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def get_skill(skill_id: uuid.UUID) -> GetSkillResult:
         """Fetch one active skill by id, with its full triggers, steps and constraints.
 
-        Unknown ids, other users' ids and retired ids all return found=false.
+        Choose get_skill for a known skill UUID; match_skills to search;
+        get_memory for a memory id. Unknown, foreign, and retired ids return
+        found=false.
+
+        Example: get_skill(skill_id=S)
         """
         return await skill_service().get_skill(require_identity().user_id, skill_id)
 
@@ -641,8 +565,11 @@ def build_mcp_server(container: Container) -> FastMCP:
     async def forget_skill(skill_id: uuid.UUID) -> ForgetSkillResult:
         """Logically delete one of your skills by id.
 
+        Choose forget_skill to retire a procedure; forget for a memory.
         Unknown ids and ids belonging to other users both return
         forgotten=false, without revealing ownership.
+
+        Example: forget_skill(skill_id=S)
         """
         return await skill_service().forget_skill(require_identity().user_id, skill_id)
 

@@ -410,6 +410,34 @@ def test_max_tokens_stops_before_next_full_item():
     assert result.truncated is True
 
 
+def test_two_slot_spec_remaining_budget_serves_matching_fact():
+    """Spec corpus at the group layer: one reserved static slot, one leftover.
+
+    Constraint is already served in the profile (exclude_ids); leftover budget
+    must take the focus-matching fact, not an unrelated recent fact.
+    """
+    constraint = memory("never force-push main", category="constraint", importance=2)
+    unrelated = memory("lunch is at noon in the cafeteria", importance=1)
+    matching = memory("the auth service uses Granian", importance=1)
+    budget = SessionContextBudget(max_items=1, max_chars=1000)
+
+    result = budget.assemble(
+        [constraint, unrelated, matching],
+        [],
+        [matching],
+        project=None,
+        total_available=3,
+        total_available_by_category={"constraint": 1, "fact": 2},
+        exclude_ids={constraint.id},
+        profile_item_count=1,
+        profile_items_by_category={"constraint": 1},
+        focus="auth service Granian",
+    )
+
+    assert flatten(result) == ["the auth service uses Granian"]
+    assert result.omitted_by_category == {"fact": 1}
+
+
 def test_max_tokens_and_max_chars_stop_at_first_exhausted_budget():
     from recallum.memory.token_budget import estimate_tokens
 

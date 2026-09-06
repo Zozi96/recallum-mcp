@@ -16,7 +16,7 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import bindparam, event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -454,7 +454,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0019_memory_code_anchors"
+        assert version == "0020_invalidate_memory_profiles"
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -1139,3 +1139,465 @@ async def test_forget_excludes_from_all_queries(container):
     assert recall.results == []
     context = await service.context(user_id)
     assert context.total_items == 0
+
+
+_HEAD_REVISION = "0020_invalidate_memory_profiles"
+_PREV_REVISION = "0019_memory_code_anchors"
+
+
+def _alembic_cfg():
+    from alembic.config import Config
+
+    from recallum.config import get_settings
+
+    get_settings.cache_clear()
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("script_location", "recallum/migrations")
+    return cfg
+
+
+def _run_alembic(direction: str) -> None:
+    from alembic import command
+
+    cfg = _alembic_cfg()
+    if direction == "downgrade":
+        command.downgrade(cfg, _PREV_REVISION)
+    else:
+        command.upgrade(cfg, "head")
+
+
+async def _alembic_downgrade_0019() -> None:
+    await asyncio.to_thread(_run_alembic, "downgrade")
+
+
+async def _alembic_upgrade_head() -> None:
+    await asyncio.to_thread(_run_alembic, "upgrade")
+
+
+async def _force_rls(connection, table: str) -> tuple[bool, bool]:
+    return (
+        await connection.execute(
+            text(
+                "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
+                f"WHERE oid = '{table}'::regclass"
+            )
+        )
+    ).one()
+
+
+async def _set_user(connection, user_id: uuid.UUID) -> None:
+    await connection.execute(
+        text("SELECT set_config('app.current_user_id', :uid, true)"),
+        {"uid": str(user_id)},
+    )
+
+
+async def _memory_snapshot(engine, user_id: uuid.UUID) -> tuple:
+    async with engine.connect() as connection:
+        await _set_user(connection, user_id)
+        rows = (
+            await connection.execute(
+                text(
+                    "SELECT id, content, category, importance, scope, project, "
+                    "recall_count, context_count, reconfirm_count "
+                    "FROM memories WHERE deleted_at IS NULL ORDER BY id"
+                )
+            )
+        ).all()
+        return tuple(tuple(row) for row in rows)
+
+
+async def _skill_snapshot(engine, user_id: uuid.UUID) -> tuple:
+    async with engine.connect() as connection:
+        await _set_user(connection, user_id)
+        rows = (
+            await connection.execute(
+                text(
+                    "SELECT id, name, description, scope, project, version, "
+                    "steps, triggers, constraints "
+                    "FROM skills WHERE deleted_at IS NULL ORDER BY id"
+                )
+            )
+        ).all()
+        return tuple(tuple(row) for row in rows)
+
+
+async def _profile_generations(connection, user_ids: list[uuid.UUID]) -> list[tuple]:
+    rows = (
+        await connection.execute(
+            text(
+                "SELECT mp.user_id, mp.project, mp.generation, u.memory_generation "
+                "FROM memory_profiles AS mp "
+                "JOIN users AS u ON u.id = mp.user_id "
+                "WHERE mp.user_id IN :ids "
+                "ORDER BY mp.user_id, mp.project"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": user_ids},
+        )
+    ).all()
+    return [(row[0], row[1], int(row[2]), int(row[3])) for row in rows]
+
+
+async def _plant_old_policy_fact(repository, user_id: uuid.UUID, *, project, fact) -> None:
+    generation = await repository.get_memory_generation(user_id)
+    item = {
+        "id": str(fact.id),
+        "category": "fact",
+        "content": fact.content,
+        "scope": fact.scope,
+        "project": fact.project,
+        "importance": 10,
+        "content_truncated": False,
+    }
+    await repository.upsert_profile(
+        user_id,
+        project=project,
+        static_items=[item],
+        dynamic_items=[],
+        source_memory_ids=[fact.id],
+        content_hash="b" * 64,
+        expected_generation=generation,
+    )
+
+
+def _group_ids(ctx) -> set:
+    return {item.id for group in ctx.groups for item in group.items}
+
+
+async def test_memory_profile_policy_invalidation_upgrade_and_rollback(container, pg_database):
+    alice_id = await _make_user_with_key(
+        container, f"inv-alice-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    bob_id = await _make_user_with_key(
+        container, f"inv-bob-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    repository = container.memory_repository()
+    skills = container.skill_service()
+    engine = container.engine()
+
+    alice_fact = (
+        await service.remember(
+            alice_id,
+            content="alice high-importance architecture fact",
+            category="fact",
+            importance=10,
+        )
+    ).memory
+    await service.remember(
+        alice_id, content="alice never force-push main", category="constraint", importance=2
+    )
+    alice_alpha = (
+        await service.remember(
+            alice_id,
+            content="alice alpha project fact",
+            category="fact",
+            importance=10,
+            project="alpha",
+        )
+    ).memory
+    alice_beta = (
+        await service.remember(
+            alice_id,
+            content="alice beta project fact",
+            category="fact",
+            importance=10,
+            project="beta",
+        )
+    ).memory
+    bob_fact = (
+        await service.remember(
+            bob_id, content="bob high-importance architecture fact", category="fact", importance=10
+        )
+    ).memory
+    bob_gamma = (
+        await service.remember(
+            bob_id,
+            content="bob gamma project fact",
+            category="fact",
+            importance=10,
+            project="gamma",
+        )
+    ).memory
+    await skills.save_skill(
+        alice_id,
+        name="alice_migration_skill",
+        description="Alice procedure for schema changes.",
+        triggers=["schema change"],
+        steps=["Write the migration file", "Run alembic upgrade head"],
+    )
+    await skills.save_skill(
+        bob_id,
+        name="bob_migration_skill",
+        description="Bob procedure for schema changes.",
+        triggers=["schema change"],
+        steps=["Write the migration file", "Verify with psql"],
+    )
+
+    plants = (
+        (alice_id, None, alice_fact),
+        (alice_id, "alpha", alice_alpha),
+        (alice_id, "beta", alice_beta),
+        (bob_id, None, bob_fact),
+        (bob_id, "gamma", bob_gamma),
+    )
+    admin_engine = create_async_engine(pg_database["admin"])
+    try:
+        await _alembic_downgrade_0019()
+        try:
+            for user_id, project, fact in plants:
+                await _plant_old_policy_fact(repository, user_id, project=project, fact=fact)
+
+            before_memories = (
+                await _memory_snapshot(engine, alice_id),
+                await _memory_snapshot(engine, bob_id),
+            )
+            before_skills = (
+                await _skill_snapshot(engine, alice_id),
+                await _skill_snapshot(engine, bob_id),
+            )
+            async with admin_engine.connect() as connection:
+                planted = await _profile_generations(connection, [alice_id, bob_id])
+            assert len(planted) == 5
+            assert all(
+                generation != -1 and generation == user_gen
+                for *_, generation, user_gen in planted
+            )
+
+            await _alembic_upgrade_head()
+
+            async with admin_engine.connect() as connection:
+                version = (
+                    await connection.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+                assert version == _HEAD_REVISION
+                assert await _force_rls(connection, "memory_profiles") == (True, True)
+                assert await _force_rls(connection, "memories") == (True, True)
+                after = await _profile_generations(connection, [alice_id, bob_id])
+            assert len(after) == 5
+            assert all(
+                generation == -1 and generation != user_gen
+                for *_, generation, user_gen in after
+            )
+
+            assert (
+                await _memory_snapshot(engine, alice_id),
+                await _memory_snapshot(engine, bob_id),
+            ) == before_memories
+            assert (
+                await _skill_snapshot(engine, alice_id),
+                await _skill_snapshot(engine, bob_id),
+            ) == before_skills
+
+            alice_profile = await service.get_profile(alice_id)
+            alice_ctx = await service.context(alice_id)
+            bob_profile = await service.get_profile(bob_id)
+            assert all(item.category != "fact" for item in alice_profile.static)
+            assert all(item.content != alice_fact.content for item in alice_profile.static)
+            assert all(item.category != "fact" for item in alice_ctx.profile.static)
+            assert all(item.category != "fact" for item in bob_profile.static)
+            assert any(
+                item.content == "alice never force-push main" for item in alice_profile.static
+            )
+
+            alice_list = await service.list_memories(alice_id)
+            bob_list = await service.list_memories(bob_id)
+            assert all("bob " not in m.content for m in alice_list.items)
+            assert all("alice " not in m.content for m in bob_list.items)
+            assert all(
+                item.content != bob_fact.content
+                for item in alice_profile.static + alice_profile.dynamic
+            )
+            async with engine.connect() as connection:
+                unseen = (
+                    await connection.execute(text("SELECT count(*) FROM memory_profiles"))
+                ).scalar_one()
+                assert unseen == 0
+                await _set_user(connection, alice_id)
+                assert (
+                    await connection.execute(text("SELECT count(*) FROM memory_profiles"))
+                ).scalar_one() == 3
+        finally:
+            await _alembic_upgrade_head()
+    finally:
+        await admin_engine.dispose()
+
+
+async def test_memory_profile_policy_invalidation_downgrade_first_read(container):
+    user_id = await _make_user_with_key(
+        container, f"inv-down-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    repository = container.memory_repository()
+    fact = (
+        await service.remember(
+            user_id,
+            content="downgrade planted high-importance fact",
+            category="fact",
+            importance=10,
+        )
+    ).memory
+    await service.remember(
+        user_id, content="downgrade keep this constraint", category="constraint", importance=2
+    )
+    await _plant_old_policy_fact(repository, user_id, project=None, fact=fact)
+    planted = await repository.get_profile(user_id, project=None)
+    assert planted is not None
+    assert planted.generation == await repository.get_memory_generation(user_id)
+    assert any(item.get("category") == "fact" for item in planted.static_items)
+
+    await _alembic_downgrade_0019()
+    try:
+        row = await repository.get_profile(user_id, project=None)
+        assert row is not None
+        assert row.generation == -1
+        profile = await service.get_profile(user_id)
+        ctx = await service.context(user_id)
+        assert all(item.category != "fact" for item in profile.static)
+        assert all(item.content != fact.content for item in profile.static)
+        assert all(item.category != "fact" for item in ctx.profile.static)
+        assert any(item.content == "downgrade keep this constraint" for item in profile.static)
+    finally:
+        await _alembic_upgrade_head()
+
+
+async def test_memory_profile_invalidation_failure_rolls_back_force_rls(container, pg_database):
+    user_id = await _make_user_with_key(
+        container, f"inv-fail-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    await service.remember(
+        user_id, content="failure-path fact stays put", category="fact", importance=10
+    )
+    await service.get_profile(user_id)
+    engine = container.engine()
+    before_memories = await _memory_snapshot(engine, user_id)
+    admin_engine = create_async_engine(pg_database["admin"])
+    try:
+        async with admin_engine.connect() as connection:
+            before = await _profile_generations(connection, [user_id])
+            assert await _force_rls(connection, "memory_profiles") == (True, True)
+            assert await _force_rls(connection, "memories") == (True, True)
+        assert before and before[0][2] != -1
+
+        with pytest.raises(RuntimeError, match="migration failed"):
+            async with admin_engine.begin() as connection:
+                await connection.execute(
+                    text("ALTER TABLE memory_profiles NO FORCE ROW LEVEL SECURITY")
+                )
+                await connection.execute(text("UPDATE memory_profiles SET generation = -1"))
+                mid = await _profile_generations(connection, [user_id])
+                assert all(generation == -1 for *_, generation, _user_gen in mid)
+                raise RuntimeError("migration failed")
+
+        async with admin_engine.connect() as connection:
+            assert await _force_rls(connection, "memory_profiles") == (True, True)
+            assert await _force_rls(connection, "memories") == (True, True)
+            assert await _profile_generations(connection, [user_id]) == before
+        assert await _memory_snapshot(engine, user_id) == before_memories
+        row = await container.memory_repository().get_profile(user_id, project=None)
+        assert row is not None
+        assert row.generation == before[0][2]
+    finally:
+        await admin_engine.dispose()
+
+
+async def test_memory_profile_context_combinations_after_invalidation(container):
+    user_id = await _make_user_with_key(
+        container, f"inv-combo-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    service = container.memory_service()
+    repository = container.memory_repository()
+    engine = container.engine()
+    constraint = (
+        await service.remember(
+            user_id, content="never force-push main", category="constraint", importance=2
+        )
+    ).memory
+    unrelated = (
+        await service.remember(
+            user_id, content="lunch is at noon in the cafeteria", category="fact", importance=1
+        )
+    ).memory
+    matching = (
+        await service.remember(
+            user_id, content="the auth service uses Granian", category="fact", importance=1
+        )
+    ).memory
+    await repository.mark_recalled(user_id, [unrelated.id])
+
+    await _alembic_downgrade_0019()
+    try:
+        await _plant_old_policy_fact(repository, user_id, project=None, fact=matching)
+        await _alembic_upgrade_head()
+
+        def _assert_two_slot(ctx, *, expect_dynamic: bool) -> None:
+            assert [item.id for item in ctx.profile.static] == [constraint.id]
+            assert all(item.id != matching.id for item in ctx.profile.static)
+            if expect_dynamic:
+                assert unrelated.id in {item.id for item in ctx.profile.dynamic}
+            else:
+                assert ctx.profile.dynamic == []
+            assert matching.id in _group_ids(ctx)
+            assert unrelated.id not in _group_ids(ctx)
+
+        cold_focus = await service.context(
+            user_id, focus="auth service Granian", max_items=2, max_chars=400
+        )
+        cold_row = await repository.get_profile(user_id, project=None)
+        assert cold_row is not None
+        assert cold_row.generation == await repository.get_memory_generation(user_id)
+        _assert_two_slot(cold_focus, expect_dynamic=False)
+
+        async with engine.begin() as connection:
+            await _set_user(connection, user_id)
+            await connection.execute(
+                text("UPDATE memory_profiles SET generation = -1 WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
+        cold_nofocus = await service.context(user_id, max_items=2, max_chars=400)
+        assert [item.id for item in cold_nofocus.profile.static] == [constraint.id]
+        assert unrelated.id in {item.id for item in cold_nofocus.profile.dynamic}
+
+        hot_row = await repository.get_profile(user_id, project=None)
+        assert hot_row is not None
+        hot_generation = hot_row.generation
+        assert hot_generation == await repository.get_memory_generation(user_id)
+        assert hot_generation != -1
+
+        hot_focus = await service.context(
+            user_id, focus="auth service Granian", max_items=2, max_chars=400
+        )
+        assert (await repository.get_profile(user_id, project=None)).generation == hot_generation
+        _assert_two_slot(hot_focus, expect_dynamic=False)
+
+        hot_nofocus = await service.context(user_id, max_items=2, max_chars=400)
+        assert (await repository.get_profile(user_id, project=None)).generation == hot_generation
+        assert [item.id for item in hot_nofocus.profile.static] == [constraint.id]
+        assert unrelated.id in {item.id for item in hot_nofocus.profile.dynamic}
+
+        recalled = await service.recall(user_id, query="auth service Granian")
+        assert matching.id in {item.id for item in recalled.results}
+        assert (await repository.get_profile(user_id, project=None)).generation == hot_generation
+        after_recall = await service.context(user_id)
+        assert (await repository.get_profile(user_id, project=None)).generation == hot_generation
+        assert matching.id in {item.id for item in after_recall.profile.dynamic}
+
+        from recallum.embeddings.ollama import EmbeddingError
+
+        embedder = container.embedding_client()
+        original_embed = embedder.embed
+
+        async def unavailable(_text: str) -> list[float]:
+            raise EmbeddingError("embedding unavailable")
+
+        embedder.embed = unavailable  # type: ignore[method-assign]
+        try:
+            textual = await service.context(
+                user_id, focus="auth service Granian", max_items=2, max_chars=400
+            )
+        finally:
+            embedder.embed = original_embed  # type: ignore[method-assign]
+        _assert_two_slot(textual, expect_dynamic=False)
+    finally:
+        await _alembic_upgrade_head()

@@ -2364,6 +2364,135 @@ async def test_recall_without_anchor_filter_still_finds_content_mentions_via_fts
     assert stored.memory.id in {r.memory.id for r in pools.trigram}
 
 
+async def test_recall_scope_symbol_file_and_owner_isolation():
+    service, _, _ = make_service()
+    other = uuid.uuid4()
+    project_a = "proj-a"
+    project_b = "proj-b"
+
+    global_pref = await service.remember(
+        USER,
+        content="Preferred coding conventions use four spaces",
+        category="preference",
+    )
+    global_budget = await service.remember(
+        USER,
+        content="Context budget decisions also apply globally",
+        category="decision",
+    )
+    anchored_symbol = await service.remember(
+        USER,
+        content="Context budget decisions reserve the profile in MemoryService.context",
+        category="decision",
+        project=project_a,
+        anchors=[{"type": "symbol", "identifier": "MemoryService.context"}],
+    )
+    anchored_file = await service.remember(
+        USER,
+        content="Context budget decisions live in recallum/memory/service.py",
+        category="fact",
+        project=project_a,
+        anchors=[{"type": "file", "identifier": "recallum/memory/service.py"}],
+    )
+    unanchored_mention = await service.remember(
+        USER,
+        content="Decisions about MemoryService.context without an anchor",
+        category="decision",
+        project=project_a,
+    )
+    other_project = await service.remember(
+        USER,
+        content="Context budget decisions for the other project",
+        category="decision",
+        project=project_b,
+    )
+    foreign_global = await service.remember(
+        other,
+        content="Preferred coding conventions of another user",
+        category="preference",
+    )
+    foreign_project = await service.remember(
+        other,
+        content="Context budget decisions stolen from another user",
+        category="decision",
+        project=project_a,
+        anchors=[{"type": "symbol", "identifier": "MemoryService.context"}],
+    )
+    foreign_ids = {foreign_global.memory.id, foreign_project.memory.id}
+
+    def ids(result) -> set[uuid.UUID]:
+        return {item.id for item in result.results}
+
+    project_plus_globals = await service.recall(
+        USER, query="Context budget decisions", project=project_a, limit=10
+    )
+    assert ids(project_plus_globals) >= {
+        global_budget.memory.id,
+        anchored_symbol.memory.id,
+        anchored_file.memory.id,
+        unanchored_mention.memory.id,
+    }
+    assert other_project.memory.id not in ids(project_plus_globals)
+    assert ids(project_plus_globals).isdisjoint(foreign_ids)
+
+    project_only = await service.recall(
+        USER,
+        query="Context budget decisions",
+        project=project_a,
+        scope="project",
+        limit=10,
+    )
+    assert ids(project_only) >= {
+        anchored_symbol.memory.id,
+        anchored_file.memory.id,
+        unanchored_mention.memory.id,
+    }
+    assert global_budget.memory.id not in ids(project_only)
+    assert global_pref.memory.id not in ids(project_only)
+    assert other_project.memory.id not in ids(project_only)
+    assert ids(project_only).isdisjoint(foreign_ids)
+
+    globals_only = await service.recall(
+        USER, query="Preferred coding conventions", scope="global", limit=10
+    )
+    assert global_pref.memory.id in ids(globals_only)
+    assert all(item.scope == "global" for item in globals_only.results)
+    assert ids(globals_only).isdisjoint(foreign_ids)
+
+    with pytest.raises(MemoryValidationError, match="project is required"):
+        await service.recall(USER, query="Context budget decisions", scope="project")
+
+    by_symbol = await service.recall(
+        USER,
+        query="Context budget decisions",
+        project=project_a,
+        symbol="MemoryService.context",
+        limit=10,
+    )
+    assert ids(by_symbol) == {anchored_symbol.memory.id}
+
+    by_file = await service.recall(
+        USER,
+        query="Context budget decisions",
+        project=project_a,
+        file="recallum/memory/service.py",
+        limit=10,
+    )
+    assert ids(by_file) == {anchored_file.memory.id}
+
+    mention = await service.recall(
+        USER, query="Decisions about MemoryService.context", project=project_a, limit=10
+    )
+    assert unanchored_mention.memory.id in ids(mention)
+    assert ids(mention).isdisjoint(foreign_ids)
+
+    known = await service.get(USER, anchored_symbol.memory.id)
+    assert known.found is True
+    assert known.memory.id == anchored_symbol.memory.id
+    hidden = await service.get(USER, foreign_project.memory.id)
+    assert hidden.found is False
+
+
 
 async def test_update_content_change_keeps_anchors_reachable_via_recall_symbol():
     """Security review fix 1: a correction must not silently drop an anchor."""

@@ -61,6 +61,132 @@ EXPECTED_TOOLS = {
     "forget_skill",
 }
 
+# Frozen tools/list input surface (property names + required). Copied from
+# the current announced schemas; descriptions may shrink, names/inputs must not.
+FROZEN_TOOL_INPUT_SCHEMAS: dict[str, dict[str, list[str]]] = {
+    "context": {
+        "properties": [
+            "focus",
+            "kind",
+            "max_chars",
+            "max_items",
+            "max_tokens",
+            "project",
+            "strategy",
+        ],
+        "required": [],
+    },
+    "forget": {"properties": ["memory_id"], "required": ["memory_id"]},
+    "forget_skill": {"properties": ["skill_id"], "required": ["skill_id"]},
+    "get_memory": {
+        "properties": ["include_history", "memory_id"],
+        "required": ["memory_id"],
+    },
+    "get_skill": {"properties": ["skill_id"], "required": ["skill_id"]},
+    "list_memories": {
+        "properties": [
+            "category",
+            "kind",
+            "limit",
+            "offset",
+            "project",
+            "scope",
+            "stale",
+        ],
+        "required": [],
+    },
+    "match_skills": {
+        "properties": ["limit", "project", "query", "scope"],
+        "required": ["query"],
+    },
+    "merge_memories": {
+        "properties": [
+            "category",
+            "content",
+            "importance",
+            "metadata",
+            "source_client",
+            "source_ids",
+        ],
+        "required": ["category", "content", "source_ids"],
+    },
+    "recall": {
+        "properties": [
+            "category",
+            "file",
+            "kind",
+            "limit",
+            "max_tokens",
+            "project",
+            "query",
+            "scope",
+            "strategy",
+            "symbol",
+        ],
+        "required": ["query"],
+    },
+    "reconfirm": {"properties": ["memory_id"], "required": ["memory_id"]},
+    "related_memories": {
+        "properties": ["limit", "memory_id"],
+        "required": ["memory_id"],
+    },
+    "remember": {
+        "properties": [
+            "anchors",
+            "category",
+            "content",
+            "importance",
+            "kind",
+            "metadata",
+            "project",
+            "source_client",
+            "source_ref",
+            "source_type",
+            "ttl_seconds",
+        ],
+        "required": ["category", "content"],
+    },
+    "remember_batch": {
+        "properties": ["items", "source_client"],
+        "required": ["items"],
+    },
+    "save_skill": {
+        "properties": [
+            "constraints",
+            "description",
+            "name",
+            "project",
+            "replace",
+            "scope",
+            "source_ref",
+            "source_type",
+            "steps",
+            "triggers",
+        ],
+        "required": ["description", "name", "steps", "triggers"],
+    },
+    "update": {
+        "properties": [
+            "category",
+            "clear_expiry",
+            "content",
+            "importance",
+            "kind",
+            "memory_id",
+            "metadata",
+            "source_client",
+            "source_ref",
+            "source_type",
+            "ttl_seconds",
+        ],
+        "required": ["memory_id"],
+    },
+}
+
+INSTRUCTIONS_CHAR_LIMIT = 1400
+DESCRIPTION_CHAR_LIMIT = 1600
+_EXAMPLE_ARG_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
 
 def test_server_instructions_cover_reusable_context_beyond_decisions():
     for kind in ("architecture", "terminology", "workflows", "root causes"):
@@ -156,7 +282,21 @@ class _McpRecordHandler(logging.Handler):
         self.records.append(record)
 
 
-async def _raw_failing_tool_call(base_url: str, token: str) -> httpx.Response:
+UNEXPECTED_PUBLIC = re.compile(
+    r"internal server error \(reference: (mcp-[0-9a-f]{32})\)"
+)
+MCP_REF = re.compile(r"^mcp-[0-9a-f]{32}$")
+
+
+def _unexpected_reference(message: str) -> str:
+    match = UNEXPECTED_PUBLIC.search(message)
+    assert match, message
+    return match.group(1)
+
+
+async def _raw_failing_tool_call(
+    base_url: str, token: str, request_id: Any = 2
+) -> httpx.Response:
     """Exercise the wire serializer directly, retaining the raw MCP response."""
     headers = {
         "Accept": "application/json, text/event-stream",
@@ -173,7 +313,7 @@ async def _raw_failing_tool_call(base_url: str, token: str) -> httpx.Response:
             f"{base_url}/mcp/",
             json={
                 "jsonrpc": "2.0",
-                "id": 2,
+                "id": request_id,
                 "method": "tools/call",
                 "params": {"name": "list_memories", "arguments": {}},
             },
@@ -525,13 +665,29 @@ async def test_live_error_sentinels_are_absent_from_wire_logs_and_telemetry(
         raw_response = await _raw_failing_tool_call(info.url, info.alice_token)
         raw_serialization = raw_response.content.decode("utf-8", "replace")
         assert raw_response.status_code == 200
-        assert public_message in raw_serialization
+        assert '"result"' not in raw_serialization or '"isError":true' in raw_serialization.replace(
+            " ", ""
+        )
+        if error_type is RuntimeError:
+            wire_ref = _unexpected_reference(raw_serialization)
+            assert GENERIC_TOOL_ERROR_MESSAGE in raw_serialization
+        else:
+            assert public_message in raw_serialization
+            assert "reference:" not in raw_serialization
+            wire_ref = None
         assert sentinel not in raw_serialization
 
         async with mcp_client(info.url, info.alice_token) as client:
-            with pytest.raises(ToolError, match=f"^{public_message}$") as failure:
-                await client.call_tool("list_memories", {})
-        assert str(failure.value) == public_message
+            if error_type is RuntimeError:
+                with pytest.raises(ToolError) as failure:
+                    await client.call_tool("list_memories", {})
+                client_ref = _unexpected_reference(str(failure.value))
+            else:
+                with pytest.raises(ToolError, match=f"^{public_message}$") as failure:
+                    await client.call_tool("list_memories", {})
+                assert str(failure.value) == public_message
+                client_ref = None
+        assert sentinel not in str(failure.value)
 
         await info.buffer.flush()
         telemetry = repr(info.telemetry.events)
@@ -547,13 +703,19 @@ async def test_live_error_sentinels_are_absent_from_wire_logs_and_telemetry(
         assert sentinel not in telemetry
 
         expected_class = f"{error_type.__module__}.{error_type.__qualname__}"
-        diagnostic = next(record for record in handler.records if record.name == "recallum.mcp")
-        assert diagnostic.failure_class == expected_class
-        assert re.fullmatch(r"mcp-[0-9a-f]{20}", diagnostic.correlation_id)
-        assert "frames=" in diagnostic.getMessage()
-        assert "list_memories" in diagnostic.frames
-        assert 2 not in diagnostic.args
-        assert "2" not in diagnostic.args
+        mcp_logs = [record for record in handler.records if record.name == "recallum.mcp"]
+        assert len(mcp_logs) >= 2
+        for diagnostic in mcp_logs:
+            assert diagnostic.failure_class == expected_class
+            assert MCP_REF.fullmatch(diagnostic.correlation_id)
+            assert "frames=" in diagnostic.getMessage()
+            assert "list_memories" in diagnostic.frames
+            assert 2 not in diagnostic.args
+            assert "2" not in diagnostic.args
+        if wire_ref is not None:
+            assert wire_ref == mcp_logs[0].correlation_id
+            assert client_ref == mcp_logs[1].correlation_id
+            assert wire_ref != client_ref
         assert any(
             event.tool_name == "list_memories" and event.failed for event in info.telemetry.events
         )
@@ -604,7 +766,7 @@ async def test_authenticated_batch_embedding_failure_is_partial_and_sanitized():
 
         diagnostic = next(record for record in handler.records if record.name == "recallum.memory")
         assert diagnostic.failure_class.endswith("EmbeddingError")
-        assert re.fullmatch(r"mcp-[0-9a-f]{20}", diagnostic.correlation_id)
+        assert MCP_REF.fullmatch(diagnostic.correlation_id)
         assert "remember_batch" in diagnostic.frames
         assert any(
             event.tool_name == "remember_batch" and not event.failed
@@ -612,7 +774,10 @@ async def test_authenticated_batch_embedding_failure_is_partial_and_sanitized():
         )
 
 
-async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(monkeypatch):
+@pytest.mark.parametrize("uri", ("recallum://profile", "recallum://profile/alpha"))
+async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(
+    uri: str, monkeypatch
+):
     sentinel = (
         "S002-SECRET-SENTINEL https://profile.internal "
         "rcl_S002_PROFILE_TOKEN_123456789 private-profile-content"
@@ -624,7 +789,7 @@ async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(
     async with _exploding_server(RuntimeError(sentinel), handler) as info:
         async with mcp_client(info.url, info.alice_token) as client:
             with pytest.raises(Exception) as failure:
-                await client.read_resource("recallum://profile")
+                await client.read_resource(uri)
 
     assert sentinel not in str(failure.value)
     log_values = [
@@ -641,14 +806,54 @@ async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(
     )
     assert sentinel not in trace_events
     public = next(exc for exc in traced if isinstance(exc, ToolError))
-    assert str(public) == GENERIC_TOOL_ERROR_MESSAGE
+    public_ref = _unexpected_reference(str(public))
     assert public.__cause__ is None
     assert public.__context__ is None
+    assert sentinel not in traceback.format_exception(public)
 
     diagnostic = next(record for record in handler.records if record.name == "recallum.mcp")
     assert diagnostic.failure_class == "builtins.RuntimeError"
-    assert re.fullmatch(r"mcp-[0-9a-f]{20}", diagnostic.correlation_id)
+    assert diagnostic.correlation_id == public_ref
+    assert MCP_REF.fullmatch(diagnostic.correlation_id)
     assert "get_profile" in diagnostic.frames
+
+
+@pytest.mark.parametrize("request_id", ERROR_SENTINELS)
+async def test_same_client_request_id_yields_independent_live_refs(request_id: str):
+    handler = _McpRecordHandler()
+    payload_sentinel = "INTERNAL-URL TOKEN-SECRET"
+    async with _exploding_server(RuntimeError(payload_sentinel), handler) as info:
+        first = await _raw_failing_tool_call(info.url, info.alice_token, request_id)
+        second = await _raw_failing_tool_call(info.url, info.alice_token, request_id)
+        concurrent = await asyncio.gather(
+            _raw_failing_tool_call(info.url, info.alice_token, request_id),
+            _raw_failing_tool_call(info.url, info.alice_token, request_id),
+        )
+
+    responses = (first, second, *concurrent)
+    assert all(response.status_code == 200 for response in responses)
+    refs = [
+        _unexpected_reference(response.content.decode("utf-8", "replace"))
+        for response in responses
+    ]
+    assert len(set(refs)) == 4
+    mcp_logs = [record for record in handler.records if record.name == "recallum.mcp"]
+    logged = {record.correlation_id for record in mcp_logs}
+    assert logged == set(refs)
+    for response, ref in zip(responses, refs, strict=True):
+        body = response.content.decode("utf-8", "replace")
+        public = UNEXPECTED_PUBLIC.search(body)
+        assert public is not None
+        assert request_id not in public.group(0)
+        assert payload_sentinel not in public.group(0)
+        assert MCP_REF.fullmatch(ref)
+    log_values = [
+        repr(value)
+        for record in mcp_logs
+        for value in (*vars(record).values(), record.args)
+    ]
+    assert all(request_id not in value for value in log_values)
+    assert all(payload_sentinel not in value for value in log_values)
 
 
 async def test_validate_only_tools_are_exposed_passes_for_the_real_server():
@@ -787,6 +992,133 @@ async def test_discovery_announces_exactly_fifteen_tools_and_three_prompts(
     assert not forbidden & set((context.inputSchema or {}).get("properties", {}))
     assert "maxima" in (recall.description or "")
     assert "maxima" in (context.description or "")
+
+
+def _example_kwargs(name: str, description: str) -> set[str]:
+    marker = f"{name}("
+    start = description.find(marker)
+    assert start >= 0, f"{name} description lacks a valid example call"
+    depth = 0
+    body = description[start + len(name) :]
+    for index, char in enumerate(body):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return set(_EXAMPLE_ARG_RE.findall(body[: index + 1]))
+    raise AssertionError(f"{name} example call is unclosed")
+
+
+async def test_announced_mcp_docs_fit_limits_keep_schemas_and_safeguards(
+    server: ServerInfo,
+):
+    """Announced MCP char lengths (Unicode). Not a token or latency claim.
+
+    Baseline (file == transport): initialize.instructions=2880;
+    remember=1798, remember_batch=587, recall=1519, context=1205,
+    get_memory=340, list_memories=475, update=1370, merge_memories=715,
+    related_memories=170, reconfirm=245, forget=148, save_skill=919,
+    match_skills=410, get_skill=147, forget_skill=146;
+    sum_descriptions=10194;
+    estimated_client_repeat (instructions*15+sum_desc)=53394.
+
+    After (file == transport): initialize.instructions=1398;
+    remember=684, remember_batch=532, recall=624, context=358,
+    get_memory=258, list_memories=243, update=388, merge_memories=393,
+    related_memories=236, reconfirm=280, forget=242, save_skill=490,
+    match_skills=300, get_skill=256, forget_skill=245;
+    sum_descriptions=5529;
+    estimated_client_repeat (instructions*15+sum_desc)=26499.
+    """
+    async with mcp_client(server.url, server.alice_token) as client:
+        init = client.initialize_result
+        assert init is not None
+        announced_instructions = init.instructions or ""
+        tools = await client.list_tools()
+        prompts = await client.list_prompts()
+        resources = await client.list_resources()
+        templates = await client.list_resource_templates()
+
+    assert len(announced_instructions) <= INSTRUCTIONS_CHAR_LIMIT
+    assert len(announced_instructions) == len(INSTRUCTIONS)
+    assert {prompt.name for prompt in prompts} == {
+        "session-start",
+        "capture-scan",
+        "stale-review",
+    }
+    assert any(str(resource.uri) == "recallum://profile" for resource in resources)
+    assert any(
+        str(template.uriTemplate) == "recallum://profile/{project}" for template in templates
+    )
+
+    by_name = {tool.name: tool for tool in tools}
+    assert set(by_name) == EXPECTED_TOOLS
+    assert set(by_name) == set(FROZEN_TOOL_INPUT_SCHEMAS)
+    for name, tool in by_name.items():
+        description = tool.description or ""
+        assert len(description) <= DESCRIPTION_CHAR_LIMIT, name
+        schema = tool.inputSchema or {}
+        properties = set(schema.get("properties", {}))
+        required = set(schema.get("required") or [])
+        frozen = FROZEN_TOOL_INPUT_SCHEMAS[name]
+        assert properties == set(frozen["properties"]), name
+        assert required == set(frozen["required"]), name
+        example_args = _example_kwargs(name, description)
+        assert example_args, name
+        assert example_args <= properties, (name, example_args - properties)
+        assert set(frozen["required"]) <= example_args, name
+
+    write_tools = (
+        "remember",
+        "remember_batch",
+        "update",
+        "merge_memories",
+        "save_skill",
+    )
+    for name in write_tools:
+        text = by_name[name].description or ""
+        assert "Ask before storing secrets" in text, name
+        assert "never infer consent" in text, name
+    for name in ("remember", "remember_batch", "merge_memories", "save_skill"):
+        text = by_name[name].description or ""
+        assert "similar" in text, name
+        assert "never auto-merged" in text, name
+    save_skill = by_name["save_skill"].description or ""
+    assert "replace=true" in save_skill
+    assert "remember" in save_skill
+    reconfirm = by_name["reconfirm"].description or ""
+    assert "without rewriting" in reconfirm
+    assert "update" in reconfirm
+    assert "merge_memories" in reconfirm
+    update = by_name["update"].description or ""
+    assert "reconfirm" in update
+    assert "merge_memories" in update
+    merge = by_name["merge_memories"].description or ""
+    assert "restatements" in merge
+    assert "reconfirm" in merge
+    context = by_name["context"].description or ""
+    get_memory = by_name["get_memory"].description or ""
+    assert "content_truncated" in context
+    assert "get_memory" in context
+    assert "omitted" in context
+    assert "recall" in context
+    assert "content_truncated" in get_memory
+    assert "list_memories" in get_memory
+    assert "get_memory" in (by_name["list_memories"].description or "")
+    recall = by_name["recall"].description or ""
+    assert "English" in recall
+    assert 'scope="project" requires' in recall
+    assert "before rank" in recall
+    assert "textual mentions" in recall
+    assert "degraded_textual" in recall
+    assert "match_skills" in recall
+    assert "recall" in (by_name["match_skills"].description or "")
+    for name in ("forget", "forget_skill"):
+        text = by_name[name].description or ""
+        assert "Logically delete" in text, name
+        assert "forgotten=false" in text, name
+        assert "without revealing ownership" in text, name
 
 
 async def test_recall_short_and_empty_results_validate_schema(server: ServerInfo):
@@ -1230,7 +1562,7 @@ async def test_no_cross_user_access(server: ServerInfo):
     async with mcp_client(server.url, server.alice_token) as alice:
         remembered = await alice.call_tool(
             "remember",
-            {"content": "secreto de alice", "category": "fact", "importance": 8},
+            {"content": "secreto de alice", "category": "preference", "importance": 8},
         )
         memory_id = remembered.structured_content["memory"]["id"]
 

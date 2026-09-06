@@ -44,16 +44,31 @@ def _mem(
     )
 
 
-def test_static_prefers_preference_and_high_importance():
+def test_static_is_preference_and_constraint_only():
     now = datetime.now(UTC)
     pref = _mem(content="prefer tabs", category="preference", importance=3)
-    high = _mem(content="critical fact", category="fact", importance=9)
+    constraint = _mem(content="no force push", category="constraint", importance=1)
+    high = _mem(content="critical fact", category="fact", importance=10)
+    decision = _mem(content="critical decision", category="decision", importance=10)
     low = _mem(content="noise", category="fact", importance=2)
-    selected = select_profile_slices([pref, high, low], limits=MemoryLimits(), now=now)
+    selected = select_profile_slices(
+        [pref, constraint, high, decision, low], limits=MemoryLimits(), now=now
+    )
     contents = {item.content for item in selected.static}
-    assert "prefer tabs" in contents
-    assert "critical fact" in contents
-    assert "noise" not in contents
+    assert contents == {"prefer tabs", "no force push"}
+    assert [item.content for item in selected.static] == ["prefer tabs", "no force push"]
+
+
+def test_static_min_importance_does_not_admit_facts_or_decisions():
+    now = datetime.now(UTC)
+    fact = _mem(content="critical fact", category="fact", importance=10)
+    decision = _mem(content="critical decision", category="decision", importance=10)
+    selected = select_profile_slices(
+        [fact, decision],
+        limits=MemoryLimits(profile_static_min_importance=0),
+        now=now,
+    )
+    assert selected.static == []
 
 
 def test_dynamic_recent_recall_not_in_static():

@@ -7,6 +7,25 @@ runtime gate share one allowlist and cannot drift apart. The check is pure
 text logic over backtick tool tokens: no network, clock, or services, so the
 ``unit-plugin`` fast lane collects it.
 
+Announced MCP char lengths are measured on transport in
+``tests/unit/test_mcp_tools.py`` (file may differ from tools/list). Recorded
+Unicode lengths, not tokens or latency:
+
+Baseline: instructions=2880; remember=1798, remember_batch=587, recall=1519,
+context=1205, get_memory=340, list_memories=475, update=1370,
+merge_memories=715, related_memories=170, reconfirm=245, forget=148,
+save_skill=919, match_skills=410, get_skill=147, forget_skill=146;
+sum_descriptions=10194; estimated_client_repeat
+(instructions*15+sum_desc)=53394.
+
+After: instructions=1398; remember=684, remember_batch=532, recall=624,
+context=358, get_memory=258, list_memories=243, update=388,
+merge_memories=393, related_memories=236, reconfirm=280, forget=242,
+save_skill=490, match_skills=300, get_skill=256, forget_skill=245;
+sum_descriptions=5529; estimated_client_repeat
+(instructions*15+sum_desc)=26499.
+
+
 Rules:
 - README must name all fifteen canonical tools and must not claim a count
   other than fifteen.
@@ -207,6 +226,14 @@ def test_remember_tool_docs_declare_degraded_embedding_result():
     for doc in (remember_doc, batch_doc):
         assert "embedding_degraded" in doc
         assert "degraded" in doc
+
+
+def test_each_tool_docstring_includes_a_schema_example_call():
+    """File-level companion to the announced-text example check on transport."""
+    source = (REPO_ROOT / "recallum" / "mcp" / "server.py").read_text(encoding="utf-8")
+    for name in sorted(EXPECTED_TOOLS):
+        assert f"{name}(" in source, name
+        assert f"Example: {name}(" in source, name
 
 
 def test_reverting_readme_to_nine_tools_fails_naming_document_and_mismatch(tmp_path):

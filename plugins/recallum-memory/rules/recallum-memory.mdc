@@ -9,4 +9,16 @@ When Recallum MCP tools are available, follow the bundled `recallum-memory` skil
 - Otherwise derive the key with the bundled executable source of truth: `python3 <plugin>/hooks/recallum_hook.py project-key <workspace>` (the plugin root is the directory containing `hooks/`; e.g. under `$CURSOR_PLUGIN_ROOT` in Cursor). Only when that script cannot be run, apply the same algorithm by hand: a valid `.recallum-project` file (`anchor:<hex>`) at the Git top-level or any parent directory is the key. Else use `origin`, or the first remote reported by `git remote` when `origin` is absent; normalize a parseable URL or SCP-style remote to `<lowercase-host>/<path>` — path lowercased on case-insensitive hosts (github.com, gitlab.com, bitbucket.org), non-default port kept as `<host>:<port>` — after removing leading/trailing path slashes and one trailing `.git`; SHA-256 hash that UTF-8 string, take the first 16 lowercase hex characters, and prefix `remote:`. With no parseable remote, SHA-256 hash the absolute Git root (or absolute workspace when it is not a repository), take the first 12 lowercase hex characters, and prefix `local:`.
 - Before planning, call the `context` tool with that `project` and, when the task is known, `focus=<short task summary>`.
 
-Write recall queries and stored memories in English, preserve identifiers verbatim, and apply the skill's scope, deduplication, and sensitive-data rules. Current user and repository instructions always take precedence.
+Write recall queries and stored memories in English, preserve identifiers verbatim, and apply the skill's scope, deduplication, and sensitive-data rules. Current user and repository instructions always take precedence. The server does not translate queries or memories; do not rewrite existing memories for language. «¿qué decidimos sobre MemoryService.context?» becomes `What did we decide about MemoryService.context?`, with the symbol intact. Keep `MemoryService.context`, `recallum/memory/service.py`, and `uv run pytest` verbatim inside the English query. Answer the user in their language.
+
+These are MCP tool arguments, not a Python API. `P` is the canonical project key from the session hook — never invent a key or copy one from another workspace. `scope="project"` requires `project`. Anchors (`symbol` / `file`) filter before ranking; an empty list can mean no matching anchors, not that the identifier never appears in text. The no-filter variant (identifier kept in `query` only) is an option when relevant, not a mandatory second call. A known memory UUID is `get_memory`, not `symbol`. Checkpoint recalls use `limit=3`, suppress equivalent queries, continue fail-open if Recallum is unavailable, and use the client-visible tool names from the skill.
+
+| Intent | Minimal args |
+| --- | --- |
+| Project + globals | `recall(query="Context budget decisions", project=P, limit=3)` |
+| Project only | `recall(query="Context budget decisions", project=P, scope="project", limit=3)` |
+| Globals only | `recall(query="Preferred coding conventions", scope="global", limit=3)` |
+| Symbol | `recall(query="Context budget decisions", project=P, symbol="MemoryService.context", limit=3)` |
+| File | `recall(query="Context budget decisions", project=P, file="recallum/memory/service.py", limit=3)` |
+| Mention without anchor | `recall(query="Decisions about MemoryService.context", project=P, limit=3)` |
+| Known UUID | `get_memory(memory_id=M)` |

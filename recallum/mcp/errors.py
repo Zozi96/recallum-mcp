@@ -11,13 +11,12 @@ sanitized class/frame metadata; exception arguments never cross the boundary.
 from __future__ import annotations
 
 import functools
-import hashlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastmcp.exceptions import ToolError
-from fastmcp.server.dependencies import get_context
 
 from recallum.diagnostics import (
     EMBEDDING_UNAVAILABLE_MESSAGE,
@@ -33,25 +32,14 @@ logger = logging.getLogger("recallum.mcp")
 GENERIC_TOOL_ERROR_MESSAGE = "internal server error"
 
 
-def _request_correlation() -> str:
-    """Return a stable, non-sensitive correlation derived from MCP request id."""
-    try:
-        request_id = get_context().request_id
-    except (RuntimeError, AttributeError):
-        return "mcp-unknown"
-    # JSON-RPC request ids are client-controlled. Hash the typed value and never
-    # put the original value in a log record or exception message.
-    material = f"{type(request_id).__name__}:{request_id}".encode("utf-8", "replace")
-    return f"mcp-{hashlib.sha256(material).hexdigest()[:20]}"
-
-
 def translates_domain_errors[F: Callable[..., Awaitable[Any]]](tool: F) -> F:
     """Translate tool failures into safe ``ToolError`` messages."""
 
     @functools.wraps(tool)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         public_message: str
-        with diagnostic_correlation(_request_correlation()):
+        correlation_id = f"mcp-{uuid.uuid4().hex}"
+        with diagnostic_correlation(correlation_id):
             try:
                 return await tool(*args, **kwargs)
             except (MemoryValidationError, SkillValidationError) as exc:
@@ -61,7 +49,7 @@ def translates_domain_errors[F: Callable[..., Awaitable[Any]]](tool: F) -> F:
                 public_message = EMBEDDING_UNAVAILABLE_MESSAGE
             except Exception as exc:
                 record_sanitized_failure(logger, exc, message="MCP operation failure")
-                public_message = GENERIC_TOOL_ERROR_MESSAGE
+                public_message = f"{GENERIC_TOOL_ERROR_MESSAGE} (reference: {correlation_id})"
 
         # Raise only after the handled exception and its context have left scope.
         # FastMCP logs and records this public exception in OTel, so it must not

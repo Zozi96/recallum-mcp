@@ -73,9 +73,9 @@ class MemoryLimits(BaseModel):
     context_truncate_floor: int = Field(default=200, gt=0)
 
     # Materialized profile selection (static = always-on, dynamic = recent).
-    # Static prefers preference/constraint; other categories need high
-    # importance. Caps keep the always-on layer small so context remainder
-    # stays usable for task/project snapshot.
+    # Static is preference/constraint only; importance sorts those candidates.
+    # profile_static_min_importance is obsolete: still parsed, no effect on
+    # static eligibility or candidate predicates.
     profile_static_min_importance: int = Field(default=8, ge=0, le=10)
     profile_static_max_items: int = Field(default=12, gt=0, le=50)
     profile_static_max_chars: int = Field(default=2000, gt=0)

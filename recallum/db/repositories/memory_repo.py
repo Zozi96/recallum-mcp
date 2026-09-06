@@ -2034,6 +2034,7 @@ class MemoryRepository:
         static_min_importance: int = 8,
     ) -> Sequence[Memory]:
         """Fetch bounded static and recent-dynamic candidates in their own orders."""
+        del static_min_importance  # obsolete; category gates static before LIMIT
         async with self._sessions.for_user(user_id) as session:
             filters = self._filters(user_id, visibility=visibility, category=None)
             static_stmt = (
@@ -2041,8 +2042,7 @@ class MemoryRepository:
                 .options(*_light())
                 .where(
                     *filters,
-                    (Memory.category.in_(("preference", "constraint")))
-                    | (Memory.importance >= static_min_importance),
+                    Memory.category.in_(("preference", "constraint")),
                 )
                 .order_by(
                     Memory.importance.desc(),
