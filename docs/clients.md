@@ -145,7 +145,7 @@ accepted only for `localhost`/`127.0.0.1`.
 acceptance only — it is not evidence that the hook ever dispatches.** `agy` gates every session
 behind interactive Google OAuth sign-in before any session-start hook, hook dispatch, or MCP tool
 surface becomes reachable, so hook parity with Codex/Claude Code/Grok Build is unconfirmed and must
-not be assumed. `agy plugin validate` also reports `skills : 2 processed`. **This is validation
+not be assumed. `agy plugin validate` also reports `skills : 3 processed`. **This is validation
 acceptance only — it is not evidence that skill-driven tool discovery works at runtime.** The same
 OAuth gate blocks observation of runtime skill loading, so skill-driven discovery, like hook
 dispatch, is expected but unconfirmed.

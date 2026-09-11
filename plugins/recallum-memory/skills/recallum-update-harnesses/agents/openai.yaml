@@ -1,0 +1,6 @@
+interface:
+  display_name: "Recallum Update Harnesses"
+  short_description: "Refresh Recallum plugins on Codex and other CLIs"
+  default_prompt: "Use $recallum-update-harnesses to update Recallum on every installed harness."
+policy:
+  allow_implicit_invocation: false

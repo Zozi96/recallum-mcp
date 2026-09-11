@@ -17,6 +17,9 @@ from urllib.parse import urlsplit
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLUGIN_ROOT.parents[1]
+PLUGIN_VERSION = json.loads(
+    (PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8")
+)["version"]
 HOOK = PLUGIN_ROOT / "hooks" / "recallum_hook.py"
 INSTALLER = PLUGIN_ROOT / "scripts" / "install.sh"
 DOCTOR = PLUGIN_ROOT / "scripts" / "recallum_doctor.py"
@@ -1208,7 +1211,8 @@ _RECALL_EXAMPLE_CALLS = (
     'recall(query="Context budget decisions", project=P, scope="project", limit=3)',
     'recall(query="Preferred coding conventions", scope="global", limit=3)',
     'recall(query="Context budget decisions", project=P, symbol="MemoryService.context", limit=3)',
-    'recall(query="Context budget decisions", project=P, file="recallum/memory/service.py", limit=3)',
+    'recall(query="Context budget decisions", project=P, '
+    'file="recallum/memory/service.py", limit=3)',
     'recall(query="Decisions about MemoryService.context", project=P, limit=3)',
     "get_memory(memory_id=M)",
 )
@@ -1416,7 +1420,9 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(entry["version"], manifest["version"])
         components = entry["components"]
         skill_names = {s["name"] for s in components["skills"]}
-        self.assertEqual(skill_names, {"recallum-memory", "recallum-setup"})
+        self.assertEqual(
+            skill_names, {"recallum-memory", "recallum-setup", "recallum-update-harnesses"}
+        )
         hook_names = {h["name"] for h in components["hooks"]}
         self.assertEqual(hook_names, {"SessionStart", "UserPromptSubmit"})
         self.assertEqual(components["mcpServers"][0]["name"], "recallum")
@@ -1497,7 +1503,7 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("DEVIN_TOOL_PREFIX", source)
 
     def test_skills_document_the_tool_prefix_of_each_client(self) -> None:
-        for name in ("recallum-memory", "recallum-setup"):
+        for name in ("recallum-memory", "recallum-setup", "recallum-update-harnesses"):
             text = (PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
             with self.subTest(skill=name):
                 self.assertIn(CODEX_PREFIX, text)
@@ -3181,7 +3187,7 @@ class DoctorTests(unittest.TestCase):
         self,
         home: Path,
         token: str = "rcl_doctor_secret_123",
-        codex_version: str = "0.16.0",
+        codex_version: str = PLUGIN_VERSION,
     ) -> None:
         self._write(
             home,
@@ -3243,12 +3249,12 @@ class DoctorTests(unittest.TestCase):
         self._write(home, ".config/recallum/env", "export RECALLUM_API_KEY=" + token + "\n")
         self._write(
             home,
-            ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/plugin.json",
-            json.dumps({"version": "0.16.0"}),
+            f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/plugin.json",
+            json.dumps({"version": PLUGIN_VERSION}),
         )
         self._write(
             home,
-            ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/mcp.json",
+            f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/mcp.json",
             json.dumps({"mcpServers": {}}),
         )
         self._write_cli(
@@ -3257,7 +3263,7 @@ class DoctorTests(unittest.TestCase):
             "import json, sys\n"
             "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
             "    print(json.dumps([{'id': 'recallum-memory@recallum-local',\n"
-            "                      'version': '0.16.0', 'scope': 'user',\n"
+            "                      'version': " + repr(PLUGIN_VERSION) + ", 'scope': 'user',\n"
             "                      'enabled': True}]))\n",
         )
         self._write_cli(
@@ -3282,7 +3288,7 @@ class DoctorTests(unittest.TestCase):
             "import json, sys\n"
             "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
             "    print(json.dumps([{'name': 'recallum-memory',\n"
-            "                      'version': '0.16.0', 'enabled': True}]))\n",
+            "                      'version': " + repr(PLUGIN_VERSION) + ", 'enabled': True}]))\n",
         )
 
     def _run_doctor(
@@ -3466,7 +3472,7 @@ class DoctorTests(unittest.TestCase):
             home = Path(directory)
             self._healthy_home(home)
             manifest = home / (
-                ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/plugin.json"
+                f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/plugin.json"
             )
             manifest.write_text('{"version": "0.11.0"}', encoding="utf-8")
             result = self._run_doctor(home)
@@ -3522,7 +3528,9 @@ class DoctorTests(unittest.TestCase):
                 "import json, sys\n"
                 "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
                 "    print(json.dumps({'installed': [{'pluginId': "
-                "'recallum-memory@recallum-local', 'version': '0.16.0'}]}))\n"
+                "'recallum-memory@recallum-local', 'version': "
+                + repr(PLUGIN_VERSION)
+                + "}]}))\n"
                 "elif sys.argv[1:] == ['mcp', 'get', 'recallum', '--json']:\n"
                 "    print(json.dumps({'transport': {'type': "
                 + repr(token)
@@ -3610,7 +3618,7 @@ class DoctorTests(unittest.TestCase):
             )
             self._write(
                 home,
-                ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/mcp.json",
+                f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/mcp.json",
                 json.dumps(
                     {
                         "mcpServers": {
@@ -3629,7 +3637,9 @@ class DoctorTests(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 "if args == ['plugin', 'list', '--json']:\n"
                 "    print(json.dumps({'installed': [{'pluginId': "
-                "'recallum-memory@recallum-local', 'version': '0.16.0'}]}))\n"
+                "'recallum-memory@recallum-local', 'version': "
+                + repr(PLUGIN_VERSION)
+                + "}]}))\n"
                 "elif args == ['mcp', 'get', 'recallum', '--json']:\n"
                 "    print(json.dumps({'transport': {'type': 'http', "
                 f"'url': 'https://example.test/mcp?token={token}', "
@@ -3677,7 +3687,7 @@ class DoctorTests(unittest.TestCase):
             self._healthy_home(home)
             self._write(
                 home,
-                ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/mcp.json",
+                f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/mcp.json",
                 json.dumps(leftover),
             )
             result = self._run_doctor(home, "--json")
@@ -3694,7 +3704,7 @@ class DoctorTests(unittest.TestCase):
             )
             self._write(
                 home,
-                ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/mcp.json",
+                f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/mcp.json",
                 json.dumps(leftover),
             )
             literal = self._run_doctor(home, "--json")
@@ -3702,7 +3712,7 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("plugin cache", " ".join(json.loads(literal.stdout)["problems"]))
             self._write(
                 home,
-                ".cursor/plugins/cache/recallum-local/recallum-memory/0.16.0/mcp.json",
+                f".cursor/plugins/cache/recallum-local/recallum-memory/{PLUGIN_VERSION}/mcp.json",
                 json.dumps({"mcpServers": {}}),
             )
             empty = self._run_doctor(home, "--json")

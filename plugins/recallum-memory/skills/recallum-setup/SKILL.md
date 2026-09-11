@@ -205,11 +205,11 @@ the API key is written to disk in cleartext — read the whole section before ru
    permission mode, and whether `agy plugin list` shows the plugin. If `agy` is not on `PATH`, that
    last sub-check is skipped, not failed.
 5. Optional: `agy plugin validate plugins/recallum-memory` — expect `mcpServers : 1 processed` and
-   `skills : 2 processed`. It also reports `hooks : 1 processed`, but that is validation acceptance
+   `skills : 3 processed`. It also reports `hooks : 1 processed`, but that is validation acceptance
    only, not evidence the hook ever dispatches (see Diagnostics below).
 6. Start a new Antigravity session so the plugin and MCP server are picked up.
 
-Skills validate cleanly (`skills : 2 processed`), but that is validation acceptance only — it is
+Skills validate cleanly (`skills : 3 processed`), but that is validation acceptance only — it is
 not evidence that skill-driven tool discovery works at runtime. Session-start hook parity is also
 **unconfirmed**: `agy` gates every session behind interactive Google OAuth sign-in before any
 session-start hook, hook dispatch, or MCP tool surface becomes reachable, so do not rely on a

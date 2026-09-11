@@ -9,8 +9,9 @@ Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claud
 
 The plugin ships:
 
-- two skills — `recallum-memory` (load context and capture verified reusable knowledge) and
-  `recallum-setup` (install and diagnose);
+- three skills — `recallum-memory` (load context and capture verified reusable knowledge),
+  `recallum-setup` (install and diagnose), and `recallum-update-harnesses` (refresh every
+  installed client after a plugin version bump);
 - shared hooks — Codex, Claude Code, and Grok wire `SessionStart` plus `UserPromptSubmit`; Cursor
   wires `sessionStart` and adds an always-applied rule as a delivery fallback; Devin may wire
   SessionStart through `.devin/hooks.v1.json` if it supports plugins, but hook dispatch is
