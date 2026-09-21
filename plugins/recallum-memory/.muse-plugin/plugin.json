@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "name": "recallum-memory",
+  "displayName": "Recallum Memory",
+  "version": "0.19.0",
+  "description": "Persistent, project-aware memory for Muse Code through Recallum. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [
+      {
+        "id": "recallum-memory",
+        "path": "skills/recallum-memory/SKILL.md",
+        "enabledDefault": true
+      },
+      {
+        "id": "recallum-setup",
+        "path": "skills/recallum-setup/SKILL.md",
+        "enabledDefault": true
+      },
+      {
+        "id": "recallum-update-harnesses",
+        "path": "skills/recallum-update-harnesses/SKILL.md",
+        "enabledDefault": true
+      }
+    ],
+    "hooks": [
+      {
+        "id": "session-start",
+        "event": "SessionStart",
+        "command": [
+          "python3",
+          "hooks/muse_session.py"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "Preparing Recallum project context"
+      },
+      {
+        "id": "user-prompt-submit",
+        "event": "UserPromptSubmit",
+        "command": [
+          "python3",
+          "hooks/muse_prompt.py"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "Checking for relevant Recallum memory"
+      }
+    ],
+    "mcpServers": [],
+    "commands": [],
+    "reminders": []
+  }
+}

@@ -1,6 +1,6 @@
 ---
 name: recallum-update-harnesses
-description: Updates the Recallum plugin on every installed harness after a plugin version bump. Use when the user asks to update harnesses, refresh client plugins, sync Codex/Claude/.agents/Grok/Cursor/Devin/Antigravity to a new recallum-memory version, or fix VERSION DRIFT from recallum_doctor.
+description: Updates the Recallum plugin on every installed harness after a plugin version bump. Use when the user asks to update harnesses, refresh client plugins, sync Codex/Claude/.agents/Grok/Cursor/Devin/Antigravity/Muse to a new recallum-memory version, or fix VERSION DRIFT from recallum_doctor.
 ---
 
 # Recallum Update Harnesses
@@ -17,7 +17,8 @@ plugin-cache `mcp.json`.
 Tool prefixes (for new-session checks only): Codex `mcp__recallum__`, Claude
 Code plugin `mcp__plugin_recallum-memory_recallum__`, Claude native/Desktop
 `mcp__recallum__`, Grok `recallum__` via `search_tool` / `use_tool`, Cursor
-Available Tools (no stable prefix), Devin `mcp__recallum__`.
+Available Tools (no stable prefix), Devin `mcp__recallum__`, Muse Code
+`mcp__recallum__`.
 
 ## 1. Baseline
 
@@ -29,7 +30,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 
 Record `repo_version` and every `VERSION DRIFT` line. Detect CLIs with
 `command -v` for `codex`, `claude`, `grok`, `agent`/`cursor-agent`, `devin`,
-`agy`. Skip a client that is not installed.
+`agy`, `muse`. Skip a client that is not installed.
 
 `PLUGIN` below is `<repo>/plugins/recallum-memory`. Repo marketplace name is
 `recallum-local`.
@@ -123,6 +124,21 @@ agy plugin validate "$PLUGIN"
 
 Expect `skills : 3 processed` after this skill ships (was 2). Hooks reporting
 `1 processed` is validation only, not dispatch.
+
+### Muse Code (`muse`)
+
+```bash
+muse plugins update recallum-memory
+muse plugins approve plugin:recallum-memory:hook:session-start
+muse plugins approve plugin:recallum-memory:hook:user-prompt-submit
+muse plugins hook test plugin:recallum-memory:hook:session-start \
+  --fixture '{"event": "SessionStart", "stdin": {"cwd": "$PWD"}}'
+```
+
+The update changes the hook definition hashes, so both hooks go inactive until
+re-approved — the approve calls are not optional. Do not rewrite
+`settings.json` unless MCP itself is broken. Confirm version in
+`muse plugins list --json`.
 
 ## 3. Verify
 

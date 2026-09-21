@@ -25,13 +25,14 @@ Claude Code namespaces a plugin-bundled MCP server:
 | Grok Build | `recallum__` | `recallum__context` (via `search_tool` / `use_tool`) |
 | Cursor | Recallum MCP tools in Available Tools | the `context` tool in Available Tools |
 | Devin CLI | `mcp__recallum__` | `mcp__recallum__context` |
+| Muse Code | `mcp__recallum__` | `mcp__recallum__context` |
 
 Use whichever client tool names are actually present in your tool list; the session hook names the
 forms that may apply. On Claude Code, **either** the plugin prefix or the native `mcp__recallum__`
 prefix (installer dual-write for Desktop ToolSearch) may be present — use ToolSearch (`+recallum`
 or `select:`) before concluding tools are missing. Cursor does not provide a stable textual tool
-prefix, so use the names shown in Available Tools. Devin lists MCP tools directly as
-`mcp__recallum__*` and needs no lookup step. Below, tools are written unprefixed.
+prefix, so use the names shown in Available Tools. Devin and Muse Code list MCP tools directly as
+`mcp__recallum__*` and need no lookup step. Below, tools are written unprefixed.
 
 ## Skills vs Memories
 

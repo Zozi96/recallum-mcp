@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fail-open context hints for the Recallum plugin (Cursor, Codex, Claude Code, Grok, Devin).
+"""Fail-open context hints for the Recallum plugin
+(Cursor, Codex, Claude Code, Grok, Devin, Muse Code).
 
 Runs under whichever ``python3`` is on the host PATH, so this module must stay
 compatible with older interpreters. Do not use syntax newer than Python 3.9.
@@ -38,11 +39,15 @@ from urllib.parse import urlsplit, urlunsplit
 # Available Tools list rather than a stable textual prefix, so its hint
 # uses semantic tool names instead. Devin registers the MCP server as
 # `recallum` and exposes tools as `mcp__recallum__*`, identical to Codex,
-# with no lookup step.
+# with no lookup step. Muse Code registers the native settings.json server
+# `recallum` as `mcp__recallum__*` too (verified live: sibling servers
+# `codegraph` and `richai` surface as `mcp__codegraph__*` /
+# `mcp__richai__*`), with no lookup step.
 CODEX_TOOL_PREFIX = "mcp__recallum__"
 CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 CLAUDE_NATIVE_TOOL_PREFIX = "mcp__recallum__"
 GROK_TOOL_PREFIX = "recallum__"
+MUSE_TOOL_PREFIX = "mcp__recallum__"
 
 # Opt-in digest configuration. The URL cannot be read from .mcp.json (its
 # ${user_config.*} interpolations are resolved by the client, not by hooks),
@@ -300,6 +305,9 @@ def _tool(name: str) -> str:
 
     * ``CURSOR_PLUGIN_ROOT`` — Cursor. It may set compatibility aliases, so
       Cursor must be checked first.
+    * ``MUSE_PLUGIN_ROOT`` — Muse Code. It also sets ``PLUGIN_ROOT`` and
+      ``CLAUDE_PLUGIN_ROOT`` as compatibility aliases (verified live on
+      Muse Code 1.3.0), so Muse must be checked before Codex and Claude.
     * ``DEVIN_PROJECT_DIR`` — Devin. Devin sets this during hooks and its
       tool prefix (`mcp__recallum__*`) is identical to Codex's.
     * ``GROK_PLUGIN_ROOT`` — Grok Build. It also sets ``CLAUDE_PLUGIN_ROOT``
@@ -316,6 +324,8 @@ def _tool(name: str) -> str:
     """
     if os.environ.get("CURSOR_PLUGIN_ROOT"):
         return f"the Recallum MCP tool `{name}`"
+    if os.environ.get("MUSE_PLUGIN_ROOT"):
+        return f"{MUSE_TOOL_PREFIX}{name}"
     if os.environ.get("DEVIN_PROJECT_DIR"):
         return f"{CODEX_TOOL_PREFIX}{name}"
     if os.environ.get("GROK_PLUGIN_ROOT"):
@@ -354,15 +364,17 @@ def _lookup_hint() -> str:
     authenticated. Grok Build similarly routes MCP tools through
     ``search_tool`` / ``use_tool`` rather than listing them as first-class
     builtins. Cursor exposes its tools through Available Tools without a stable
-    textual prefix. Codex and Devin list their MCP tools directly and have no
-    lookup step, so the hint is omitted on the Codex and Devin paths,
-    mirroring the branches in ``_tool``.
+    textual prefix. Codex, Devin, and Muse Code list their MCP tools directly
+    and have no lookup step, so the hint is omitted on the Codex, Devin, and
+    Muse paths, mirroring the branches in ``_tool``.
     """
     if os.environ.get("CURSOR_PLUGIN_ROOT"):
         return (
             " In Cursor, use the Recallum MCP tools listed under Available Tools; "
             "do not assume a textual tool prefix."
         )
+    if os.environ.get("MUSE_PLUGIN_ROOT"):
+        return ""
     if os.environ.get("DEVIN_PROJECT_DIR"):
         return ""
     if os.environ.get("PLUGIN_ROOT") and not os.environ.get("GROK_PLUGIN_ROOT"):

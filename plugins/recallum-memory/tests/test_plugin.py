@@ -8,6 +8,7 @@ import os
 import re
 import runpy
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -61,6 +62,7 @@ CLAUDE_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 GROK_MANIFEST = PLUGIN_ROOT / "plugin.json"
 CURSOR_MANIFEST = PLUGIN_ROOT / ".cursor-plugin" / "plugin.json"
 DEVIN_MANIFEST = PLUGIN_ROOT / ".devin-plugin" / "plugin.json"
+MUSE_MANIFEST = PLUGIN_ROOT / ".muse-plugin" / "plugin.json"
 CODEX_MARKETPLACE = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 CLAUDE_MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 GROK_MARKETPLACE = REPO_ROOT / ".grok-plugin" / "marketplace.json"
@@ -349,10 +351,37 @@ with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
 # Unknown subcommands succeed quietly.
 """
 
+# Fake `muse` binary for installer target tests. Plugin state is driven by
+# FAKE_MUSE_PLUGIN ("missing" or "installed"); install/update/approve log
+# their invocations and succeed. The native settings.json MCP entry is
+# managed by the installer itself against the temp HOME, never by this fake.
+FAKE_MUSE = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["muse", *args]) + "\\n")
+if args == ["plugins", "list", "--json"]:
+    if os.environ.get("FAKE_MUSE_PLUGIN", "missing") == "installed":
+        print(json.dumps({"plugins": [{
+            "record": {"id": "recallum-memory"},
+            "plugin": {"id": "recallum-memory", "version": "0.19.0"},
+        }]}))
+    else:
+        print(json.dumps({"plugins": []}))
+elif args[:2] == ["plugins", "install"]:
+    print(json.dumps({"installed": {"id": "recallum-memory"}}))
+elif args[:2] == ["plugins", "update"]:
+    print(json.dumps({"updated": {"id": "recallum-memory"}}))
+elif args[:2] == ["plugins", "approve"]:
+    print(json.dumps({"decision": "approve"}))
+# Unknown subcommands succeed quietly so installer probes stay green.
+"""
+
 CODEX_PREFIX = "mcp__recallum__"
 CLAUDE_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 GROK_PREFIX = "recallum__"
 DEVIN_PREFIX = "mcp__recallum__"
+MUSE_PREFIX = "mcp__recallum__"
 
 
 def run_hook(
@@ -434,6 +463,7 @@ class HookTests(unittest.TestCase):
             {"GROK_PLUGIN_ROOT": "/plugins/recallum-memory"},
             {"CURSOR_PLUGIN_ROOT": "/plugins/recallum-memory"},
             {"DEVIN_PROJECT_DIR": "/projects/alpha"},
+            {"MUSE_PLUGIN_ROOT": "/plugins/recallum-memory"},
         )
         for env in variants:
             with self.subTest(env=sorted(env)):
@@ -575,6 +605,78 @@ class HookTests(unittest.TestCase):
         )
         self.assertNotIn("ToolSearch", context)
         self.assertNotIn("search_tool", context)
+
+    def test_muse_is_told_the_bare_server_tool_name(self) -> None:
+        # Muse sets MUSE_PLUGIN_ROOT alongside PLUGIN_ROOT and
+        # CLAUDE_PLUGIN_ROOT as compatibility aliases (verified live on
+        # Muse Code 1.3.0), so this is what a real Muse hook process sees.
+        context = self._session_context(
+            {
+                "MUSE_PLUGIN_ROOT": "/plugins/recallum-memory",
+                "PLUGIN_ROOT": "/plugins/recallum-memory",
+                "CLAUDE_PLUGIN_ROOT": "/plugins/recallum-memory",
+            }
+        )
+        self.assertIn(f"{MUSE_PREFIX}context", context)
+        self.assertIn(f"{MUSE_PREFIX}recall", context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
+        # Bare Grok names are a substring of mcp__recallum__*, so check the
+        # call-site form the hook actually emits.
+        self.assertNotIn(f"call {GROK_PREFIX}context", context)
+
+    def test_muse_is_not_told_about_a_lookup_step_it_does_not_have(self) -> None:
+        # Muse lists native MCP tools directly (mcp__recallum__* observed
+        # live), so like Codex and Devin it gets no ToolSearch/search_tool
+        # detour.
+        context = self._session_context({"MUSE_PLUGIN_ROOT": "/plugins/recallum-memory"})
+        self.assertNotIn("ToolSearch", context)
+        self.assertNotIn("search_tool", context)
+        self.assertNotIn("use_tool", context)
+
+    def test_muse_hook_wrappers_delegate_to_the_shared_hook(self) -> None:
+        # Muse requires one unique source script per hook capability, so the
+        # wrappers must stay thin shims: same interpreter, shared script,
+        # right event argument, Muse marker set, stdin passed through.
+        for wrapper, event in (
+            ("muse_session.py", "session"),
+            ("muse_prompt.py", "prompt"),
+        ):
+            with self.subTest(wrapper=wrapper):
+                source = (PLUGIN_ROOT / "hooks" / wrapper).read_text(encoding="utf-8")
+                ast.parse(source, feature_version=(3, 9))
+                self.assertIn("MUSE_PLUGIN_ROOT", source)
+                self.assertIn("recallum_hook.py", source)
+                self.assertIn(f'"{event}"', source)
+
+    def test_muse_wrappers_emit_muse_tool_names_end_to_end(self) -> None:
+        # The wrappers set MUSE_PLUGIN_ROOT, so even on a machine where the
+        # runtime would not, the shared hook takes the Muse branch.
+        env = os.environ.copy()
+        for key in (
+            "MUSE_PLUGIN_ROOT",
+            "PLUGIN_ROOT",
+            "CLAUDE_PLUGIN_ROOT",
+            "GROK_PLUGIN_ROOT",
+            "CURSOR_PLUGIN_ROOT",
+            "DEVIN_PROJECT_DIR",
+            "RECALLUM_MCP_URL",
+            "RECALLUM_API_KEY",
+        ):
+            env.pop(key, None)
+        wrapper = PLUGIN_ROOT / "hooks" / "muse_session.py"
+        result = subprocess.run(
+            ["python3", str(wrapper)],
+            input=json.dumps({"cwd": "/work/alpha"}),
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**env, "MUSE_PLUGIN_ROOT": "/plugins/recallum-memory"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(f"{MUSE_PREFIX}context", context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
 
     def test_devin_is_told_the_bare_server_tool_name(self) -> None:
         # Devin registers the server as `recallum`, so its tools are
@@ -1296,8 +1398,11 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn(CLAUDE_PREFIX, skill)
         self.assertIn(GROK_PREFIX, skill)
         self.assertIn(DEVIN_PREFIX, skill)
+        self.assertIn(MUSE_PREFIX, skill)
+        self.assertIn("Muse Code", skill)
         self.assertIn("client-visible tool names", rule)
         self.assertIn(CODEX_PREFIX.rstrip("_") + "__*", clients)
+        self.assertIn("Muse Code", clients)
         self.assertIn("search_tool", clients)
         self.assertIn("Available Tools", clients)
         self.assertIn("always take precedence", rule)
@@ -1314,15 +1419,18 @@ class ManifestTests(unittest.TestCase):
         grok = self._load(GROK_MANIFEST)
         cursor = self._load(CURSOR_MANIFEST)
         devin = self._load(DEVIN_MANIFEST)
+        muse = self._load(MUSE_MANIFEST)
         self.assertEqual(codex["name"], "recallum-memory")
         self.assertEqual(claude["name"], "recallum-memory")
         self.assertEqual(grok["name"], "recallum-memory")
         self.assertEqual(cursor["name"], "recallum-memory")
         self.assertEqual(devin["name"], "recallum-memory")
+        self.assertEqual(muse["name"], "recallum-memory")
         self.assertEqual(codex["version"], claude["version"])
         self.assertEqual(codex["version"], grok["version"])
         self.assertEqual(codex["version"], cursor["version"])
         self.assertEqual(codex["version"], devin["version"])
+        self.assertEqual(codex["version"], muse["version"])
         self.assertEqual(codex["version"], "0.19.0")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
@@ -1491,6 +1599,7 @@ class ManifestTests(unittest.TestCase):
                     "CLAUDE_TOOL_PREFIX",
                     "CLAUDE_NATIVE_TOOL_PREFIX",
                     "GROK_TOOL_PREFIX",
+                    "MUSE_TOOL_PREFIX",
                 )
             ):
                 exec(line, namespace)  # noqa: S102 - constant assignments only
@@ -1498,9 +1607,57 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(namespace["CLAUDE_TOOL_PREFIX"], CLAUDE_PREFIX)
         self.assertEqual(namespace["CLAUDE_NATIVE_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["GROK_TOOL_PREFIX"], GROK_PREFIX)
+        self.assertEqual(namespace["MUSE_TOOL_PREFIX"], MUSE_PREFIX)
         # Devin reuses the Codex prefix; there is no separate constant.
         self.assertIn("DEVIN_PROJECT_DIR", source)
         self.assertNotIn("DEVIN_TOOL_PREFIX", source)
+        # Muse has its own constant (same string as Codex today) and its own
+        # discriminator, checked before the Codex/Claude aliases Muse also sets.
+        self.assertIn("MUSE_PLUGIN_ROOT", source)
+        self.assertLess(
+            source.index("MUSE_PLUGIN_ROOT"),
+            source.index('elif os.environ.get("PLUGIN_ROOT")'),
+        )
+
+    def test_muse_manifest_is_a_native_bundle_without_bundled_mcp(self) -> None:
+        manifest = self._load(MUSE_MANIFEST)
+        self.assertEqual(manifest["schemaVersion"], 1)
+        self.assertEqual(manifest["compat"]["manifestDir"], ".muse-plugin")
+        caps = manifest["capabilities"]
+        self.assertEqual(
+            {skill["id"] for skill in caps["skills"]},
+            {"recallum-memory", "recallum-setup", "recallum-update-harnesses"},
+        )
+        for skill in caps["skills"]:
+            target = PLUGIN_ROOT / skill["path"]
+            self.assertTrue(target.is_file(), skill["path"])
+        hooks = caps["hooks"]
+        self.assertEqual(
+            {hook["id"] for hook in hooks},
+            {"session-start", "user-prompt-submit"},
+        )
+        # Muse rejects duplicate hook sources, so each hook needs its own
+        # wrapper script; both must exist and be distinct files.
+        sources = []
+        for hook in hooks:
+            command = hook["command"]
+            self.assertEqual(command[0], "python3")
+            target = PLUGIN_ROOT / command[1]
+            self.assertTrue(target.is_file(), command[1])
+            sources.append(command[1])
+        self.assertEqual(len(set(sources)), len(sources))
+        self.assertEqual(caps["mcpServers"], [])
+        self.assertEqual(caps["commands"], [])
+        self.assertEqual(caps["reminders"], [])
+
+    def test_muse_has_no_marketplace_and_installs_by_direct_path(self) -> None:
+        # `muse plugins install <path>` takes the local bundle directly, so
+        # unlike the other clients Muse ships no marketplace file; the
+        # installer must reference the bundle directory, never a marketplace.
+        self.assertFalse((REPO_ROOT / ".muse-plugin").exists())
+        installer = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('muse plugins install "$bundle_dir"', installer)
+        self.assertNotIn("muse plugin marketplace", installer)
 
     def test_skills_document_the_tool_prefix_of_each_client(self) -> None:
         for name in ("recallum-memory", "recallum-setup", "recallum-update-harnesses"):
@@ -1512,6 +1669,9 @@ class ManifestTests(unittest.TestCase):
                 # Devin uses the same prefix as Codex; the constant duplicates it
                 # so the assertion is explicit.
                 self.assertIn(DEVIN_PREFIX, text)
+                # Muse uses the same prefix string too, so pin the client name:
+                # a row that only says the bare prefix proves nothing.
+                self.assertIn("Muse Code", text)
 
     def test_memory_skill_covers_reusable_context_beyond_decisions(self) -> None:
         text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(encoding="utf-8")
@@ -1632,8 +1792,9 @@ class ManifestTests(unittest.TestCase):
         text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, GROK_PREFIX, DEVIN_PREFIX):
+        for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, GROK_PREFIX, DEVIN_PREFIX, MUSE_PREFIX):
             self.assertIn(prefix, text)
+        self.assertIn("Muse Code", text)
         self.assertIn("search_tool", text)
         self.assertIn("use_tool", text)
 
@@ -1916,6 +2077,7 @@ class InstallerTestCase(unittest.TestCase):
         stub_cursor: bool = True,
         stub_devin: bool = False,
         stub_agy: bool = False,
+        stub_muse: bool = False,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -1927,6 +2089,7 @@ class InstallerTestCase(unittest.TestCase):
             ("cursor-agent", FAKE_CURSOR, stub_cursor),
             ("devin", FAKE_DEVIN, stub_devin),
             ("agy", FAKE_AGY, stub_agy),
+            ("muse", FAKE_MUSE, stub_muse),
         ):
             if not wanted:
                 continue
@@ -2007,6 +2170,7 @@ class InstallerTestCase(unittest.TestCase):
                 "FAKE_GROK_PLUGIN": grok_plugin,
                 "FAKE_CURSOR_MARKETPLACE": cursor_marketplace,
                 "FAKE_AGY_PLUGIN": "missing",
+                "FAKE_MUSE_PLUGIN": "missing",
                 "FAKE_AGY_INSTALL_DIR": str(root),
                 "GROK_HOME": str(grok_home),
                 "HOME": str(root),
@@ -2187,7 +2351,7 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "none of the codex, claude, grok, cursor-agent/agent, devin, or agy CLIs",
+                "none of the codex, claude, grok, cursor-agent/agent, devin, agy, or muse CLIs",
                 result.stderr,
             )
             self.assertFalse(log.exists())
@@ -4638,6 +4802,382 @@ class DevinInstallTests(InstallerTestCase):
             self.assertEqual(config.read_bytes(), before)
             backups = [p for p in config.parent.iterdir() if p != config]
             self.assertEqual(backups, [])
+
+
+class MuseInstallTests(InstallerTestCase):
+    """Muse Code installs a native bundle and a literal-token settings entry.
+
+    Muse performs no environment-variable expansion in settings.json, so like
+    Antigravity (and unlike Codex/Grok/Devin) the installer writes the API key
+    literally, and these tests are weighted towards proving the secret never
+    reaches stdout, stderr, or the CLI argv log. Hooks stay inactive until
+    approved, so the installer must approve both hook capabilities; the fake
+    records every invocation.
+    """
+
+    def _muse_env(
+        self, root: Path, *, with_key: bool = True, plugin: str = "missing"
+    ) -> tuple[dict[str, str], Path]:
+        env, log = self._fake_clis(root, stub_muse=True)
+        # Use the default token env var so the env-file export matches.
+        env.pop(TOKEN_ENV_VAR, None)
+        if with_key:
+            env["RECALLUM_API_KEY"] = SENTINEL_KEY
+        env["FAKE_MUSE_PLUGIN"] = plugin
+        return env, log
+
+    @staticmethod
+    def _settings(env: dict[str, str]) -> Path:
+        return Path(env["XDG_CONFIG_HOME"]) / "muse" / "settings.json"
+
+    def _assert_no_leak(self, result: subprocess.CompletedProcess[str], log: Path) -> None:
+        captured = result.stdout + result.stderr
+        if log.exists():
+            captured += log.read_text(encoding="utf-8")
+        self.assertNotIn(SENTINEL_KEY, captured)
+
+    def test_explicit_muse_target_requires_that_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), stub_muse=False)
+            result = self._run(env, "--url", URL, "--target", "muse", "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("muse CLI is not installed", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_auto_target_installs_muse_when_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._muse_env(Path(directory))
+            result = self._run(env, "--url", URL, "--token-env-var", TOKEN_ENV_VAR, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: muse plugins install", result.stdout)
+            self.assertIn("muse/settings.json", result.stdout)
+
+    def test_muse_dry_run_reports_literal_bearer_when_key_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._muse_env(Path(directory))
+            result = self._run(
+                env, "--url", URL, "--target", "muse", "--dry-run"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("muse plugins install", result.stdout)
+            self.assertIn("muse plugins approve", result.stdout)
+            self.assertIn("literal Bearer", result.stdout)
+            self.assertFalse(self._settings(env).exists())
+            self._assert_no_leak(result, log)
+
+    def test_installs_plugin_bundle_approves_hooks_and_writes_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._muse_env(root)
+            result = self._run(env, "--url", URL, "--target", "muse")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+
+            calls = self._calls(log)
+            bundle = str(PLUGIN_ROOT)
+            self.assertIn(["muse", "plugins", "list", "--json"], calls)
+            self.assertIn(["muse", "plugins", "install", bundle, "--scope", "user"], calls)
+            self.assertIn(
+                ["muse", "plugins", "approve", "plugin:recallum-memory:hook:session-start"],
+                calls,
+            )
+            self.assertIn(
+                ["muse", "plugins", "approve", "plugin:recallum-memory:hook:user-prompt-submit"],
+                calls,
+            )
+
+            settings = json.loads(self._settings(env).read_text(encoding="utf-8"))
+            self.assertEqual(settings["schema_version"], 1)
+            entry = settings["mcpServers"]["recallum"]
+            self.assertEqual(entry["url"], URL)
+            self.assertEqual(entry["headers"]["Authorization"], f"Bearer {SENTINEL_KEY}")
+            self.assertEqual(stat.S_IMODE(self._settings(env).stat().st_mode), 0o600)
+
+    def test_installed_plugin_is_refreshed_not_reinstalled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._muse_env(root, plugin="installed")
+            result = self._run(env, "--url", URL, "--target", "muse")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            calls = self._calls(log)
+            self.assertIn(["muse", "plugins", "update", "recallum-memory"], calls)
+            self.assertNotIn(
+                ["muse", "plugins", "install", str(PLUGIN_ROOT), "--scope", "user"], calls
+            )
+
+    def test_differing_mcp_entry_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._muse_env(root)
+            settings = self._settings(env)
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "mcpServers": {
+                            "recallum": {
+                                "url": "https://old.example/mcp/",
+                                "headers": {"Authorization": "Bearer old"},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run(env, "--url", URL, "--target", "muse")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            # The pre-existing entry is untouched.
+            entry = json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["recallum"]
+            self.assertEqual(entry["url"], "https://old.example/mcp/")
+
+            forced = self._run(env, "--url", URL, "--target", "muse", "--force-mcp")
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+            self._assert_no_leak(forced, log)
+            entry = json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["recallum"]
+            self.assertEqual(entry["url"], URL)
+            self.assertEqual(entry["headers"]["Authorization"], f"Bearer {SENTINEL_KEY}")
+
+    def test_matching_rerun_leaves_settings_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._muse_env(root)
+            first = self._run(env, "--url", URL, "--target", "muse")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            before = self._settings(env).read_bytes()
+            second = self._run(env, "--url", URL, "--target", "muse")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("already matches", second.stdout)
+            self.assertEqual(self._settings(env).read_bytes(), before)
+            self._assert_no_leak(second, log)
+
+    def test_unrelated_settings_keys_survive_the_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._muse_env(root)
+            settings = self._settings(env)
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "provider": "meta",
+                        "mcpServers": {
+                            "other": {
+                                "url": "https://other.example/mcp",
+                                "headers": {"Authorization": "Bearer other"},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run(env, "--url", URL, "--target", "muse")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(data["provider"], "meta")
+            self.assertEqual(
+                data["mcpServers"]["other"]["headers"]["Authorization"], "Bearer other"
+            )
+            self.assertEqual(data["mcpServers"]["recallum"]["url"], URL)
+
+
+class MuseDoctorTests(unittest.TestCase):
+    def _write(self, home: Path, relative: str, contents: str, mode: int = 0o600) -> None:
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+        path.chmod(mode)
+
+    def _write_cli(self, home: Path, name: str, body: str) -> None:
+        path = home / "bin" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def _write_muse_config(
+        self,
+        home: Path,
+        *,
+        url: str = "https://recallum.example/mcp/",
+        token: str | None = "rcl_doctor_secret_123",
+        mode: int = 0o600,
+        include_server: bool = True,
+        placeholder: bool = False,
+        schema_version: int | None = 1,
+    ) -> Path:
+        path = home / ".config" / "muse" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, object] = {}
+        if schema_version is not None:
+            data["schema_version"] = schema_version
+        servers: dict[str, object] = {}
+        if include_server:
+            auth = f"Bearer ${{{TOKEN_ENV_VAR}}}" if placeholder else f"Bearer {token}"
+            servers["recallum"] = {"url": url, "headers": {"Authorization": auth}}
+        data["mcpServers"] = servers
+        path.write_text(json.dumps(data), encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def _write_muse_cli(self, home: Path, *, plugin_listed: bool = True) -> None:
+        if plugin_listed:
+            payload = json.dumps(
+                {
+                    "plugins": [
+                        {
+                            "record": {"id": "recallum-memory"},
+                            "plugin": {"id": "recallum-memory", "version": PLUGIN_VERSION},
+                        }
+                    ]
+                }
+            )
+        else:
+            payload = json.dumps({"plugins": []})
+        self._write_cli(
+            home,
+            "muse",
+            "import json, sys\n"
+            "if sys.argv[1:] == ['plugins', 'list', '--json']:\n"
+            f"    print({payload!r})\n",
+        )
+
+    def _run_doctor(self, home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.pop("RECALLUM_API_KEY", None)
+        env.update(
+            {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "PATH": str(home / "bin") + ":/usr/bin:/bin",
+                "RECALLUM_API_KEY": "rcl_doctor_secret_123",
+            }
+        )
+        return subprocess.run(
+            [str(DOCTOR), *args],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_muse_healthy_config_reported_in_text_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home)
+            self._write_muse_cli(home)
+            result = self._run_doctor(home, "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            muse = report["clients"]["Muse Code"]["native_mcp"]
+            self.assertEqual(muse["url"], "https://recallum.example/mcp/")
+            self.assertEqual(muse["auth"], "Bearer *** (literal)")
+            self.assertNotIn("type", muse)
+            self.assertEqual(muse["file_mode"], "0600")
+            self.assertTrue(report["clients"]["Muse Code"]["plugin_present"])
+            self.assertNotIn("rcl_doctor_secret_123", result.stdout)
+            self.assertIn("Muse Code", result.stdout)
+
+    def test_muse_placeholder_is_always_flagged_even_when_env_is_set(self) -> None:
+        # Muse performs no env expansion, so the placeholder can never
+        # authenticate -- unlike Devin, where it is the healthy shape.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home, placeholder=True)
+            self._write_muse_cli(home)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("must be written literally", result.stdout)
+
+    def test_muse_missing_schema_version_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home, schema_version=None)
+            self._write_muse_cli(home)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("schema_version must be 1", result.stdout)
+
+    def test_muse_wrong_path_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home, url="https://recallum.example/other/")
+            self._write_muse_cli(home)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("path must be exactly /mcp/", result.stdout)
+
+    def test_muse_world_readable_settings_are_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            settings = self._write_muse_config(home, mode=0o644)
+            self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o644)
+            self._write_muse_cli(home)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Muse Code", result.stdout)
+            self.assertIn("is not mode 600", result.stdout)
+
+    def test_muse_missing_server_entry_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home, include_server=False)
+            self._write_muse_cli(home, plugin_listed=False)
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("server entry is missing", result.stdout)
+
+    def test_muse_empty_home_reports_no_client(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertNotIn("Muse Code", report["clients"])
+            self.assertFalse(any("Muse Code" in p for p in report["problems"]))
+
+    def test_muse_cli_absent_skips_plugin_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("plugin_present", report["clients"]["Muse Code"])
+
+    def test_muse_version_drift_names_the_client(self) -> None:
+        doctor = _load_doctor()
+        problems: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_muse_config(home)
+            self._write_muse_cli(home)
+            old_path = os.environ.get("PATH")
+            old_home = os.environ.get("HOME")
+            old_xdg = os.environ.get("XDG_CONFIG_HOME")
+            try:
+                os.environ["PATH"] = str(home / "bin") + ":/usr/bin:/bin"
+                os.environ["HOME"] = str(home)
+                os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
+                report = doctor._muse(home, "0.0.0", TOKEN_ENV_VAR, problems)
+            finally:
+                if old_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = old_path
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+                if old_xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = old_xdg
+            self.assertTrue(report["plugin_present"])
+            self.assertTrue(any("Muse Code" in p and "DRIFT" in p for p in problems))
 
 
 if __name__ == "__main__":

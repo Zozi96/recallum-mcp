@@ -259,6 +259,54 @@ holds no secret. The installer persists the key to `~/.config/recallum/env` (mod
 6. Restart Devin so the MCP server, hooks, and tool catalog reload. Tools appear as `mcp__recallum__*`
    (same prefix as Codex; no `search_tool` or `ToolSearch` lookup step).
 
+## Setup — Muse Code
+
+Muse Code ships as `muse`. It performs no environment-variable expansion in its MCP config, so
+the API key is written to disk in cleartext — read the whole section before running the installer.
+
+1. Confirm `muse` is on `PATH` (`muse --version`).
+2. Run the installer:
+
+   ```bash
+   export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+   plugins/recallum-memory/scripts/install.sh --target muse --url https://recallum.example.com/mcp/
+   ```
+
+   This installs the native `.muse-plugin` bundle from the local checkout
+   (`muse plugins install <dir> --scope user`), approves both hook capabilities
+   (`session-start`, `user-prompt-submit` — hooks stay inactive until approved), and writes the
+   `recallum` server natively to `${XDG_CONFIG_HOME:-~/.config}/muse/settings.json` at mode `0600`.
+   `--target both` does not cover Muse Code; use `--target muse` explicitly. `--remote` does not
+   currently cover this target (same as Antigravity).
+3. **Cleartext key warning:** the token is written literally into `settings.json` — a
+   `${RECALLUM_API_KEY}`-style placeholder will **not** be expanded by Muse and can never
+   authenticate. Treat the file as sensitive; never commit it. The file must keep
+   `"schema_version": 1`.
+4. Confirm the registration with the read-only doctor:
+
+   ```bash
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
+   ```
+
+   It reports the `Muse Code` client: server presence, `url`, the Authorization header
+   (flagging any unexpanded `${...}` placeholder as wrong for this client), the file's
+   `schema_version` and permission mode, and whether `muse plugins list` shows the plugin
+   (with version-drift check). If `muse` is not on `PATH`, that last sub-check is skipped,
+   not failed. Never print or echo the key.
+5. Optional: `muse plugins validate plugins/recallum-memory` — expect `"valid": true` with the
+   native `.muse-plugin` manifest, 3 skills, and 2 hooks. Then, without running a session:
+
+   ```bash
+   muse plugins hook test plugin:recallum-memory:hook:session-start \
+     --fixture '{"event": "SessionStart", "stdin": {"cwd": "$PWD"}}'
+   ```
+
+   Expect `status: completed` and the context in `additional_contexts`. Hook output uses the same
+   `hookSpecificOutput.additionalContext` shape as Claude Code (verified on 1.3.0); the Cursor
+   flat `additional_context` shape is rejected.
+6. Start a new Muse session so the plugin and MCP server are picked up. Tools appear as
+   `mcp__recallum__*` (listed directly; no `search_tool` or `ToolSearch` lookup step).
+
 ## Shared Checks
 
 1. Check only whether the token environment variable or Claude Code fallback is present. The
@@ -280,6 +328,7 @@ holds no secret. The installer persists the key to `~/.config/recallum/env` (mod
    | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
    | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
    | Devin CLI | `mcp__recallum__` |
+   | Muse Code | `mcp__recallum__` |
    | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every

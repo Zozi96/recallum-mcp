@@ -681,6 +681,101 @@ def _devin(
     return result
 
 
+def _muse_plugin_present() -> tuple[bool | None, Any]:
+    """``muse plugins list --json`` check. Returns ``(present, version)``.
+
+    ``None`` present only when ``muse`` is absent from PATH, exits non-zero,
+    or its output is unparseable -- a missing or broken CLI is not itself a
+    Recallum health problem, mirroring ``_run_json``'s None-on-failure
+    contract. ``muse plugins list`` nests the id inside ``record``
+    (``{"plugins": [{"record": {"id": ...}, "plugin": {...}}]}``), unlike
+    every other client's flat shape, so both are accepted.
+    """
+    if shutil.which("muse") is None:
+        return None, None
+    payload = _run_json(["muse", "plugins", "list", "--json"])
+    if payload is None:
+        return None, None
+    entry = _find_item(payload, "id", "recallum-memory")
+    if entry is None:
+        for item in _items(payload):
+            record = item.get("record")
+            if isinstance(record, dict) and record.get("id") == "recallum-memory":
+                entry = item.get("plugin") if isinstance(item.get("plugin"), dict) else record
+                break
+    if entry is None:
+        return False, None
+    version = entry.get("version")
+    return True, version if isinstance(version, str) and version else None
+
+
+def _muse(
+    home: Path, expected: str | None, token_env: str, problems: list[str]
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    # Empty-string XDG_CONFIG_HOME is treated as unset, matching the installer's
+    # `${XDG_CONFIG_HOME:-$HOME/.config}` (empty expands to the default).
+    config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+    )
+    settings_path = config_home / "muse" / "settings.json"
+    settings = _read_json(settings_path)
+    if settings is None and not settings_path.is_file():
+        # No signal at all: Muse Code was never configured on this machine.
+        # A present-but-unparseable file is signal (checked below).
+        pass
+    elif isinstance(settings, dict):
+        if settings.get("schema_version") != 1:
+            problems.append(
+                "config: Muse Code settings schema_version must be 1 "
+                f"({settings_path})"
+            )
+        server = _configured_server(settings, "mcpServers", "recallum", "Muse Code", problems)
+        if server is None:
+            problems.append(
+                f"config: Muse Code recallum server entry is missing ({settings_path})"
+            )
+        if isinstance(server, dict):
+            safe = _safe_server(server, include_type=False, url_key="url")
+            result["native_mcp"] = safe
+            auth = safe["auth"]
+            _auth_problem("Muse Code", auth, token_env, problems)
+            if auth.startswith("Bearer ${"):
+                # Muse-specific: like Antigravity and unlike Codex/Grok/Devin,
+                # Muse performs NO environment-variable expansion in
+                # settings.json headers (verified: the shipped richai entry
+                # carries a literal token). A ${VAR} placeholder is therefore
+                # sent literally and can never authenticate, even when the
+                # referenced variable is set -- so this must be flagged
+                # regardless of `_auth_problem`'s unset-variable outcome.
+                problems.append(
+                    "auth: Muse Code header is an unexpanded ${...} "
+                    "placeholder -- Muse does not expand environment "
+                    "variables, so the API key must be written literally"
+                )
+            _record_permission(safe, settings_path, auth, problems, client="Muse Code")
+            _endpoint_problem("Muse Code", server.get("url"), problems, "url")
+    else:
+        problems.append(f"config: Muse Code settings file is invalid ({settings_path})")
+    present, version = _muse_plugin_present()
+    if present is True:
+        result["plugin_present"] = True
+        _version(result, "Muse Code", version, expected, problems)
+    elif present is False:
+        if "native_mcp" in result:
+            result["plugin_present"] = False
+            problems.append(
+                "config: Muse Code plugin recallum-memory is not installed "
+                "(skills/hooks unavailable; native MCP is unaffected)"
+            )
+            _version(result, "Muse Code", None, expected, problems)
+        elif settings_path.is_file():
+            # Settings exist but carry no recallum server and no plugin: the
+            # missing-entry problem above already says what to do.
+            result["plugin_present"] = False
+    return result
+
+
 def _load_expected(repo_root: Path, problems: list[str]) -> str | None:
     manifest = _read_json(repo_root / "plugins" / "recallum-memory" / "plugin.json")
     version = manifest.get("version") if isinstance(manifest, dict) else None
@@ -743,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Cursor", _cursor(home, expected, args.token_env_var, problems)),
         ("Devin CLI", _devin(home, expected, args.token_env_var, problems)),
         ("Antigravity CLI", _antigravity(home, expected, args.token_env_var, problems)),
+        ("Muse Code", _muse(home, expected, args.token_env_var, problems)),
     ):
         if value:
             report["clients"][client] = value

@@ -5,7 +5,7 @@
 # Recallum Memory plugin
 
 Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claude Code**,
-**Devin CLI**, and **Antigravity CLI**, backed by a self-hosted Recallum MCP server.
+**Devin CLI**, **Antigravity CLI**, and **Muse Code**, backed by a self-hosted Recallum MCP server.
 
 The plugin ships:
 
@@ -17,11 +17,13 @@ The plugin ships:
   SessionStart through `.devin/hooks.v1.json` if it supports plugins, but hook dispatch is
   unconfirmed (see docs/clients.md). Antigravity CLI ships the same `hooks.json`, accepted by
   `agy plugin validate` (`hooks : 1 processed`), but dispatch is unconfirmed — `agy` gates every
-  session behind Google OAuth sign-in before any hook is reachable (see docs/clients.md). All fail
+  session behind Google OAuth sign-in before any hook is reachable (see docs/clients.md). Muse Code
+  wires `SessionStart` plus `UserPromptSubmit` through its native `.muse-plugin` manifest (verified
+  with `muse plugins hook test` on 1.3.0; each event needs its own wrapper script). All fail
   open;
 - the MCP wiring for each client.
 
-One plugin package, six native entry points — not a Claude-only addon:
+One plugin package, seven native entry points — not a Claude-only addon:
 
 | Client | Marketplace index | Plugin metadata |
 | --- | --- | --- |
@@ -31,6 +33,7 @@ One plugin package, six native entry points — not a Claude-only addon:
 | Claude Code | `.claude-plugin/marketplace.json` | `.claude-plugin/plugin.json` |
 | Devin CLI | n/a — closed beta; use `devin mcp add` or write `~/.config/devin/mcp_config.json` | n/a — `.devin/hooks.v1.json` if plugin hooks are supported |
 | Antigravity CLI | n/a — `agy plugin install <dir>` (local dir or HTTPS GitHub URL) | `plugin.json` |
+| Muse Code | n/a — `muse plugins install <dir>` (local dir) | `.muse-plugin/plugin.json` |
 
 ## Grok only (no Claude Code)
 
@@ -125,6 +128,35 @@ plugins, install the recallum-memory skill manually and optionally wire
 `.devin/hooks.v1.json` for `SessionStart`. Hook dispatch through the plugin is expected
 but unconfirmed. Tools appear as `mcp__recallum__*`.
 
+## Muse Code
+
+Muse Code ships as `muse`:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target muse --url https://recallum.example.com/mcp/
+```
+
+That:
+
+1. Installs the native `.muse-plugin` bundle from this checkout
+   (`muse plugins install <dir> --scope user`; refresh with `muse plugins update recallum-memory`).
+   There is no marketplace file: `--remote` does not cover this target.
+2. Approves both hook capabilities (`session-start`, `user-prompt-submit`) — hooks stay
+   inactive until approved, so a manual install must approve them too.
+3. Writes `mcpServers.recallum` into `${XDG_CONFIG_HOME:-~/.config}/muse/settings.json`
+   (mode 600, `schema_version: 1` preserved) with the real URL and a **mode-600 literal Bearer**
+   (Muse performs no shell `${ENV}` expansion there; a placeholder is inert). The manifest
+   declares an empty `mcpServers`: native `settings.json` is the only Muse MCP.
+
+Tools appear as `mcp__recallum__*`, listed directly with no lookup step. Start a new session so
+MCP and hooks reload, then verify the hooks without running a session:
+
+```bash
+muse plugins hook test plugin:recallum-memory:hook:session-start \
+  --fixture '{"event": "SessionStart", "stdin": {"cwd": "$PWD"}}'
+```
+
 ## Prerequisites
 
 - A reachable Recallum server, yours. The endpoint must be HTTPS; plain HTTP is accepted only for
@@ -165,7 +197,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
-| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent` and `devin`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
+| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, `muse`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent`, `devin`, and `muse`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
 | `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex, Grok, and Devin read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into pluginSecrets / userConfig and a literal Bearer in native `~/.claude.json` |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |
@@ -418,6 +450,7 @@ Claude Desktop ToolSearch (`mcp__recallum__*`):
 | Grok Build | `recallum__` (via `search_tool` / `use_tool`) |
 | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
 | Devin CLI | `mcp__recallum__` |
+| Muse Code | `mcp__recallum__` |
 | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
 Both skills document this, and the session hook emits the client-appropriate name or discovery

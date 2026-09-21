@@ -1,7 +1,7 @@
 # Recallum
 
 Private, self-hosted persistent memory for AI coding agents (Cursor, Codex, Claude Code, Grok
-Build, Devin CLI, and Antigravity CLI), exposed as an MCP server over Streamable HTTP. No paid APIs: embeddings
+Build, Devin CLI, Antigravity CLI, and Muse Code), exposed as an MCP server over Streamable HTTP. No paid APIs: embeddings
 are generated locally with Ollama, storage is PostgreSQL with pgvector.
 
 ## Features
@@ -67,4 +67,4 @@ uv run mypy recallum                      # type check (baseline: pyproject.toml
 See [docs/operations.md](docs/operations.md) for the VPS runbook
 (Dokploy/Traefik, model download, migrations, backups) and
 [docs/clients.md](docs/clients.md) for wiring up Cursor, Codex, Claude Code, Grok Build,
-Devin CLI, and Antigravity CLI.
+Devin CLI, Antigravity CLI, and Muse Code.

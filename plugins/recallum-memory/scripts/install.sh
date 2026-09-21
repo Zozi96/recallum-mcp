@@ -6,18 +6,19 @@ usage() {
 Usage: install.sh [OPTIONS]
 
 Install the repo-local Recallum plugin and configure its remote MCP server for
-Codex, Claude Code, Grok Build, Cursor, Devin CLI, or any combination the host has installed.
+Codex, Claude Code, Grok Build, Cursor, Devin CLI, Antigravity CLI, Muse Code,
+or any combination the host has installed.
 
 Options:
   --url URL                 Recallum MCP endpoint
                             (default: https://recallum.zozbit.com/mcp/)
                             Normalized to a trailing slash to avoid a redirect
                             that would expose or drop the bearer token
-  --target TARGET           auto | codex | claude | grok | cursor | devin | antigravity | both
+  --target TARGET           auto | codex | claude | grok | cursor | devin | antigravity | muse | both
                             (default: auto)
                             auto installs into every detected CLI
-                            both requires Codex and Claude Code (not Grok/Cursor/Devin/Antigravity)
-  --token-env-var NAME      Codex, Grok, Cursor, and Devin: bearer-token environment variable
+                            both requires Codex and Claude Code (not Grok/Cursor/Devin/Antigravity/Muse)
+  --token-env-var NAME      Codex, Grok, Cursor, Devin, and Muse: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
   --remote                  Register the private GitHub repository instead of the local checkout
@@ -41,7 +42,7 @@ API key handling (default: store when a key is available or can be prompted):
   Persistence:
     Claude Code  ~/.claude/.credentials.json → pluginSecrets
                  (same store as /plugin configure; works for GUI launches)
-    Codex/Grok/Cursor/Devin
+    Codex/Grok/Cursor/Devin/Muse
                  ~/.config/recallum/env  (export of the token env var)
                  and, on Linux, ~/.config/environment.d/99-recallum.conf
                  so desktop sessions also see the variable
@@ -66,6 +67,15 @@ API key handling (default: store when a key is available or can be prompted):
                is the only Cursor MCP; if a plugin cache exists, empty its mcp.json
                (no URL/Bearer) and still hide leftover Claude .mcp.json from old
                snapshot installs (the plugin no longer ships that file).
+  Muse Code    installs the native `.muse-plugin` bundle (skills/hooks) with
+               `muse plugins install` and approves both hook capabilities
+               (hooks stay inactive until approved). MCP is the native user
+               server the installer writes into settings.json
+               (`${XDG_CONFIG_HOME:-~/.config}/muse/settings.json`, mode 600).
+               Tools appear as mcp__recallum__*. Auth is a stored literal
+               token when a key is available this run (Muse performs no shell
+               expansion there), else an inert placeholder until a key is
+               stored; re-run to write it literally.
   Devin CLI    writes ~/.config/devin/mcp_config.json with a Bearer resolved from
                $token_env_var at connection time. Tools appear as mcp__recallum__*.
                Devin plugins are closed beta, so the installer does not run
@@ -142,9 +152,9 @@ while (($#)); do
 done
 
 case "$target" in
-  auto | codex | claude | grok | cursor | devin | antigravity | both) ;;
+  auto | codex | claude | grok | cursor | devin | antigravity | muse | both) ;;
   *)
-    echo "error: --target must be auto, codex, claude, grok, cursor, devin, antigravity, or both" >&2
+    echo "error: --target must be auto, codex, claude, grok, cursor, devin, antigravity, muse, or both" >&2
     exit 2
     ;;
 esac
@@ -192,6 +202,7 @@ has_grok=0
 has_cursor=0
 has_agy=0
 has_devin=0
+has_muse=0
 cursor_cli=""
 if command -v codex >/dev/null 2>&1; then has_codex=1; fi
 if command -v claude >/dev/null 2>&1; then has_claude=1; fi
@@ -200,6 +211,8 @@ if command -v grok >/dev/null 2>&1; then has_grok=1; fi
 if command -v agy >/dev/null 2>&1; then has_agy=1; fi
 # Devin CLI ships as `devin`.
 if command -v devin >/dev/null 2>&1; then has_devin=1; fi
+# Muse Code ships as `muse`.
+if command -v muse >/dev/null 2>&1; then has_muse=1; fi
 # Cursor ships as cursor-agent; some installs expose the same binary as agent.
 if command -v cursor-agent >/dev/null 2>&1; then
   has_cursor=1
@@ -215,6 +228,7 @@ install_grok=0
 install_cursor=0
 install_devin=0
 install_antigravity=0
+install_muse=0
 case "$target" in
   auto)
     install_codex=$has_codex
@@ -223,8 +237,9 @@ case "$target" in
     install_cursor=$has_cursor
     install_devin=$has_devin
     install_antigravity=$has_agy
-    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_devin == 0 && install_antigravity == 0)); then
-      echo "error: none of the codex, claude, grok, cursor-agent/agent, devin, or agy CLIs is on PATH" >&2
+    install_muse=$has_muse
+    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_devin == 0 && install_antigravity == 0 && install_muse == 0)); then
+      echo "error: none of the codex, claude, grok, cursor-agent/agent, devin, agy, or muse CLIs is on PATH" >&2
       exit 1
     fi
     ;;
@@ -254,6 +269,10 @@ case "$target" in
   antigravity)
     ((has_agy)) || { echo "error: agy CLI is not installed or not on PATH" >&2; exit 1; }
     install_antigravity=1
+    ;;
+  muse)
+    ((has_muse)) || { echo "error: muse CLI is not installed or not on PATH" >&2; exit 1; }
+    install_muse=1
     ;;
   both)
     ((has_codex)) || { echo "error: codex CLI is not installed or not on PATH" >&2; exit 1; }
@@ -466,7 +485,7 @@ store_env_key_files() {
   if ((install_claude)) || [[ "$token_env_var" == "RECALLUM_API_KEY" ]]; then
     names+=("RECALLUM_API_KEY")
   fi
-  if ((install_codex || install_grok || install_cursor || install_devin)); then
+  if ((install_codex || install_grok || install_cursor || install_devin || install_muse)); then
     local found=0
     local n
     if ((${#names[@]} > 0)); then
@@ -581,7 +600,7 @@ persist_api_key() {
   if ((install_claude)); then
     store_claude_plugin_secret "$resolved_api_key"
   fi
-  if ((install_codex || install_grok || install_claude || install_cursor || install_devin)); then
+  if ((install_codex || install_grok || install_claude || install_cursor || install_devin || install_muse)); then
     store_env_key_files "$resolved_api_key"
   fi
   api_key_stored=1
@@ -1948,6 +1967,213 @@ PY
   fi
 }
 
+# Muse Code (`muse`). Two registrations, mirroring Claude:
+#   1. the native `.muse-plugin` bundle via `muse plugins install <dir>`
+#      (skills/hooks; the manifest declares empty mcpServers);
+#   2. the native user MCP server in
+#      `${XDG_CONFIG_HOME:-$HOME/.config}/muse/settings.json`.
+#
+# Hooks stay inactive until explicitly approved, so the installer approves
+# both hook capabilities after install/update. There is no marketplace file:
+# `muse plugins install <path>` installs the local bundle directly, and
+# --remote does not cover this target (same as Antigravity).
+install_for_muse() {
+  local bundle_dir="$repo_root/plugins/recallum-memory"
+  local manifest="$bundle_dir/.muse-plugin/plugin.json"
+  local root_manifest="$bundle_dir/plugin.json"
+  [[ -d "$bundle_dir" ]] || { echo "error: plugin bundle directory not found: $bundle_dir" >&2; exit 1; }
+  [[ -f "$manifest" ]] || { echo "error: Muse Code manifest not found: $manifest" >&2; exit 1; }
+
+  python3 - "$manifest" "$root_manifest" <<'PY'
+import json
+import sys
+try:
+    manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+    root = json.load(open(sys.argv[2], encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"error: invalid Muse Code packaging JSON: {exc}")
+if manifest.get("schemaVersion") != 1:
+    raise SystemExit("error: Muse manifest schemaVersion must be 1")
+compat = manifest.get("compat") or {}
+if compat.get("manifestDir") != ".muse-plugin":
+    raise SystemExit("error: Muse manifest compat.manifestDir must be .muse-plugin")
+if manifest.get("name") != "recallum-memory":
+    raise SystemExit("error: Muse manifest name must be recallum-memory")
+if manifest.get("version") != root.get("version"):
+    raise SystemExit("error: Muse manifest version must match plugins/recallum-memory/plugin.json")
+caps = manifest.get("capabilities") or {}
+if not isinstance(caps.get("skills"), list) or not caps["skills"]:
+    raise SystemExit("error: Muse manifest must declare skills")
+hook_ids = {
+    hook.get("id") for hook in caps.get("hooks", []) if isinstance(hook, dict)
+}
+if hook_ids != {"session-start", "user-prompt-submit"}:
+    raise SystemExit("error: Muse manifest must declare session-start and user-prompt-submit hooks")
+if not isinstance(caps.get("mcpServers"), list) or caps.get("mcpServers"):
+    raise SystemExit("error: Muse manifest must declare empty mcpServers (native settings.json only)")
+PY
+
+  muse plugins list --json >"$tmp_dir/muse-plugins.json"
+  local plugin_state
+  plugin_state=$(python3 - "$tmp_dir/muse-plugins.json" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+items = data.get("plugins", data) if isinstance(data, dict) else data
+if not isinstance(items, list):
+    raise SystemExit("error: unexpected 'muse plugins list --json' payload")
+found = False
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    record = item.get("record")
+    ident = record.get("id") if isinstance(record, dict) else item.get("id")
+    if ident == "recallum-memory":
+        found = True
+        break
+print("installed" if found else "missing")
+PY
+  )
+
+  if [[ "$plugin_state" == "missing" ]]; then
+    run_action muse plugins install "$bundle_dir" --scope user
+  else
+    echo "Muse Code plugin 'recallum-memory' is already installed; refreshing from this checkout."
+    run_action muse plugins update recallum-memory
+  fi
+  # Hooks require review before activation; without approval the plugin
+  # loads skills but never dispatches a hook.
+  run_action muse plugins approve "plugin:recallum-memory:hook:session-start"
+  run_action muse plugins approve "plugin:recallum-memory:hook:user-prompt-submit"
+
+  local muse_settings="${XDG_CONFIG_HOME:-$HOME/.config}/muse/settings.json"
+  local key_path=""
+  if [[ -n "${resolved_api_key-}" ]]; then
+    key_path="$tmp_dir/muse-api-key"
+    umask 077
+    printf '%s' "$resolved_api_key" >"$key_path"
+    chmod 600 "$key_path"
+  fi
+
+  local mcp_state
+  mcp_state=$(python3 - "$muse_settings" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+settings_path = Path(sys.argv[1])
+want_url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+# Muse performs no shell expansion in settings.json headers, so only the
+# literal form authenticates; the placeholder is inert until a key is stored.
+want_auth = f"Bearer {key}" if key else f"Bearer ${{{token_env}}}"
+
+if not settings_path.is_file():
+    print("missing")
+    raise SystemExit(0)
+try:
+    data = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+except ValueError as exc:
+    raise SystemExit(f"error: invalid JSON in {settings_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {settings_path} root must be a JSON object")
+servers = data.get("mcpServers")
+if not isinstance(servers, dict) or "recallum" not in servers:
+    print("missing")
+    raise SystemExit(0)
+entry = servers.get("recallum")
+if not isinstance(entry, dict):
+    print("different")
+    raise SystemExit(0)
+headers = entry.get("headers") if isinstance(entry.get("headers"), dict) else {}
+auth = headers.get("Authorization") or headers.get("authorization") or ""
+if entry.get("url") == want_url and auth == want_auth:
+    print("matching")
+else:
+    print("different")
+PY
+  )
+
+  case "$mcp_state" in
+    matching)
+      echo "Muse Code MCP server 'recallum' in $muse_settings already matches; leaving it unchanged."
+      ;;
+    different)
+      if [[ "$force_mcp" -ne 1 ]]; then
+        echo "error: Muse Code MCP server 'recallum' in $muse_settings exists with different settings;" >&2
+        echo "       rerun with --force-mcp to replace it." >&2
+        exit 1
+      fi
+      ;;
+    missing) ;;
+    *)
+      echo "error: unexpected Muse Code native MCP state: $mcp_state" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "$mcp_state" != "matching" ]]; then
+    if ((dry_run)); then
+      if [[ -n "$key_path" ]]; then
+        echo "dry-run: write $muse_settings server recallum (url=$url, literal Bearer, mode 600)"
+      else
+        echo "dry-run: write $muse_settings server recallum (url=$url, placeholder Bearer)"
+      fi
+    else
+      python3 - "$muse_settings" "$url" "$token_env_var" "${key_path:-}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+settings_path = Path(sys.argv[1])
+url = sys.argv[2]
+token_env = sys.argv[3]
+key_path = sys.argv[4]
+key = Path(key_path).read_text(encoding="utf-8") if key_path else ""
+auth = f"Bearer {key}" if key else f"Bearer ${{{token_env}}}"
+
+settings_path.parent.mkdir(parents=True, exist_ok=True)
+data = {}
+if settings_path.is_file():
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid JSON in {settings_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {settings_path} root must be a JSON object")
+if "schema_version" not in data:
+    data["schema_version"] = 1
+elif data.get("schema_version") != 1:
+    raise SystemExit(f"error: {settings_path} schema_version must be 1")
+servers = data.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    raise SystemExit(f"error: {settings_path} mcpServers must be an object")
+
+servers["recallum"] = {
+    "mode": "optional",
+    "url": url,
+    "headers": {"Authorization": auth},
+}
+tmp = settings_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(settings_path)
+os.chmod(settings_path, 0o600)
+print(f"Wrote {settings_path} server 'recallum' (secret not printed).")
+PY
+    fi
+  fi
+  [[ -z "$key_path" ]] || rm -f -- "$key_path"
+
+  if [[ -z "${resolved_api_key-}" ]]; then
+    echo "warning: no API key stored for Muse Code; it performs no env expansion in" >&2
+    echo "         settings.json, so re-run without --no-store-api-key or pass --api-key-file." >&2
+  fi
+}
+
 resolve_api_key
 persist_api_key
 
@@ -1957,6 +2183,7 @@ if ((install_grok)); then install_for_grok; fi
 if ((install_cursor)); then install_for_cursor; fi
 if ((install_devin)); then install_for_devin; fi
 if ((install_antigravity)); then install_for_antigravity; fi
+if ((install_muse)); then install_for_muse; fi
 
 # Drop the in-memory copy once clients are configured. Files already hold it.
 resolved_api_key=""
@@ -2010,4 +2237,10 @@ if ((install_antigravity)); then
   echo "Antigravity: plugin installed with 'agy plugin install' and the recallum server written to"
   echo "             ~/.gemini/config/mcp_config.json (mode 600, literal Bearer -- this client does"
   echo "             not expand environment variables). Restart agy so it reloads MCP."
+fi
+if ((install_muse)); then
+  echo "Muse Code: plugin installed from this checkout, both hooks approved, and the recallum"
+  echo "           server written to \${XDG_CONFIG_HOME:-\$HOME/.config}/muse/settings.json (mode 600,"
+  echo "           literal token: Muse performs no env expansion there). Tools appear as mcp__recallum__*."
+  echo "           Start a new session so MCP and hooks reload."
 fi

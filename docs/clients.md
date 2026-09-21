@@ -1,4 +1,4 @@
-# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, and Antigravity CLI)
+# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, and Muse Code)
 
 Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
@@ -13,9 +13,9 @@ The server exposes fifteen MCP tools: `remember`, `remember_batch`, `recall`,
 (skills), a separate entity from memories.
 
 Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build,
-Devin CLI, and Antigravity CLI. Cursor uses its native marketplace and Settings flow below. Keep credentials in
-client-owned settings; do not rely on a shell-only export as the sole GUI strategy, and verify the
-setup after restart.
+Devin CLI, Antigravity CLI, and Muse Code. Cursor uses its native marketplace and Settings flow below.
+Keep credentials in client-owned settings; do not rely on a shell-only export as the sole GUI strategy,
+and verify the setup after restart.
 
 ## Grok Build (no Claude Code required)
 
@@ -218,6 +218,51 @@ It reports a `Devin CLI` client: whether the `recallum` server entry is present 
 redacted; the variable is checked and reported as set or unset), and the config file's permission
 mode.
 
+## Muse Code
+
+Muse Code ships as `muse`. Install with the bundled installer:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target muse --url https://recallum.example.com/mcp/
+```
+
+This installs the native `.muse-plugin` bundle (`muse plugins install <dir>`,
+skills/hooks only — the manifest declares an empty `mcpServers`), approves both
+hook capabilities (hooks stay inactive until approved), and writes the `recallum`
+server natively to `${XDG_CONFIG_HOME:-~/.config}/muse/settings.json`
+(`mcpServers.recallum`, mode `0600`).
+
+`--target both` remains Codex + Claude Code only and does **not** include Muse Code; you must
+pass `--target muse` explicitly. The installer's `--remote` flag does not currently cover the
+Muse target (same as Antigravity): the bundle always installs from the local checkout.
+
+**The API key is stored in cleartext.** Muse performs no environment-variable expansion in
+`settings.json` headers, so a `${RECALLUM_API_KEY}`-style placeholder will **not** work there —
+the installer writes the literal token. Treat the file as sensitive; anyone who can read it
+has the raw token. The file must keep `"schema_version": 1`; do not add a second `mcp_servers`
+(snake_case) block alongside `mcpServers` — that faults the config.
+
+As with every other client, the endpoint must be HTTPS with the exact `/mcp/` path; plain HTTP is
+accepted only for `localhost`/`127.0.0.1`.
+
+Tools are named `mcp__recallum__*` and are listed directly, so no lookup step is needed.
+Hook output uses the same `hookSpecificOutput.additionalContext` shape as Claude Code
+(verified against Muse Code 1.3.0 with `muse plugins hook test`); the Cursor flat
+`additional_context` shape is rejected, so the hook never emits it on the Muse path.
+
+Diagnose with the same read-only doctor used for the other clients:
+
+```bash
+python3 plugins/recallum-memory/scripts/recallum_doctor.py
+```
+
+It reports a `Muse Code` client: whether the `recallum` server entry is present in
+`settings.json`, its `url`, the Authorization header (a `${...}` placeholder is always
+flagged, even when the referenced variable is set), the file's `schema_version` and
+permission mode, and whether the plugin is listed by `muse plugins list` (with version-drift
+check). If `muse` is not on `PATH`, that last sub-check is skipped, not failed.
+
 ## Agent usage guidance
 
 Put a short instruction in each project's AGENTS.md / CLAUDE.md so agents
@@ -238,7 +283,8 @@ Never store full conversations; store the distilled fact.
 Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
 `mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` (native/Desktop), Grok Build
 `recallum__*` via `search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in
-Available Tools; Devin CLI uses `mcp__recallum__*`. Antigravity CLI's tool-name prefix is **not yet
+Available Tools; Devin CLI uses `mcp__recallum__*`; Muse Code uses `mcp__recallum__*` (listed
+directly, no lookup step). Antigravity CLI's tool-name prefix is **not yet
 determined** — no prefix constant exists in `recallum_hook.py` — so prefer skill-driven tool
 discovery over assuming a specific prefix string when working in Antigravity CLI.
 
@@ -275,5 +321,6 @@ if Recallum is unavailable.
 | Tool call fails with "invalid or revoked API key" | Key typo or revoked — issue a new one |
 | Grok MCP target is `${user_config.mcp_url}` | Grok does not expand Claude userConfig; run `install.sh --target grok` |
 | Devin tool calls fail with "authentication required" | `RECALLUM_API_KEY` is not exported in the shell that launched Devin; run `install.sh --target devin` to persist it to `~/.config/recallum/env` and source that file before launching Devin |
+| Muse Code tool calls fail with "authentication required" | `settings.json` holds an inert `${...}` placeholder (Muse does not expand env vars); re-run `install.sh --target muse` with a stored key so the literal token is written |
 | `recall` returns `mode: degraded_textual` | Ollama unreachable; check `readyz` and the ollama service |
 | Client times out | MCP endpoint is `/mcp/` (trailing slash); HTTPS only via Traefik |
