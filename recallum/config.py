@@ -11,7 +11,15 @@ from ipaddress import IPv4Network, IPv6Address, ip_address
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, IPvAnyNetwork, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    IPvAnyNetwork,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from recallum.memory.limits import MemoryLimits
@@ -40,6 +48,12 @@ class DatabaseSettings(BaseModel):
     echo: bool = False
     pool_size: int = Field(default=5, ge=1, le=50)
     max_overflow: int = Field(default=5, ge=0, le=50)
+    # Engine-side deadlines: these bound real query traffic, not the readiness
+    # probe (the probe keeps its own, tighter ``readiness.database_*`` budget).
+    pool_timeout_seconds: float = Field(default=30.0, gt=0, le=600.0)
+    connect_timeout_seconds: float = Field(default=5.0, gt=0, le=600.0)
+    command_timeout_seconds: float = Field(default=30.0, gt=0, le=600.0)
+    statement_timeout_seconds: float = Field(default=30.0, gt=0, le=600.0)
 
 
 class ReadinessSettings(BaseModel):
@@ -77,6 +91,17 @@ class OllamaSettings(BaseModel):
     model: str = "embeddinggemma:300m-qat-q4_0"
     timeout_seconds: float = Field(default=30.0, gt=0)
     dimensions: int = Field(default=EMBEDDING_DIMENSIONS, gt=0)
+
+    @field_validator("dimensions")
+    @classmethod
+    def dimensions_must_match_storage(cls, value: int) -> int:
+        # ``vector(768)`` columns are fixed by the migrations; any other width
+        # would fail on insert, so reject it at startup instead.
+        if value != EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"ollama.dimensions must equal the stored vector width ({EMBEDDING_DIMENSIONS})"
+            )
+        return value
 
 
 class AuthSettings(BaseModel):
@@ -187,7 +212,7 @@ def _validate_host(value: str) -> str:
         raise ValueError("MCP allowed hosts must not contain a scheme or whitespace")
     if value.startswith("["):
         end = value.find("]")
-        if end < 0 or value[end + 1 :] not in {""} and not value[end + 1 :].startswith(":"):
+        if end < 0 or (value[end + 1 :] not in {""} and not value[end + 1 :].startswith(":")):
             raise ValueError("MCP allowed hosts must use a valid IPv6 host")
         host = value[1:end]
         try:
@@ -393,6 +418,10 @@ class Settings(BaseSettings):
                 "echo": self.database.echo,
                 "pool_size": self.database.pool_size,
                 "max_overflow": self.database.max_overflow,
+                "pool_timeout_seconds": self.database.pool_timeout_seconds,
+                "connect_timeout_seconds": self.database.connect_timeout_seconds,
+                "command_timeout_seconds": self.database.command_timeout_seconds,
+                "statement_timeout_seconds": self.database.statement_timeout_seconds,
             },
             "readiness": self.readiness.model_dump(),
             "ollama": {

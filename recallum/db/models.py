@@ -145,7 +145,7 @@ class Memory(Base):
             text("created_at DESC"),
             postgresql_where=text("deleted_at IS NULL"),
         ),
-        # Serves most_important_active, which drives every ``context`` call.
+        # Serves the importance-ordered slice every ``context`` call reads.
         Index(
             "ix_memories_user_importance",
             "user_id",

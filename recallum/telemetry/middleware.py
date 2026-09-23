@@ -20,6 +20,9 @@ from recallum.telemetry.metrics import WRITE_TOOLS
 
 logger = logging.getLogger("recallum.telemetry")
 MAX_RECORDED_PROJECT_CHARS = 200
+# ``tool_activity.tool_name`` is VARCHAR(64) (migration 0007) and the value is
+# client-controlled, so the recorded form is normalized and truncated to fit.
+MAX_RECORDED_TOOL_NAME_CHARS = 64
 
 
 def _result_metrics(result: Any) -> tuple[int, bool, bool]:
@@ -83,6 +86,14 @@ def _safe_project(value: object) -> str | None:
     return normalized
 
 
+def _safe_tool_name(value: object) -> str:
+    """Keep a bounded, normalized tool name; never reject the call over it."""
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFC", value)).strip()
+    return normalized[:MAX_RECORDED_TOOL_NAME_CHARS] if normalized else "unknown"
+
+
 class UsageTelemetryMiddleware(Middleware):
     """Time authenticated calls and enqueue metadata without repository access."""
 
@@ -97,7 +108,7 @@ class UsageTelemetryMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next: Any) -> Any:
         started = self._clock_ns()
         message = context.message
-        tool_name = message.name
+        tool_name = _safe_tool_name(message.name)
         arguments = message.arguments
         project_value = arguments.get("project") if isinstance(arguments, dict) else None
         try:

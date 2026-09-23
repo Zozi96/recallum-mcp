@@ -143,28 +143,28 @@ def test_load_dataset_rejects_relevance_shape_errors():
                 "queries": [{"query": "q", "expect": ["a"], "relevance": {"ghost": 3}}],
             }
         )
-    with pytest.raises(ValueError, match="must be an int 0..3"):
+    with pytest.raises(ValueError, match=r"must be an int 0..3"):
         load_dataset(
             {
                 "corpus": corpus,
                 "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": 4}}],
             }
         )
-    with pytest.raises(ValueError, match="must be an int 0..3"):
+    with pytest.raises(ValueError, match=r"must be an int 0..3"):
         load_dataset(
             {
                 "corpus": corpus,
                 "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": -1}}],
             }
         )
-    with pytest.raises(ValueError, match="must be an int 0..3"):
+    with pytest.raises(ValueError, match=r"must be an int 0..3"):
         load_dataset(
             {
                 "corpus": corpus,
                 "queries": [{"query": "q", "expect": ["a"], "relevance": {"a": 1.5}}],
             }
         )
-    with pytest.raises(ValueError, match="must be an int 0..3"):
+    with pytest.raises(ValueError, match=r"must be an int 0..3"):
         load_dataset(
             {
                 "corpus": corpus,

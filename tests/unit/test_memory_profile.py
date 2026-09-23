@@ -60,7 +60,7 @@ async def test_remember_returns_without_inline_profile_rebuild():
 
 
 async def test_remember_preference_lands_in_profile_and_context():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     remembered = await service.remember(
         USER, content="prefer conventional commits", category="preference", importance=7
     )
@@ -75,7 +75,7 @@ async def test_remember_preference_lands_in_profile_and_context():
 
 
 async def test_focus_does_not_evict_profile():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     pref = await service.remember(
         USER, content="always use type hints", category="preference", importance=9
     )
@@ -138,7 +138,7 @@ async def test_context_vector_min_similarity_keeps_profile_intact():
 
 
 async def test_forget_removes_from_profile():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     remembered = await service.remember(USER, content="temporary preference", category="preference")
     mid = remembered.memory.id
     result = await service.forget(USER, mid)
@@ -248,9 +248,10 @@ async def test_get_profile_propagates_database_error_instead_of_unavailable(capl
         raise OperationalError("get_profile", {}, OSError("connection refused"))
 
     repo.get_profile = boom  # type: ignore[method-assign]
-    with caplog.at_level(logging.ERROR, logger="recallum.memory"):
-        with pytest.raises(OperationalError):
-            await service.get_profile(USER)
+    with caplog.at_level(logging.ERROR, logger="recallum.memory"), pytest.raises(
+        OperationalError
+    ):
+        await service.get_profile(USER)
     assert "Profile read failed" in caplog.text
 
 
@@ -263,9 +264,10 @@ async def test_context_propagates_database_error_during_profile_assembly(caplog)
 
     repo.upsert_profile = boom  # type: ignore[method-assign]
     repo.profiles.clear()
-    with caplog.at_level(logging.ERROR, logger="recallum.memory"):
-        with pytest.raises(OperationalError):
-            await service.context(USER)
+    with caplog.at_level(logging.ERROR, logger="recallum.memory"), pytest.raises(
+        OperationalError
+    ):
+        await service.context(USER)
     assert "Profile assembly failed" in caplog.text
 
 
@@ -402,7 +404,7 @@ async def test_project_profile_is_combined_without_cross_project_memory():
 
 
 async def test_failed_eager_attribute_update_is_repaired_lazily():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     remembered = await service.remember(USER, content="old preference", category="preference")
     await service.update(USER, remembered.memory.id, category="constraint")
     repaired = await service.get_profile(USER)
@@ -458,7 +460,7 @@ async def _two_slot_corpus(service: MemoryService, repo: FakeMemoryRepository):
 
 
 async def test_high_importance_fact_and_decision_never_static():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     fact = await service.remember(
         USER, content="critical architecture fact", category="fact", importance=10
     )

@@ -26,17 +26,15 @@ class SessionProvider:
     @asynccontextmanager
     async def for_user(self, user_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
         """Open a transaction scoped to ``user_id`` with RLS context set."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                await session.execute(
-                    text("SELECT set_config('app.current_user_id', :uid, true)"),
-                    {"uid": str(user_id)},
-                )
-                yield session
+        async with self._session_factory() as session, session.begin():
+            await session.execute(
+                text("SELECT set_config('app.current_user_id', :uid, true)"),
+                {"uid": str(user_id)},
+            )
+            yield session
 
     @asynccontextmanager
     async def admin(self) -> AsyncIterator[AsyncSession]:
         """Open a transaction without user context (admin/CLI paths only)."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                yield session
+        async with self._session_factory() as session, session.begin():
+            yield session

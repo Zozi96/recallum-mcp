@@ -86,6 +86,18 @@ _COUNT_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Skill docs say "fifteen tools" without the "MCP" qualifier; the same gate
+# applies to any literal "N tools" mention in them.
+_SKILL_COUNT_CLAIM_RE = re.compile(
+    r"\b(?P<count>" + "|".join([*_NUMBER_WORDS, r"\d+"]) + r")\s+tools?\b",
+    re.IGNORECASE,
+)
+
+_SKILL_DOCS = (
+    "plugins/recallum-memory/skills/recallum-setup/SKILL.md",
+    "plugins/recallum-memory/skills/recallum-update-harnesses/SKILL.md",
+)
+
 
 class _Token(NamedTuple):
     start: int
@@ -146,9 +158,11 @@ def _enumeration_issues(text: str) -> list[str]:
     return issues
 
 
-def _count_claim_issues(text: str) -> list[str]:
+def _count_claim_issues(
+    text: str, pattern: re.Pattern[str] = _COUNT_CLAIM_RE
+) -> list[str]:
     issues: list[str] = []
-    for match in _COUNT_CLAIM_RE.finditer(text):
+    for match in pattern.finditer(text):
         raw = match.group("count").lower()
         count = _NUMBER_WORDS[raw] if raw in _NUMBER_WORDS else int(raw)
         if count != len(ALLOWLIST):
@@ -172,6 +186,17 @@ def _doc_issues(path: Path, label: str, require_all_names: bool) -> list[str]:
     return [f"{label}: {issue}" for issue in issues]
 
 
+def _skill_doc_issues(path: Path, label: str) -> list[str]:
+    """Skill docs: any literal "N tools" mention must equal the canonical count."""
+    if not path.exists():
+        return [f"{label}: document is missing"]
+    text = path.read_text(encoding="utf-8")
+    return [
+        f"{label}: {issue}"
+        for issue in _count_claim_issues(text, _SKILL_COUNT_CLAIM_RE)
+    ]
+
+
 def check_tool_surface_docs(repo_root: Path) -> list[str]:
     """Human-readable issues; empty when the documented surface is aligned.
 
@@ -185,14 +210,25 @@ def check_tool_surface_docs(repo_root: Path) -> list[str]:
             "docs/clients.md",
             require_all_names=False,
         ),
+        *(
+            issue
+            for relative in _SKILL_DOCS
+            for issue in _skill_doc_issues(repo_root / relative, relative)
+        ),
     ]
 
 
-def _check(tmp_path: Path, readme: str = "", clients: str = "") -> list[str]:
+def _check(
+    tmp_path: Path, readme: str = "", clients: str = "", skills: str = ""
+) -> list[str]:
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir(exist_ok=True)
     (tmp_path / "README.md").write_text(readme, encoding="utf-8")
     (docs_dir / "clients.md").write_text(clients, encoding="utf-8")
+    for relative in _SKILL_DOCS:
+        skill = tmp_path / relative
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text(skills, encoding="utf-8")
     return check_tool_surface_docs(tmp_path)
 
 
@@ -201,6 +237,10 @@ def _copy_real_docs(tmp_path: Path) -> Path:
     docs_dir.mkdir()
     shutil.copy2(REPO_ROOT / "README.md", tmp_path / "README.md")
     shutil.copy2(REPO_ROOT / "docs" / "clients.md", docs_dir / "clients.md")
+    for relative in _SKILL_DOCS:
+        skill = tmp_path / relative
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, skill)
     return tmp_path
 
 
@@ -341,6 +381,31 @@ def test_boundary_incorrect_count_claims_fail(tmp_path, count):
 @pytest.mark.parametrize("count", ["fifteen", "15"])
 def test_boundary_correct_count_claims_pass(tmp_path, count):
     assert _check(tmp_path, readme=f"- **{count} MCP tools**: {ALLOWLIST_TOKENS}.") == []
+
+
+@pytest.mark.parametrize("count", ["nine", "9", "fourteen"])
+def test_skill_docs_incorrect_tool_count_claims_fail(tmp_path, count):
+    issues = _check(tmp_path, skills=f"Expect handshake OK and {count} tools discovered.")
+    skill_issues = [issue for issue in issues if "SKILL.md" in issue]
+    assert len(skill_issues) == len(_SKILL_DOCS)
+    assert all(f"{count} tools" in issue for issue in skill_issues)
+
+
+@pytest.mark.parametrize("count", ["fifteen", "15"])
+def test_skill_docs_correct_tool_count_claims_pass(tmp_path, count):
+    issues = _check(tmp_path, skills=f"{count} tools discovered.")
+    assert not [issue for issue in issues if "SKILL.md" in issue]
+
+
+def test_reverting_setup_skill_to_nine_tools_fails_naming_document(tmp_path):
+    root = _copy_real_docs(tmp_path)
+    skill = root / "plugins/recallum-memory/skills/recallum-setup/SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+    assert "fifteen tools" in text
+    skill.write_text(text.replace("fifteen tools", "nine tools"), encoding="utf-8")
+
+    issues = check_tool_surface_docs(root)
+    assert any("recallum-setup/SKILL.md" in issue and "nine tools" in issue for issue in issues)
 
 
 def test_boundary_ten_tool_enumeration_fails(tmp_path):

@@ -129,16 +129,6 @@ class TokenAuthenticator:
         return datetime.now(UTC) - last_used_at >= self._refresh_interval
 
 
-def _extract_bearer(headers: dict[str, str]) -> str | None:
-    value = headers.get("authorization")
-    if value is None:
-        return None
-    scheme, _, token = value.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        return None
-    return token.strip()
-
-
 class BearerAuthMiddleware(Middleware):
     """Bind the identity already verified by FastMCP's HTTP auth middleware."""
 
@@ -219,10 +209,9 @@ class RecallumTokenVerifier(TokenVerifier):
 
 
 __all__ = [
-    "BearerAuthMiddleware",
     "IDENTITY_CACHE_TTL",
     "MAX_CACHED_IDENTITIES",
+    "BearerAuthMiddleware",
     "RecallumTokenVerifier",
     "TokenAuthenticator",
-    "_extract_bearer",
 ]

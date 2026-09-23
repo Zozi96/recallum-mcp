@@ -9,5 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
+# Tool caches and scratch
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.zcode/
+
 # Agent worktrees (scratch, never commit)
 .claude/worktrees/

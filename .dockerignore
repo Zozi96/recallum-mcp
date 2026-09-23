@@ -1,0 +1,19 @@
+# Keep the build context to what deploy/Dockerfile actually COPYs
+# (pyproject.toml, uv.lock, README.md, alembic.ini, recallum/, deploy/).
+.git
+.codegraph
+.venv
+.zcode
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.DS_Store
+__pycache__
+tests
+docs
+openspec
+plugins
+scripts
+.github
+*.md
+!README.md

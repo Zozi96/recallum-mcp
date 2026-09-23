@@ -735,7 +735,7 @@ async def test_bootstrap_cap_truncation_reports_note_to_operator(tmp_path, capsy
 async def test_list_projects_reports_keys_with_active_counts(capsys):
     container, fakes = build_test_container()
     await _run(parse(["create-user", "--email", "pat@example.com"]), container)
-    user = list(fakes["users"].users.values())[0]
+    user = next(iter(fakes["users"].users.values()))
     service = container.memory_service()
     await service.remember(user.id, content="alpha one", category="fact", project="local:aaa")
     await service.remember(user.id, content="alpha two", category="fact", project="local:aaa")
@@ -764,7 +764,7 @@ async def test_list_projects_unknown_user_fails(capsys):
 async def test_reassign_project_moves_memories_between_keys(capsys):
     container, fakes = build_test_container()
     await _run(parse(["create-user", "--email", "sam@example.com"]), container)
-    user = list(fakes["users"].users.values())[0]
+    user = next(iter(fakes["users"].users.values()))
     service = container.memory_service()
     await service.remember(user.id, content="orphaned fact", category="fact", project="local:old")
     capsys.readouterr()
@@ -792,7 +792,7 @@ async def test_reassign_project_moves_memories_between_keys(capsys):
 
 
 async def test_reassign_project_rejects_identical_keys(capsys):
-    container, fakes = build_test_container()
+    container, _fakes = build_test_container()
     await _run(parse(["create-user", "--email", "sam@example.com"]), container)
     capsys.readouterr()
 

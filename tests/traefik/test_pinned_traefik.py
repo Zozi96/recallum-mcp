@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -258,10 +259,8 @@ def traefik_stack() -> Iterator[dict[str, object]]:
             except subprocess.TimeoutExpired:
                 upstream.kill()
                 upstream.wait(timeout=5)
-        try:
+        with contextlib.suppress(OSError):
             log_file.flush()
-        except OSError:
-            pass
         log_file.close()
         if secrets:
             _scrub_log_file(log_path, secrets)
@@ -293,7 +292,7 @@ def test_mcp_slash_is_direct_and_preserves_authorization(traefik_stack):
             json=_initialize(),
         )
         assert response.status_code == 200
-        assert "mcp-session-id" in {k.lower() for k in response.headers.keys()}
+        assert "mcp-session-id" in {k.lower() for k in response.headers}
         assert response.status_code != 308
 
 

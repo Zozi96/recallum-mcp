@@ -53,7 +53,7 @@ async def test_remember_creates_global_memory():
 
 
 async def test_remember_project_scope():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     result = await service.remember(
         USER, content="usamos FastAPI", category="decision", project="recallum"
     )
@@ -1794,8 +1794,8 @@ async def test_expired_duplicate_does_not_block_re_remembering():
     assert fresh.memory.expires_at is None
 
 
-async def test_remember_dedup_restatement_without_ttl_clears_existing_expiry():
-    """A restatement without ttl_seconds reasserts durability, like reconfirm."""
+async def test_remember_dedup_restatement_without_ttl_keeps_existing_expiry():
+    """A restatement without ttl_seconds only reconfirms; expiry is untouched."""
     service, _, _ = make_service()
     first = await service.remember(
         USER, content="branch is blocked", category="fact", ttl_seconds=60
@@ -1806,7 +1806,74 @@ async def test_remember_dedup_restatement_without_ttl_clears_existing_expiry():
 
     assert again.created is False
     assert again.memory.id == first.memory.id
-    assert again.memory.expires_at is None
+    assert again.memory.expires_at == first.memory.expires_at
+
+
+async def test_remember_dedup_hit_on_todo_without_ttl_is_not_an_error():
+    """Re-storing an existing todo without ttl_seconds must not raise."""
+    service, _, _ = make_service()
+    first = await service.remember(
+        USER, content="fix the flaky test", category="fact", kind="todo", ttl_seconds=3600
+    )
+    assert first.memory.expires_at is not None
+
+    again = await service.remember(USER, content="fix the flaky test", category="fact", kind="todo")
+
+    assert again.created is False
+    assert again.memory.id == first.memory.id
+    assert again.memory.expires_at == first.memory.expires_at
+
+
+async def test_remember_embeds_before_opening_a_session():
+    """The Ollama call must not sit inside a pooled transaction."""
+    events: list[str] = []
+    repo = FakeMemoryRepository()
+    embedder = FakeEmbeddingClient(dimensions=8)
+
+    original_session_for = repo.session_for
+
+    def session_for(user_id):
+        events.append("session")
+        return original_session_for(user_id)
+
+    original_embed = embedder.embed
+
+    async def embed(text):
+        events.append("embed")
+        return await original_embed(text)
+
+    repo.session_for = session_for
+    embedder.embed = embed
+    service = MemoryService(repository=repo, embeddings=embedder)
+
+    await service.remember(USER, content="ordered fact", category="fact")
+
+    assert events == ["embed", "session"]
+
+
+async def test_remember_retry_reuses_the_computed_embedding():
+    """An IntegrityError retry must not pay a second Ollama call."""
+    service, repo, embedder = make_service()
+    first = await service.remember(USER, content="racy embed fact", category="fact")
+    finds = {"n": 0}
+    original_find = repo.find_active_by_hash
+
+    async def miss_once(*args, **kwargs):
+        finds["n"] += 1
+        if finds["n"] == 1:
+            return None
+        return await original_find(*args, **kwargs)
+
+    async def raise_structured(*args, **kwargs):
+        raise IntegrityError("create_memory", {}, _UniqueOrig())
+
+    repo.find_active_by_hash = miss_once
+    repo.create_memory = raise_structured
+    second = await service.remember(USER, content="racy embed fact", category="fact")
+
+    assert second.created is False
+    assert second.memory.id == first.memory.id
+    assert embedder.embedded_texts == ["racy embed fact", "racy embed fact"]
 
 
 async def test_remember_dedup_restatement_with_ttl_refreshes_even_a_durable_duplicate():

@@ -15,6 +15,7 @@ Business rules implemented here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -192,7 +193,7 @@ class MemoryService:
                         else None
                     ),
                     expires_at=expires_at,
-                    clear_expires_at=ttl_seconds is None and existing.expires_at is not None,
+                    clear_expires_at=False,
                     source_type=(
                         validated_source_type
                         if validated_source_type is not None
@@ -356,11 +357,37 @@ class MemoryService:
         type one of ``file``/``symbol``/``module``); omitting them stores the
         memory exactly as before this feature existed.
 
-        A shared session is opened for the whole operation; on the rare
-        ``IntegrityError`` from a concurrent duplicate insert, the transaction
-        is rolled back and retried (up to 3 times), which turns the race into
-        a reconfirmation just like the old per-call path.
+        The embedding is computed before the session opens: holding a pooled
+        connection across a network call to Ollama would stall the pool, and
+        the IntegrityError retry below must reuse the same vector rather than
+        embedding twice. On the rare dedup ``IntegrityError`` from a
+        concurrent duplicate insert, the transaction is rolled back and
+        retried (up to 3 times), which turns the race into a reconfirmation
+        just like the old per-call path.
         """
+        # Validate before paying for an embedding; ``_remember_in_session``
+        # re-runs the same pure checks inside the transaction.
+        normalized = self._normalize_content(content)
+        self._normalize_project(project)
+        self._validate_category(category)
+        if kind is not None:
+            self._validate_kind(kind)
+        self._validate_importance(importance)
+        self._validate_metadata(metadata)
+        self._validate_anchors(anchors)
+        self._validate_ttl(ttl_seconds)
+        self._validate_source_type(source_type)
+        if source_ref is not None:
+            self._validate_source_ref(source_ref)
+        if embedding is None and not embedding_degraded:
+            try:
+                embedding = await self._embeddings.embed(normalized)
+            except EmbeddingError as exc:
+                record_sanitized_failure(
+                    logger, exc, message="Memory write embedding unavailable"
+                )
+                embedding = [0.0] * self._embeddings.dimensions
+                embedding_degraded = True
         for attempt in range(3):
             try:
                 async with self._repo.session_for(user_id) as session:
@@ -941,10 +968,8 @@ class MemoryService:
                 return reembedded, failed
             contents = [row.content for row in rows]
             vectors: list[list[float]] | None = None
-            try:
+            with contextlib.suppress(EmbeddingError):
                 vectors = await self._embeddings.embed_batch(contents)
-            except EmbeddingError:
-                pass
             for index, row in enumerate(rows):
                 after = row.id
                 if vectors is not None and index < len(vectors):

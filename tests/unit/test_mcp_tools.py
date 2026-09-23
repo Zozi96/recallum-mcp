@@ -622,12 +622,14 @@ async def _batch_failure_server(
 
 async def test_forget_now_translates_validation_errors():
     """forget had no handler before the middleware; it is covered now."""
-    async with _exploding_server(MemoryValidationError("bad memory id")) as info:
-        async with mcp_client(info.url, info.alice_token) as client:
-            with pytest.raises(ToolError, match="bad memory id"):
-                await client.call_tool(
-                    "forget", {"memory_id": "00000000-0000-0000-0000-000000000001"}
-                )
+    async with (
+        _exploding_server(MemoryValidationError("bad memory id")) as info,
+        mcp_client(info.url, info.alice_token) as client,
+    ):
+        with pytest.raises(ToolError, match="bad memory id"):
+            await client.call_tool(
+                "forget", {"memory_id": "00000000-0000-0000-0000-000000000001"}
+            )
 
 
 def test_server_masks_unexpected_error_details():
@@ -786,10 +788,12 @@ async def test_profile_resource_failure_has_no_sensitive_cause_in_logs_or_trace(
     monkeypatch.setattr(fastmcp_server_telemetry, "get_tracer", lambda: tracer)
     handler = _McpRecordHandler()
 
-    async with _exploding_server(RuntimeError(sentinel), handler) as info:
-        async with mcp_client(info.url, info.alice_token) as client:
-            with pytest.raises(Exception) as failure:
-                await client.read_resource(uri)
+    async with (
+        _exploding_server(RuntimeError(sentinel), handler) as info,
+        mcp_client(info.url, info.alice_token) as client,
+    ):
+        with pytest.raises(Exception) as failure:
+            await client.read_resource(uri)
 
     assert sentinel not in str(failure.value)
     log_values = [
@@ -1268,44 +1272,43 @@ async def test_live_positive_ttl_session_rejects_concurrently_at_exact_expiry():
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     }
-    async with _serve(app) as url:
-        async with httpx.AsyncClient() as client:
-            initialized = await client.post(
-                f"{url}/mcp/", json=_initialize_request(), headers=headers
-            )
-            assert initialized.status_code == 200
-            session_id = initialized.headers["mcp-session-id"]
-            assert verifier_calls == [issued.plaintext]
+    async with _serve(app) as url, httpx.AsyncClient() as client:
+        initialized = await client.post(
+            f"{url}/mcp/", json=_initialize_request(), headers=headers
+        )
+        assert initialized.status_code == 200
+        session_id = initialized.headers["mcp-session-id"]
+        assert verifier_calls == [issued.plaintext]
 
-            clock[0] = 1029.999
-            await key_service.revoke_key(issued.key.id)
-            verifier_calls.clear()
-            accepted = await client.post(
-                f"{url}/mcp/",
-                json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
-                headers={**headers, "Mcp-Session-Id": session_id},
-            )
-            assert accepted.status_code == 200
-            assert verifier_calls == [issued.plaintext], "one verifier call per request"
-            dispatched_before_expiry = len(dispatch_calls)
+        clock[0] = 1029.999
+        await key_service.revoke_key(issued.key.id)
+        verifier_calls.clear()
+        accepted = await client.post(
+            f"{url}/mcp/",
+            json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
+            headers={**headers, "Mcp-Session-Id": session_id},
+        )
+        assert accepted.status_code == 200
+        assert verifier_calls == [issued.plaintext], "one verifier call per request"
+        dispatched_before_expiry = len(dispatch_calls)
 
-            clock[0] = 1030.0
-            verifier_calls.clear()
-            rejected = await asyncio.gather(
-                *(
-                    client.post(
-                        f"{url}/mcp/",
-                        json={
-                            "jsonrpc": "2.0",
-                            "id": index + 3,
-                            "method": "tools/list",
-                            "params": {},
-                        },
-                        headers={**headers, "Mcp-Session-Id": session_id},
-                    )
-                    for index in range(3)
+        clock[0] = 1030.0
+        verifier_calls.clear()
+        rejected = await asyncio.gather(
+            *(
+                client.post(
+                    f"{url}/mcp/",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": index + 3,
+                        "method": "tools/list",
+                        "params": {},
+                    },
+                    headers={**headers, "Mcp-Session-Id": session_id},
                 )
+                for index in range(3)
             )
+        )
 
     assert [response.status_code for response in rejected] == [401, 401, 401]
     assert [response.json()["error"] for response in rejected] == [

@@ -56,9 +56,10 @@ async def test_unexpected_error_is_generic_and_diagnostic_is_correlated(caplog, 
     async def failing_tool():
         raise RuntimeError(SENTINEL)
 
-    with caplog.at_level(logging.ERROR, logger="recallum.mcp"):
-        with pytest.raises(ToolError) as failure:
-            await failing_tool()
+    with caplog.at_level(logging.ERROR, logger="recallum.mcp"), pytest.raises(
+        ToolError
+    ) as failure:
+        await failing_tool()
 
     public = failure.value
     assert public.__cause__ is None
@@ -87,9 +88,10 @@ async def test_embedding_error_has_exact_public_message_and_no_details(caplog, m
         # update has no write-embedding degradation; EmbeddingError stays public.
         raise EmbeddingError(sentinel)
 
-    with caplog.at_level(logging.ERROR, logger="recallum.mcp"):
-        with pytest.raises(ToolError, match="^embedding service unavailable$") as failure:
-            await update()
+    with caplog.at_level(logging.ERROR, logger="recallum.mcp"), pytest.raises(
+        ToolError, match=r"^embedding service unavailable$"
+    ) as failure:
+        await update()
 
     assert failure.value.__cause__ is None
     assert failure.value.__context__ is None

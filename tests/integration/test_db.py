@@ -71,6 +71,21 @@ async def test_hnsw_index_excludes_soft_deleted_rows(container):
     assert "deleted_at IS NULL" in definition
 
 
+async def test_skills_hnsw_index_excludes_soft_deleted_rows(container):
+    """Retired skill vectors must not sit in the graph burning scan budget."""
+    engine = container.engine()
+    async with engine.connect() as connection:
+        definition = (
+            await connection.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_skills_embedding_hnsw'"
+                )
+            )
+        ).scalar_one()
+    assert "USING hnsw" in definition
+    assert "deleted_at IS NULL" in definition
+
+
 async def test_search_text_collapses_inflections(container):
     """Postgres-only: Snowball stemming, which the in-memory fake cannot model.
 
@@ -454,7 +469,7 @@ async def test_migrations_applied(container):
         version = (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar_one()
-        assert version == "0020_invalidate_memory_profiles"
+        assert version == _HEAD_REVISION
         vector_version = (
             await connection.execute(
                 text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
@@ -899,9 +914,16 @@ async def test_database_pool_checkout_timeout_releases_and_reuses_pool(pg_databa
         await engine.dispose()
 
 
-async def test_database_command_timeout_allows_subsequent_pool_reuse(container):
+async def test_database_command_timeout_allows_subsequent_pool_reuse(pg_database):
     """A canceled command does not strand the connection pool."""
-    engine = container.engine()
+    engine = create_async_engine(
+        pg_database["app"],
+        connect_args={
+            "timeout": 1.0,
+            "command_timeout": 1.0,
+            "server_settings": {"statement_timeout": "1000"},
+        },
+    )
     started = time.monotonic()
     try:
         async with engine.connect() as connection:
@@ -912,8 +934,11 @@ async def test_database_command_timeout_allows_subsequent_pool_reuse(container):
         pytest.fail("long-running command unexpectedly succeeded")
     assert time.monotonic() - started < 3.0
 
-    async with engine.connect() as connection:
-        assert (await connection.execute(text("SELECT 1"))).scalar_one() == 1
+    try:
+        async with engine.connect() as connection:
+            assert (await connection.execute(text("SELECT 1"))).scalar_one() == 1
+    finally:
+        await engine.dispose()
 
 
 async def test_user_email_is_normalized_and_case_insensitive_unique(container):
@@ -1141,7 +1166,7 @@ async def test_forget_excludes_from_all_queries(container):
     assert context.total_items == 0
 
 
-_HEAD_REVISION = "0020_invalidate_memory_profiles"
+_HEAD_REVISION = "0021_skills_hnsw_partial"
 _PREV_REVISION = "0019_memory_code_anchors"
 
 

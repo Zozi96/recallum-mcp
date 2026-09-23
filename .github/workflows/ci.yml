@@ -78,6 +78,18 @@ jobs:
           ! grep -q 'deploy/dokploy-compose.yml' scripts/check_compose_supported.sh | grep include || true
           bash -c '! scripts/check_compose_supported.sh --include-dokploy'
 
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application image
+        run: docker build -f deploy/Dockerfile -t recallum:ci .
+      - name: Entrypoint is installed and executable
+        run: docker run --rm --entrypoint /bin/sh recallum:ci -c 'test -x /usr/local/bin/recallum-entrypoint'
+      - name: Explicit commands pass through the entrypoint
+        run: docker run --rm recallum:ci /bin/echo entrypoint-passthrough-ok
+
   postgres-integration:
     name: postgres-integration
     runs-on: ubuntu-latest

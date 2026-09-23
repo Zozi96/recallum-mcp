@@ -77,12 +77,12 @@ class Container(containers.DeclarativeContainer):
         echo=config.database.echo.as_bool(),
         pool_size=config.database.pool_size.as_int(),
         max_overflow=config.database.max_overflow.as_int(),
-        pool_timeout=config.readiness.database_pool_timeout_seconds.as_float(),
+        pool_timeout=config.database.pool_timeout_seconds.as_float(),
         connect_args=providers.Callable(
             _database_connect_args,
-            connect_timeout_seconds=config.readiness.database_connect_timeout_seconds.as_float(),
-            command_timeout_seconds=config.readiness.database_command_timeout_seconds.as_float(),
-            statement_timeout_seconds=config.readiness.database_statement_timeout_seconds.as_float(),
+            connect_timeout_seconds=config.database.connect_timeout_seconds.as_float(),
+            command_timeout_seconds=config.database.command_timeout_seconds.as_float(),
+            statement_timeout_seconds=config.database.statement_timeout_seconds.as_float(),
         ),
     )
 

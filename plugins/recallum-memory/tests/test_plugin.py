@@ -2031,20 +2031,19 @@ class AntigravityHookGapTests(unittest.TestCase):
             ]
         }
         for name, schema in (("object", object_schema), ("array", array_schema)):
-            with self.subTest(schema=name):
-                with tempfile.TemporaryDirectory() as directory:
-                    probe = Path(directory) / "probe"
-                    probe.mkdir()
-                    (probe / "plugin.json").write_text(
-                        GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
-                    )
-                    (probe / "hooks.json").write_text(
-                        json.dumps(schema), encoding="utf-8"
-                    )
-                    _, output = _agy_validate(probe)
-                    self.assertNotIn("cannot unmarshal", output, output)
-                    self.assertIn("hooks", output)
-                    self.assertIn("1 processed", output)
+            with self.subTest(schema=name), tempfile.TemporaryDirectory() as directory:
+                probe = Path(directory) / "probe"
+                probe.mkdir()
+                (probe / "plugin.json").write_text(
+                    GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                (probe / "hooks.json").write_text(
+                    json.dumps(schema), encoding="utf-8"
+                )
+                _, output = _agy_validate(probe)
+                self.assertNotIn("cannot unmarshal", output, output)
+                self.assertIn("hooks", output)
+                self.assertIn("1 processed", output)
 
     def test_recallum_hook_has_no_antigravity_branch_or_prefix_constant(self) -> None:
         # Deliberate absence, not an omission: with no SessionStart dispatch
@@ -3114,7 +3113,7 @@ class CursorInstallerTests(InstallerTestCase):
     def test_dry_run_validates_and_does_not_mutate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            env, log = self._fake_clis(root)
+            env, _log = self._fake_clis(root)
             result = self._run_cursor(env, "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
@@ -3153,7 +3152,7 @@ class CursorInstallerTests(InstallerTestCase):
 
     def test_matching_marketplace_skips_add_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env, log = self._fake_clis(Path(directory), cursor_marketplace="matching")
+            env, _log = self._fake_clis(Path(directory), cursor_marketplace="matching")
             result = self._run_cursor(env, "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("dry-run: cursor-agent plugin marketplace add", result.stdout)
@@ -3178,7 +3177,7 @@ class CursorInstallerTests(InstallerTestCase):
 
     def test_force_reindexes_conflicting_marketplace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env, log = self._fake_clis(Path(directory), cursor_marketplace="conflict")
+            env, _log = self._fake_clis(Path(directory), cursor_marketplace="conflict")
             result = self._run_cursor(env, "--force-mcp", "--dry-run")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("dry-run: cursor-agent plugin marketplace remove", result.stdout)
@@ -4053,20 +4052,19 @@ class DoctorTests(unittest.TestCase):
             ("http://localhost:8080/mcp/", True),
         )
         for url, expect_healthy in cases:
-            with self.subTest(url=url):
-                with tempfile.TemporaryDirectory() as directory:
-                    home = Path(directory)
-                    self._healthy_home(home)
-                    self._write_antigravity_config(home, url=url)
-                    result = self._run_doctor(home, "--json")
-                    report = json.loads(result.stdout)
-                    antigravity_problems = [p for p in report["problems"] if "Antigravity" in p]
-                    if expect_healthy:
-                        self.assertEqual(antigravity_problems, [])
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                    else:
-                        self.assertTrue(antigravity_problems)
-                        self.assertEqual(result.returncode, 1)
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                self._healthy_home(home)
+                self._write_antigravity_config(home, url=url)
+                result = self._run_doctor(home, "--json")
+                report = json.loads(result.stdout)
+                antigravity_problems = [p for p in report["problems"] if "Antigravity" in p]
+                if expect_healthy:
+                    self.assertEqual(antigravity_problems, [])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertTrue(antigravity_problems)
+                    self.assertEqual(result.returncode, 1)
 
     def test_antigravity_token_never_appears_in_any_output_mode(self) -> None:
         token = "rcl_antigravity_secret_321"
@@ -4076,8 +4074,7 @@ class DoctorTests(unittest.TestCase):
             ("http://example.com/mcp/", 0o600),
         )
         for url, mode in cases:
-            with self.subTest(url=url, mode=mode):
-                with tempfile.TemporaryDirectory() as directory:
+            with self.subTest(url=url, mode=mode), tempfile.TemporaryDirectory() as directory:
                     home = Path(directory)
                     self._healthy_home(home)
                     self._write_antigravity_config(home, url=url, token=token, mode=mode)

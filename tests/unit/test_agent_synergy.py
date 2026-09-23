@@ -187,7 +187,7 @@ async def test_recall_usage_weight_breaks_retrieval_ties():
     service, repo = build(MemoryLimits(recall_trigram_weight=0.0))
     older_id = await seed(service, repo)
     baseline = await service.recall(USER, query="alpha beta")
-    assert [r.content for r in baseline.results][0] == "alpha beta pipeline"
+    assert next(r.content for r in baseline.results) == "alpha beta pipeline"
 
     # A positive weight lets accumulated usage break the same tie instead.
     service, repo = build(
@@ -322,7 +322,7 @@ async def test_recall_freshness_weight_breaks_retrieval_ties():
     service, repo = build(MemoryLimits(recall_trigram_weight=0.0))
     older_id = await seed(service, repo)
     baseline = await service.recall(USER, query="alpha beta")
-    assert [r.content for r in baseline.results][0] == "alpha beta pipeline"
+    assert next(r.content for r in baseline.results) == "alpha beta pipeline"
 
     # A positive weight lets the recent reconfirmation break the same tie
     # instead, without evicting the other, clearly-matched candidate.

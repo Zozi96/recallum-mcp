@@ -22,7 +22,7 @@ from tests.fakes import (
 _STATE_ENV = "RECALLUM_VERTICAL_STATE"
 
 
-def create_app():  # noqa: A001 — Granian --factory entrypoint
+def create_app():
     get_settings.cache_clear()
     state_path = Path(os.environ[_STATE_ENV])
     raw = json.loads(state_path.read_text(encoding="utf-8"))

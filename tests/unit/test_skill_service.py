@@ -62,7 +62,7 @@ async def test_save_skill_creates_global_version_one():
 
 async def test_save_skill_project_scope_visible_only_in_that_project():
     """Scenario: Guardar un skill de proyecto."""
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     result = await service.save_skill(USER, project="recallum", **_save_kwargs())
     assert result.skill.scope == "project"
     assert result.skill.project == "recallum"
@@ -90,7 +90,7 @@ async def test_save_skill_project_scope_visible_only_in_that_project():
 
 async def test_match_skills_isolates_other_users():
     """Scenario: Aislamiento -- another user searching skills gets nothing."""
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     await service.save_skill(USER, project="recallum", **_save_kwargs())
 
     match = await service.match_skills(
@@ -101,7 +101,7 @@ async def test_match_skills_isolates_other_users():
 
 async def test_match_skills_finds_skill_by_description_adjacent_query():
     """Scenario: Disparo por descripción."""
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     saved = await service.save_skill(USER, **_save_kwargs())
 
     match = await service.match_skills(USER, query="how do I modify the database schema safely")
@@ -112,7 +112,7 @@ async def test_match_skills_finds_skill_by_description_adjacent_query():
 async def test_match_skills_degrades_to_textual_when_embeddings_unavailable():
     """Scenario: Degradación -- Ollama down still returns textual results."""
     embedder = FakeEmbeddingClient(dimensions=8, available=True)
-    service, repo, _ = make_service(embedder=embedder)
+    service, _repo, _ = make_service(embedder=embedder)
     saved = await service.save_skill(USER, **_save_kwargs())
 
     embedder.available = False
@@ -226,21 +226,21 @@ async def test_save_skill_reports_similar_advisory_without_auto_merging():
 
 
 async def test_get_skill_unknown_id_reports_not_found():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     result = await service.get_skill(USER, uuid.uuid4())
     assert result.found is False
     assert result.skill is None
 
 
 async def test_get_skill_foreign_id_reports_not_found_without_leaking_ownership():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     saved = await service.save_skill(USER, **_save_kwargs())
     result = await service.get_skill(OTHER_USER, saved.skill.id)
     assert result.found is False
 
 
 async def test_get_skill_retired_id_reports_not_found():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     saved = await service.save_skill(USER, **_save_kwargs())
     await service.forget_skill(USER, saved.skill.id)
     result = await service.get_skill(USER, saved.skill.id)
@@ -248,7 +248,7 @@ async def test_get_skill_retired_id_reports_not_found():
 
 
 async def test_forget_skill_unknown_and_foreign_ids_both_report_not_forgotten():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     saved = await service.save_skill(USER, **_save_kwargs())
 
     unknown = await service.forget_skill(USER, uuid.uuid4())
@@ -261,7 +261,7 @@ async def test_forget_skill_unknown_and_foreign_ids_both_report_not_forgotten():
 
 
 async def test_forget_skill_retired_id_reports_not_forgotten_twice():
-    service, repo, _ = make_service()
+    service, _repo, _ = make_service()
     saved = await service.save_skill(USER, **_save_kwargs())
     first = await service.forget_skill(USER, saved.skill.id)
     assert first.forgotten is True
@@ -294,4 +294,51 @@ async def test_a_normal_memory_session_never_creates_a_skill():
 
     assert fakes["skills"].rows == {}
     match = await skill_service.match_skills(user.id, query="Alembic migrations")
+    assert match.results == []
+
+
+# -- input ceilings ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [
+        ("name", 200),
+        ("description", 2000),
+        ("constraints", 4000),
+    ],
+)
+async def test_save_skill_rejects_over_limit_text_fields(field, limit):
+    service, _, _ = make_service()
+    with pytest.raises(SkillValidationError, match=f"{field} must be at most {limit}"):
+        await service.save_skill(USER, **_save_kwargs(**{field: "x" * (limit + 1)}))
+    await service.save_skill(USER, **_save_kwargs(**{field: "x" * limit}))
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [("steps", 2000), ("triggers", 200)],
+)
+async def test_save_skill_rejects_over_limit_list_entries(field, limit):
+    service, _, _ = make_service()
+    with pytest.raises(SkillValidationError, match=f"{field} entries must be at most {limit}"):
+        await service.save_skill(USER, **_save_kwargs(**{field: ["ok", "x" * (limit + 1)]}))
+    await service.save_skill(USER, **_save_kwargs(**{field: ["x" * limit]}))
+
+
+@pytest.mark.parametrize(("field", "limit"), [("steps", 50), ("triggers", 50)])
+async def test_save_skill_rejects_over_limit_list_lengths(field, limit):
+    service, _, _ = make_service()
+    over = [f"entry {i}" for i in range(limit + 1)]
+    at = [f"entry {i}" for i in range(limit)]
+    with pytest.raises(SkillValidationError, match=f"{field} must contain at most {limit}"):
+        await service.save_skill(USER, **_save_kwargs(**{field: over}))
+    await service.save_skill(USER, **_save_kwargs(**{field: at}))
+
+
+async def test_match_skills_rejects_over_limit_query():
+    service, _, _ = make_service()
+    with pytest.raises(SkillValidationError, match="query must be at most 2000"):
+        await service.match_skills(USER, query="x" * 2001)
+    match = await service.match_skills(USER, query="x" * 2000)
     assert match.results == []

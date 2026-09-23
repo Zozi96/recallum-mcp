@@ -199,6 +199,42 @@ async def test_middleware_drops_oversized_project_metadata():
     assert repository.events[0].project is None
 
 
+async def test_middleware_truncates_client_supplied_tool_names_to_column_width():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    middleware = UsageTelemetryMiddleware(buffer)
+    long_name = "  weird\t" + "x" * 300
+    context = SimpleNamespace(
+        message=SimpleNamespace(name=long_name, arguments={})
+    )
+
+    async def call(_context):
+        return ToolResult(structured_content={"items": []})
+
+    with identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())):
+        await middleware.on_call_tool(context, call)
+    await buffer.flush()
+    recorded = repository.events[0].tool_name
+    assert recorded == "weird " + "x" * (64 - len("weird "))
+    assert len(recorded) == 64
+
+
+async def test_middleware_records_unknown_for_empty_or_non_string_tool_names():
+    repository = FakeTelemetryRepository()
+    buffer = TelemetryBuffer(repository, 10, 60, 20, 90)
+    middleware = UsageTelemetryMiddleware(buffer)
+
+    async def call(_context):
+        return ToolResult(structured_content={"items": []})
+
+    with identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())):
+        for name in (None, "   \t  "):
+            context = SimpleNamespace(message=SimpleNamespace(name=name, arguments={}))
+            await middleware.on_call_tool(context, call)
+    await buffer.flush()
+    assert [row.tool_name for row in repository.events] == ["unknown", "unknown"]
+
+
 async def test_instrumentation_hot_path_is_only_bounded_memory_work():
     repository = FakeTelemetryRepository()
     buffer = TelemetryBuffer(repository, 2_000, 60, 2_000, 90)
@@ -328,9 +364,11 @@ async def test_remember_toolerror_counts_as_embedding_unavailable_write():
     async def boom(_context):
         raise ToolError(EMBEDDING_UNAVAILABLE_MESSAGE)
 
-    with identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())):
-        with pytest.raises(ToolError, match="^embedding service unavailable$"):
-            await middleware.on_call_tool(context, boom)
+    with (
+        identity_scope(Identity(uuid.uuid4(), "a@example.com", uuid.uuid4())),
+        pytest.raises(ToolError, match=r"^embedding service unavailable$"),
+    ):
+        await middleware.on_call_tool(context, boom)
     snap = buffer.snapshot({"database": "ok", "embeddings": "unavailable"})
     assert snap.write_calls == 1
     assert snap.embedding_unavailable_writes == 1

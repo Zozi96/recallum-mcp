@@ -30,7 +30,7 @@ async def _call_private(mcp: FastMCP, method: str) -> Any:
         raise _compatibility_error(method, AttributeError(method))
     try:
         return await operation()
-    except Exception as exc:  # noqa: BLE001 — surface as startup diagnostic
+    except Exception as exc:
         raise _compatibility_error(method, exc) from exc
 
 

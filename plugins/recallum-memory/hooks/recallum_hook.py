@@ -15,6 +15,7 @@ a session must never be degraded by its own memory plugin.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -197,10 +198,8 @@ def _write_cached_key(root: Path, key: str) -> None:
     git = _git_dir(root)
     if git is None:
         return
-    try:
+    with contextlib.suppress(OSError):
         (git / CACHE_FILE).write_text(key + "\n", encoding="utf-8")
-    except OSError:
-        pass
 
 
 def _remote_key(remote: str) -> str | None:

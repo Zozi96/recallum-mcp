@@ -11,6 +11,7 @@ traces and no success values.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import secrets
@@ -148,7 +149,7 @@ FIXTURES = {
 class _ProbeHandler(BaseHTTPRequestHandler):
     server: ProbeServer
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         if self.headers.get("Authorization") != f"Bearer {self.server.token}":
             self.send_error(401)
             return
@@ -176,7 +177,7 @@ class _ProbeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: object) -> None:
         del format, args
 
 
@@ -376,14 +377,10 @@ def run_once(
             except subprocess.TimeoutExpired:
                 if os.name == "posix":
                     os.killpg(process.pid, signal.SIGTERM)
-                    try:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
                         process.wait(timeout=0.5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    try:
+                    with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
                 elif os.name == "nt":
                     subprocess.run(
                         ["taskkill", "/PID", str(process.pid), "/T", "/F"],

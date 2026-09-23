@@ -22,7 +22,7 @@ class UserRepository:
         async with self._sessions.admin() as session:
             stmt = (
                 insert(User)
-                .values(email=email)
+                .values(email=email.lower())
                 .on_conflict_do_nothing(index_elements=[User.email])
                 .returning(User)
             )

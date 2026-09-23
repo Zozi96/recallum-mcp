@@ -83,11 +83,27 @@ class SkillService:
         source_ref: str | None = None,
     ) -> SaveSkillResult:
         """Store a versioned procedure, deduplicating identical active steps."""
-        normalized_name = self._normalize_text(name, field="name")
-        normalized_description = self._normalize_text(description, field="description")
-        normalized_triggers = self._normalize_list(triggers, field="triggers")
-        normalized_steps = self._normalize_list(steps, field="steps")
-        normalized_constraints = self._normalize_optional_text(constraints)
+        normalized_name = self._normalize_text(
+            name, field="name", max_chars=self._limits.skill_name_max_chars
+        )
+        normalized_description = self._normalize_text(
+            description, field="description", max_chars=self._limits.skill_description_max_chars
+        )
+        normalized_triggers = self._normalize_list(
+            triggers,
+            field="triggers",
+            max_items=self._limits.skill_triggers_max_items,
+            max_item_chars=self._limits.skill_trigger_max_chars,
+        )
+        normalized_steps = self._normalize_list(
+            steps,
+            field="steps",
+            max_items=self._limits.skill_steps_max_items,
+            max_item_chars=self._limits.skill_step_max_chars,
+        )
+        normalized_constraints = self._normalize_optional_text(
+            constraints, field="constraints", max_chars=self._limits.skill_constraints_max_chars
+        )
         resolved_scope, normalized_project = self._resolve_scope_project(scope, project)
         validated_source_type = self._validate_source_type(source_type)
         set_source_ref = source_ref is not None
@@ -229,7 +245,9 @@ class SkillService:
         limit: StrictPositiveLimit | None = None,
     ) -> MatchSkillsResult:
         """Hybrid vector + full-text retrieval; degrades to textual on embed failure."""
-        normalized_query = self._normalize_text(query, field="query")
+        normalized_query = self._normalize_text(
+            query, field="query", max_chars=self._limits.skill_query_max_chars
+        )
         normalized_project = self._normalize_project(project)
         visibility = MemoryVisibility.from_filters(scope=scope, project=normalized_project)
         effective_limit = self._clamp_limit(
@@ -312,21 +330,31 @@ class SkillService:
             raise SkillValidationError("limit must be an integer")
         return max(1, min(requested, maximum))
 
-    def _normalize_text(self, value: str, *, field: str) -> str:
+    def _normalize_text(self, value: str, *, field: str, max_chars: int) -> str:
         if value is None:
             raise SkillValidationError(f"{field} must not be empty")
         normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", value)).strip()
         if not normalized:
             raise SkillValidationError(f"{field} must not be empty")
+        if len(normalized) > max_chars:
+            raise SkillValidationError(f"{field} must be at most {max_chars} characters")
         return normalized
 
-    def _normalize_optional_text(self, value: str | None) -> str | None:
+    def _normalize_optional_text(
+        self, value: str | None, *, field: str, max_chars: int
+    ) -> str | None:
         if value is None:
             return None
         normalized = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", value)).strip()
-        return normalized or None
+        if not normalized:
+            return None
+        if len(normalized) > max_chars:
+            raise SkillValidationError(f"{field} must be at most {max_chars} characters")
+        return normalized
 
-    def _normalize_list(self, values: list[str], *, field: str) -> list[str]:
+    def _normalize_list(
+        self, values: list[str], *, field: str, max_items: int, max_item_chars: int
+    ) -> list[str]:
         if not isinstance(values, list) or not values:
             raise SkillValidationError(f"{field} must be a non-empty list of strings")
         normalized: list[str] = []
@@ -334,10 +362,17 @@ class SkillService:
             if not isinstance(value, str):
                 raise SkillValidationError(f"{field} entries must be strings")
             item = _WHITESPACE.sub(" ", unicodedata.normalize("NFC", value)).strip()
-            if item:
-                normalized.append(item)
+            if not item:
+                continue
+            if len(item) > max_item_chars:
+                raise SkillValidationError(
+                    f"{field} entries must be at most {max_item_chars} characters"
+                )
+            normalized.append(item)
         if not normalized:
             raise SkillValidationError(f"{field} must contain at least one non-empty entry")
+        if len(normalized) > max_items:
+            raise SkillValidationError(f"{field} must contain at most {max_items} entries")
         return normalized
 
     def _normalize_project(self, project: str | None) -> str | None:

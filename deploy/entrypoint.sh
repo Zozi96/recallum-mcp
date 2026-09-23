@@ -17,7 +17,18 @@
 #
 # `exec` matters: Granian replaces this shell as PID 1, so SIGTERM reaches it
 # directly and the lifespan shutdown (telemetry flush, engine dispose) runs.
+#
+# An explicit command (compose `command:` / `docker run image cmd`) replaces
+# the whole migrate-then-serve sequence below and is exec'd as given.
 set -eu
+
+# One-shot services (e.g. the `migrate` container in dokploy-compose.yml, which
+# runs `alembic upgrade head` and must exit) pass their command through
+# untouched. The Dockerfile still has no CMD, so managed "run command" fields
+# keep landing here -- now doing what the operator actually wrote.
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
 
 serve() {
     # Same env Settings validates (`RECALLUM__RUNTIME__WORKERS`). Fail closed

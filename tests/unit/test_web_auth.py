@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
+import pytest
+from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 
 from recallum.app import create_app
@@ -11,6 +16,8 @@ from recallum.auth.api_keys import hash_token
 from recallum.auth.passwords import PasswordService
 from recallum.auth.web_sessions import WebSessionService
 from recallum.config import Settings
+from recallum.http_boundary import FixedWindowLimiter
+from recallum.web.auth import LoginRequest, WebAuthenticator, create_auth_router
 from tests.fakes import FakeUserRepository, FakeWebSessionRepository, build_test_container
 
 
@@ -155,7 +162,7 @@ async def test_losing_rotation_race_revokes_the_winning_successor():
 
 
 def test_web_endpoints_cookie_scope_and_cors():
-    container, fakes = build_test_container()
+    container, _fakes = build_test_container()
     user = __import__("asyncio").run(container.api_key_service().create_user("web@example.com"))
     __import__("asyncio").run(container.password_service().set_password(user, "secret"))
     app = create_app(Settings(), container)
@@ -237,3 +244,118 @@ def test_api_key_does_not_authenticate_web_api():
             "/api/v1/auth/me", headers={"Authorization": "Bearer rcl_not_web_auth"}
         )
         assert response.status_code == 401
+
+
+class _RejectingPasswords:
+    """Every attempt fails authentication, so reservations stay consumed."""
+
+    async def authenticate(self, email: str, password: str):
+        return None
+
+
+class _AcceptingPasswords:
+    def __init__(self, user):
+        self._user = user
+
+    async def authenticate(self, email: str, password: str):
+        return self._user
+
+
+class _StubSessions:
+    idle_window = timedelta(hours=1)
+
+    async def create(self, user_id):
+        return SimpleNamespace(token="session-token")
+
+    async def resolve(self, token):
+        return None
+
+    async def revoke(self, session_id):
+        return None
+
+
+def _throttled_login_app(limiter: FixedWindowLimiter, passwords) -> FastAPI:
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attribute_test_ip(request: Request, call_next):
+        request.scope["client_ip"] = request.headers.get("x-test-ip", "10.0.0.1")
+        return await call_next(request)
+
+    app.include_router(
+        create_auth_router(
+            passwords,
+            _StubSessions(),
+            "recallum_session",
+            WebAuthenticator(_StubSessions(), "recallum_session"),
+            limiter=limiter,
+            login_ip_attempts=30,
+            login_ip_window_seconds=300,
+            login_account_attempts=5,
+            login_account_window_seconds=300,
+        )
+    )
+    return app
+
+
+def test_login_account_throttle_survives_ip_rotation():
+    """Five failures from five distinct IPs still exhaust the account budget."""
+    app = _throttled_login_app(FixedWindowLimiter(), _RejectingPasswords())
+    with TestClient(app) as client:
+        for index in range(5):
+            response = client.post(
+                "/auth/login",
+                json={"email": "victim@example.com", "password": "wrong"},
+                headers={"x-test-ip": f"203.0.113.{index}"},
+            )
+            assert response.status_code == 401
+        sixth = client.post(
+            "/auth/login",
+            json={"email": "victim@example.com", "password": "wrong"},
+            headers={"x-test-ip": "203.0.113.6"},
+        )
+        assert sixth.status_code == 429
+
+
+async def test_cancelled_login_releases_every_reservation():
+    """Cancellation mid-release must not strand the remaining reservations."""
+    limiter = FixedWindowLimiter()
+    user = SimpleNamespace(id=uuid.uuid4(), email="a@example.com", is_admin=False)
+    router = create_auth_router(
+        _AcceptingPasswords(user),
+        _StubSessions(),
+        "recallum_session",
+        WebAuthenticator(_StubSessions(), "recallum_session"),
+        limiter=limiter,
+    )
+    endpoint = next(route for route in router.routes if route.path == "/auth/login").endpoint
+
+    release_started = asyncio.Event()
+    original_release = limiter.release
+
+    async def gated_release(reservation):
+        release_started.set()
+        await asyncio.sleep(0.05)
+        return await original_release(reservation)
+
+    limiter.release = gated_release
+    request = Request(
+        {"type": "http", "method": "POST", "client_ip": "203.0.113.9", "headers": []}
+    )
+    body = LoginRequest(email="a@example.com", password="secret")
+    task = asyncio.create_task(endpoint(request, body, Response()))
+    await release_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.1)
+
+    assert limiter.bucket_count == 0
+
+
+async def test_create_user_lowercases_email_at_the_write():
+    """The write must match get_by_email's lowercase lookup."""
+    users = FakeUserRepository()
+    user = await users.create_user("Mixed@Example.COM")
+    assert user.email == "mixed@example.com"
+    assert (await users.get_by_email("mixed@example.com")).id == user.id

@@ -3,7 +3,7 @@
 Subclasses provide the ``repo``, ``user_id``, and ``other_user_id`` fixtures.
 ``repo`` must satisfy the MemoryRepository interface (create_memory,
 find_active_by_hash, get_active, list_active, search_candidates,
-most_important_active, soft_delete). ``user_id``/``other_user_id`` must be
+soft_delete). ``user_id``/``other_user_id`` must be
 usable as the foreign key on a real (or faked) users row.
 
 Retrieval is one operation returning both ranked pools, so the tests reach it
@@ -280,7 +280,7 @@ class MemoryRepositoryContract:
         assert stats["by_category"] == {"fact": 1}
         assert stats["volume_bytes"] > 0
 
-    async def test_count_active_and_statistics_exclude_expired(self, repo, user_id):
+    async def test_statistics_exclude_expired(self, repo, user_id):
         past = datetime.now(UTC) - timedelta(seconds=1)
         await repo.create_memory(
             user_id,
@@ -293,7 +293,6 @@ class MemoryRepositoryContract:
             ),
         )
 
-        assert await repo.count_active(user_id) == 1
         stats = await repo.statistics(user_id)
         assert stats["active"] == 1
         # Expired rows are retained, not superseded or forgotten: they must
@@ -1430,47 +1429,6 @@ class MemoryRepositoryContract:
         )
         assert (await repo.get_active(user_id, foreign.id)).embedding_model == model
 
-    async def test_count_active_visible_follows_the_visibility_filter(self, repo, user_id):
-        await repo.create_memory(
-            user_id, **self._kwargs(content="count global", content_hash=_hash("count-g"))
-        )
-        await repo.create_memory(
-            user_id,
-            **self._kwargs(
-                content="count alpha",
-                content_hash=_hash("count-a"),
-                scope="project",
-                project="alpha",
-            ),
-        )
-        retired = await repo.create_memory(
-            user_id,
-            **self._kwargs(
-                content="count retired",
-                content_hash=_hash("count-r"),
-                scope="project",
-                project="alpha",
-            ),
-        )
-        await repo.soft_delete(user_id, retired.id)
-
-        assert (
-            await repo.count_active_visible(user_id, visibility=MemoryVisibility.global_only()) == 1
-        )
-        assert (
-            await repo.count_active_visible(
-                user_id,
-                visibility=MemoryVisibility.from_filters(scope=None, project="alpha"),
-            )
-            == 2
-        )
-        assert (
-            await repo.count_active_visible(
-                user_id, visibility=MemoryVisibility.project_only("beta")
-            )
-            == 0
-        )
-
     async def test_reassign_project_moves_non_colliding_and_reports_conflicts(
         self, repo, user_id, other_user_id
     ):
@@ -2037,59 +1995,6 @@ class MemoryRepositoryContract:
         )
         assert await repo.related_to(user_id, seed.id, limit=10, min_similarity=0.9) == []
 
-    # -- most_important_active ------------------------------------------
-
-    async def test_most_important_active_excludes_expired(self, repo, user_id):
-        past = datetime.now(UTC) - timedelta(seconds=1)
-        kept = await repo.create_memory(
-            user_id, **self._kwargs(importance=9, content_hash=_hash("mi-kept"))
-        )
-        await repo.create_memory(
-            user_id,
-            **self._kwargs(importance=10, content_hash=_hash("mi-expired"), expires_at=past),
-        )
-
-        results = await repo.most_important_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
-        assert [m.id for m in results] == [kept.id]
-
-    async def test_most_important_active_orders_by_importance_then_recency(self, repo, user_id):
-        high_old = await repo.create_memory(
-            user_id, **self._kwargs(importance=8, content_hash=_hash("mi-high-old"))
-        )
-        await asyncio.sleep(0.01)
-        low_new = await repo.create_memory(
-            user_id, **self._kwargs(importance=2, content_hash=_hash("mi-low-new"))
-        )
-
-        results = await repo.most_important_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
-        ids = [m.id for m in results]
-        # Higher importance ranks first regardless of recency.
-        assert ids.index(high_old.id) < ids.index(low_new.id)
-
-        equal_a = await repo.create_memory(
-            user_id, **self._kwargs(importance=5, content_hash=_hash("mi-equal-a"))
-        )
-        await asyncio.sleep(0.01)
-        equal_b = await repo.create_memory(
-            user_id, **self._kwargs(importance=5, content_hash=_hash("mi-equal-b"))
-        )
-
-        results = await repo.most_important_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
-        ids = [m.id for m in results]
-        # Same importance: newer created_at ranks first.
-        assert ids.index(equal_b.id) < ids.index(equal_a.id)
-
-        # NOTE: the id-ascending tiebreak (equal importance AND equal
-        # created_at) is not reachable through this public interface: both
-        # adapters stamp created_at from the wall clock at insert time, so
-        # two rows created in the same test never share a timestamp.
-
     # -- soft_delete ---------------------------------------------------
 
     async def test_soft_delete_true_once_then_false(self, repo, user_id):
@@ -2108,7 +2013,7 @@ class MemoryRepositoryContract:
         assert await repo.soft_delete(other_user_id, row.id) is False
         assert await repo.get_active(user_id, row.id) is not None
 
-    async def test_soft_delete_removes_from_list_search_and_most_important(self, repo, user_id):
+    async def test_soft_delete_removes_from_list_and_search(self, repo, user_id):
         vec = _embedding(42)
         row = await repo.create_memory(
             user_id,
@@ -2134,8 +2039,3 @@ class MemoryRepositoryContract:
             repo, user_id, vec, visibility=MemoryVisibility("all"), limit=10
         )
         assert row.id not in {r.memory.id for r in vector_results}
-
-        important = await repo.most_important_active(
-            user_id, visibility=MemoryVisibility("all"), limit=10
-        )
-        assert row.id not in {m.id for m in important}

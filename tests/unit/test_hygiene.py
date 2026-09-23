@@ -39,7 +39,7 @@ def parse(argv: list[str]):
 
 
 async def test_clusters_similar_memories_within_one_bucket():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     v = [1.0, 0.0, 0.0]
     await _seed(memories, content="user prefers dark mode", embedding=v)
@@ -59,7 +59,7 @@ async def test_clusters_similar_memories_within_one_bucket():
 
 
 async def test_clusters_never_cross_scope_project_buckets():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     v = [1.0, 0.0, 0.0]
     # Two memories in the global bucket, one in project "alpha" -- all three
@@ -80,7 +80,7 @@ async def test_clusters_never_cross_scope_project_buckets():
 
 
 async def test_contradiction_candidate_flags_asymmetric_negation_cue():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     v = [1.0, 0.0, 0.0]
     await _seed(memories, content="user prefers dark mode", embedding=v)
@@ -99,7 +99,7 @@ async def test_contradiction_candidate_flags_asymmetric_negation_cue():
 
 
 async def test_no_contradiction_when_cues_appear_on_both_sides_or_neither():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     v = [1.0, 0.0, 0.0]
     await _seed(memories, content="user prefers dark mode always", embedding=v)
@@ -111,7 +111,7 @@ async def test_no_contradiction_when_cues_appear_on_both_sides_or_neither():
 
 
 async def test_cap_is_applied_and_reported_when_hit():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     for i in range(3):
         await _seed(memories, content=f"fact number {i}", embedding=[float(i), 1.0, 0.0])
@@ -126,7 +126,7 @@ async def test_cap_is_applied_and_reported_when_hit():
 
 
 async def test_no_cap_reported_when_under_limit():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     await _seed(memories, content="one fact", embedding=[1.0, 0.0, 0.0])
 
@@ -137,7 +137,7 @@ async def test_no_cap_reported_when_under_limit():
 
 
 async def test_model_mismatch_is_plumbed_and_warned_in_report():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     v = [1.0, 0.0, 0.0]
     await _seed(memories, content="fact under model one", embedding=v, embedding_model="model-a")
@@ -151,7 +151,7 @@ async def test_model_mismatch_is_plumbed_and_warned_in_report():
 
 
 async def test_no_model_mismatch_warning_when_single_model():
-    container, fakes = build_test_container()
+    _container, fakes = build_test_container()
     memories = fakes["memories"]
     v = [1.0, 0.0, 0.0]
     await _seed(memories, content="one fact", embedding=v)

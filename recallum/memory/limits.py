@@ -151,6 +151,17 @@ class MemoryLimits(BaseModel):
     # trigram threshold.
     trigram_min_word_similarity: float = Field(default=0.4, gt=0.0, le=1.0)
 
+    # Skill write/match ceilings. Normalization happens first, so these bound
+    # the stored/searched text, not the raw wire bytes.
+    skill_name_max_chars: int = Field(default=200, gt=0)
+    skill_description_max_chars: int = Field(default=2000, gt=0)
+    skill_constraints_max_chars: int = Field(default=4000, gt=0)
+    skill_step_max_chars: int = Field(default=2000, gt=0)
+    skill_steps_max_items: int = Field(default=50, gt=0)
+    skill_trigger_max_chars: int = Field(default=200, gt=0)
+    skill_triggers_max_items: int = Field(default=50, gt=0)
+    skill_query_max_chars: int = Field(default=2000, gt=0)
+
     # Cosine floor for a vector-search candidate before RRF. None disables
     # the predicate and keeps the nearest-neighbour pool. Two real-stack
     # matrices (2026-08-30) found no threshold that cut irr@5 without

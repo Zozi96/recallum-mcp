@@ -144,8 +144,12 @@ def create_auth_router(
         async def release_reservations() -> None:
             if limiter is None:
                 return
-            for reservation in reservations:
-                await asyncio.shield(limiter.release(reservation))
+            # Shield each release AND start them all first: a cancellation
+            # must not strand the reservations a sequential loop never reached.
+            await asyncio.gather(
+                *(asyncio.shield(limiter.release(reservation)) for reservation in reservations),
+                return_exceptions=True,
+            )
 
         if limiter is not None:
             client_ip = attributed_client_ip(request.scope)
@@ -157,6 +161,13 @@ def create_auth_router(
                         (f"login-ip:{client_ip}", login_ip_attempts, login_ip_window_seconds),
                         (
                             f"login-account:{client_ip}:{account_hash}",
+                            login_account_attempts,
+                            login_account_window_seconds,
+                        ),
+                        # IP-independent: credential stuffing rotates source
+                        # addresses, so the account budget must not reset with them.
+                        (
+                            f"login-account-global:{account_hash}",
                             login_account_attempts,
                             login_account_window_seconds,
                         ),

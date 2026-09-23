@@ -61,6 +61,10 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__DATABASE__ECHO` | `false` | SQL statement logging |
 | `RECALLUM__DATABASE__POOL_SIZE` | `5` | Connection pool size |
 | `RECALLUM__DATABASE__MAX_OVERFLOW` | `5` | Pool overflow |
+| `RECALLUM__DATABASE__POOL_TIMEOUT_SECONDS` | `30` | Pool checkout deadline |
+| `RECALLUM__DATABASE__CONNECT_TIMEOUT_SECONDS` | `5` | asyncpg connect deadline |
+| `RECALLUM__DATABASE__COMMAND_TIMEOUT_SECONDS` | `30` | asyncpg command deadline |
+| `RECALLUM__DATABASE__STATEMENT_TIMEOUT_SECONDS` | `30` | Server-side statement_timeout |
 | `RECALLUM__OLLAMA__URL` | `http://localhost:11434` | Ollama base URL |
 | `RECALLUM__OLLAMA__MODEL` | `embeddinggemma:300m-qat-q4_0` | Embedding model |
 | `RECALLUM__OLLAMA__TIMEOUT_SECONDS` | `30` | Embedding timeout |

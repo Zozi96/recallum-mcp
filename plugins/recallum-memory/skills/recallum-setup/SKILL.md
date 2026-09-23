@@ -169,7 +169,7 @@ native entry takes precedence over any broken plugin-bundled MCP definition with
    grok mcp doctor recallum
    ```
 
-   Expect handshake OK and nine tools discovered.
+   Expect handshake OK and fifteen tools discovered.
 4. Export `RECALLUM_API_KEY` in the environment that launches Grok, then start a **new** session.
 5. Optional: validate the plugin with `grok plugin validate <repo-root>/plugins/recallum-memory`.
 

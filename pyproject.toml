@@ -56,7 +56,16 @@ line-length = 100
 target-version = "py314"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests spawn trusted local binaries (docker, granian, pytest), use
+# non-crypto random for fake vectors, and pass dummy credentials as
+# defaults — none of that is a shipped attack surface.
+"tests/**" = ["S101", "S105", "S106", "S107", "S110", "S310", "S311", "S603", "S607", "S608", "ASYNC"]
+# Dev-only helper scripts launch local CLIs; they never handle untrusted input.
+"scripts/**" = ["S310", "S603", "S607"]
+"recallum/migrations/**" = ["S608"]
 
 [tool.mypy]
 python_version = "3.14"

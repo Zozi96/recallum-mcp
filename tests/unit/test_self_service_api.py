@@ -733,7 +733,7 @@ def test_reconfirm_flips_stale_status_and_is_visible_on_read():
 
 
 def test_reconfirm_rejects_unknown_foreign_and_retired_without_changes():
-    container, fakes = build_test_container()
+    container, _fakes = build_test_container()
     alice = _user(container, "alice-rec@example.com")
     bob = _user(container, "bob-rec@example.com")
     app = create_app(Settings(), container)
@@ -754,7 +754,7 @@ def test_reconfirm_rejects_unknown_foreign_and_retired_without_changes():
         _login(client, alice.email)
 
         outcomes = [
-            client.post(f"/api/v1/me/memories/{str(uuid.uuid4())}/reconfirm"),
+            client.post(f"/api/v1/me/memories/{uuid.uuid4()!s}/reconfirm"),
             client.post(f"/api/v1/me/memories/{bob_memory['id']}/reconfirm"),
             client.post(f"/api/v1/me/memories/{retired['id']}/reconfirm"),
         ]

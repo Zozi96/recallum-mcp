@@ -120,9 +120,10 @@ def test_malformed_fastmcp_claims_fail_closed_without_logging_token(
 ):
     monkeypatch.setattr("recallum.auth.middleware.get_access_token", lambda: access_token)
 
-    with caplog.at_level("WARNING", logger="recallum.auth"):
-        with pytest.raises(ToolError, match="invalid authenticated identity"):
-            BearerAuthMiddleware._identity_from_access_token()
+    with caplog.at_level("WARNING", logger="recallum.auth"), pytest.raises(
+        ToolError, match="invalid authenticated identity"
+    ):
+        BearerAuthMiddleware._identity_from_access_token()
 
     assert access_token.token not in caplog.text
 
@@ -151,7 +152,7 @@ async def test_email_administration_flows_resolve_users_and_missing_policy():
     assert listing.user == user
     assert [key.id for key in listing.keys] == [issued.key.id]
 
-    with pytest.raises(UserNotFoundError, match="user 'missing@example.com' does not exist"):
+    with pytest.raises(UserNotFoundError, match=r"user 'missing@example.com' does not exist"):
         await service.issue_key_for_email("missing@example.com")
     with pytest.raises(UserNotFoundError):
         await service.list_keys_for_email("missing@example.com")
@@ -415,7 +416,7 @@ async def test_identity_cache_stays_bounded():
         issued = await service.issue_key(user.id)
         assert await auth.authenticate(issued.plaintext) is not None
 
-    assert len(auth._cache) <= 4  # noqa: SLF001 - the bound is the point
+    assert len(auth._cache) <= 4
 
 
 async def test_authentication_still_rejects_invalid_and_revoked_keys_without_writing():

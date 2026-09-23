@@ -36,12 +36,15 @@ El sistema MUST permitir filtrar recuperación por ámbito global, proyecto y ca
 El sistema MUST generar contexto compacto con memorias globales y del proyecto respetando límites de
 cantidad y caracteres, MUST aceptar un foco de tarea opcional que incorpore memorias relevantes a
 ese foco antepuestas dentro de su propia categoría sin alterar el orden de categorías ni el
-presupuesto del snapshot categorizado, MUST anteponer un bloque de perfil materializado bajo un
-sub-presupuesto reservado que el foco y la selección por importancia MUST NOT desalojar, MUST
-excluir del snapshot categorizado los identificadores ya presentes en el perfil para no duplicar
-ítems, y MUST informar cuántas memorias activas visibles quedaron fuera del presupuesto total.
-La respuesta de contexto MUST incluir metadatos del perfil (disponibilidad, `built_at` e integridad
-cuando el perfil está disponible).
+presupuesto del snapshot categorizado, y MUST anteponer un bloque de perfil materializado bajo un
+sub-presupuesto reservado. Ese bloque MUST contener exclusivamente static cuando el foco normalizado
+no sea vacío, y static más dynamic por uso reciente cuando no haya foco. El foco y la selección
+por importancia MUST NOT desalojar ítems static ya admitidos dentro del presupuesto reservado.
+El sistema MUST excluir del snapshot categorizado únicamente los identificadores realmente servidos
+en el perfil para no duplicar ítems; vaciar dynamic por foco MUST NOT excluir sus antiguos candidatos
+de la recuperación ordinaria. MUST informar cuántas memorias activas visibles quedaron fuera del
+presupuesto total. La respuesta de contexto MUST incluir metadatos del perfil (disponibilidad,
+`built_at` e integridad cuando el perfil está disponible).
 
 #### Scenario: Iniciar sesión de proyecto
 - **WHEN** un agente llama `context` con un proyecto válido
@@ -49,7 +52,7 @@ cuando el perfil está disponible).
 
 #### Scenario: Perfil no desalojado por el foco
 - **WHEN** un agente llama `context` con un foco de tarea y un presupuesto ajustado
-- **THEN** los ítems del perfil caben según el sub-presupuesto reservado antes de aplicar el foco y la importancia al resto, y el foco no elimina ítems del perfil ya incluidos
+- **THEN** los ítems static caben según el sub-presupuesto reservado antes de aplicar el foco y la importancia al resto, y el foco no elimina ítems static ya incluidos; dynamic está vacío
 
 #### Scenario: Sin duplicar perfil en grupos
 - **WHEN** una memoria aparece en el perfil materializado de la respuesta
@@ -61,23 +64,35 @@ cuando el perfil está disponible).
 
 #### Scenario: Contexto con foco de tarea
 - **WHEN** un agente llama `context` con un foco de tarea
-- **THEN** el resultado incluye además memorias recuperadas por relevancia híbrida frente a ese foco, deduplicadas contra el perfil y contra la selección por importancia, y antepuestas dentro de su categoría en el snapshot categorizado para sobrevivir al presupuesto restante
+- **THEN** el resultado incluye además memorias recuperadas por relevancia híbrida frente a ese foco, deduplicadas contra el perfil servido y contra la selección por importancia, y antepuestas dentro de su categoría en el snapshot categorizado para sobrevivir al presupuesto restante
+
+#### Scenario: Recencia ajena no desplaza un hecho pertinente
+- **WHEN** existen una restricción que ocupa una plaza static, un hecho reciente sin coincidencia con el foco y un hecho que sí coincide, ambos de categoría fact, y `max_items=2` con espacio suficiente en caracteres
+- **THEN** la respuesta enfocada sirve la restricción en static y el hecho pertinente en el grupo fact; el hecho reciente ajeno no consume una plaza reservada
+
+#### Scenario: Candidato dynamic pertinente sigue recuperable
+- **WHEN** un hecho usado recientemente coincide con el foco y cabe en el presupuesto restante
+- **THEN** puede entrar por la recuperación ordinaria y no se descarta por haber sido candidato dynamic
+
+#### Scenario: Presupuesto agotado por reglas
+- **WHEN** el presupuesto efectivo sólo permite los ítems static admitidos
+- **THEN** los grupos están vacíos, las omisiones son correctas y el sistema no supera el presupuesto para forzar un resultado de foco
 
 #### Scenario: Foco con embeddings caídos
 - **WHEN** se solicita contexto con foco y el servicio de embeddings no está disponible
-- **THEN** la parte enfocada se degrada a relevancia textual y el perfil y el snapshot por importancia se devuelven igualmente cuando estén disponibles
+- **THEN** la parte enfocada se degrada a relevancia textual y el perfil static y el snapshot por importancia se devuelven igualmente cuando estén disponibles, manteniendo dynamic vacío
 
 #### Scenario: Transparencia del presupuesto
 - **WHEN** el presupuesto deja memorias fuera del resultado
-- **THEN** la respuesta informa el total disponible y cuántas quedaron omitidas, además del indicador de truncado
+- **THEN** la respuesta informa el total disponible y cuántas quedaron omitidas, además del indicador de truncado; los ítems no servidos de dynamic no cuentan como entregados
 
 #### Scenario: Ítem largo truncado con marca
 - **WHEN** un ítem no cabe completo en el presupuesto de caracteres restante pero queda espacio razonable
 - **THEN** el sistema incluye el ítem recortado marcándolo como truncado, en lugar de omitirlo y rellenar con ítems menos importantes
 
 #### Scenario: Perfil no disponible
-- **WHEN** el perfil materializado no puede obtenerse ni reconstruirse
-- **THEN** `context` devuelve el snapshot categorizado como hasta ahora e indica perfil no disponible sin fallar la llamada
+- **WHEN** el perfil materializado no puede obtenerse ni reconstruirse por una causa con degradación definida
+- **THEN** `context` devuelve el snapshot categorizado e indica perfil no disponible sin fallar la llamada; un fallo de infraestructura de base de datos conserva su error seguro según el contrato de perfil
 
 ### Requirement: Omisiones de contexto accionables
 El sistema MUST informar, cuando el presupuesto deja memorias fuera del resultado de `context`, un desglose por categoría de cuántas memorias activas visibles de esa categoría quedaron omitidas (sólo aparecen las categorías con al menos una omisión), MUST NOT incluir en ese desglose el contenido de las memorias omitidas, y el bloque de perfil MUST NOT contar como omitido en ninguna categoría.
@@ -110,11 +125,15 @@ Al armar `context`, el sistema MUST observar un único snapshot de base de datos
 - **THEN** el intento de registrar esa exposición ocurre después de materializar el resultado y un fallo de registro no cambia ni retrasa el resultado ya decidido
 
 ### Requirement: Recall no invalida el perfil de context
-Registrar uso de un `recall` MUST NOT obligar al siguiente `context` a reconstruir el perfil materializado. El siguiente `context` MUST poder reflejar esas recuperaciones recientes en el slice dynamic sin tratar el static como desactualizado.
+Registrar uso de un `recall` MUST NOT obligar al siguiente `context` a reconstruir el perfil materializado. El siguiente `context` sin foco MUST poder reflejar esas recuperaciones recientes en el slice dynamic sin tratar el static como desactualizado. Con foco no vacío MUST conservar el mismo static vigente y servir dynamic vacío.
 
 #### Scenario: Context tras recall reusa static
-- **WHEN** un usuario ejecuta `recall` y acto seguido llama `context` sin mutar memorias
+- **WHEN** un usuario ejecuta `recall` y acto seguido llama `context` sin foco y sin mutar memorias
 - **THEN** el static del perfil coincide con la materialización previa y el dynamic puede incluir memorias recién recuperadas según la ventana de uso
+
+#### Scenario: Context enfocado tras recall reusa static
+- **WHEN** un usuario ejecuta `recall` y acto seguido llama `context` con foco sin mutar memorias
+- **THEN** se reutiliza static sin reconstrucción y dynamic está vacío; la memoria recién recuperada sigue sujeta a la selección ordinaria del snapshot
 
 ### Requirement: Context nunca sirve perfil anterior a la última mutación
 Cuando `context` incluye el perfil materializado, la respuesta MUST NOT ser más vieja que la última mutación confirmada del usuario, aunque la reconstrucción del perfil sea diferida. Si la generación materializada difiere de la del corpus, la lectura MUST reconstruir el slice static en el momento antes de responder.

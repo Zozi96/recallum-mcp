@@ -305,19 +305,6 @@ class MemoryRepository:
             .values(memory_generation=User.memory_generation + 1)
         )
 
-    async def count_active(self, user_id: uuid.UUID) -> int:
-        """Count active, non-expired rows inside exactly one user's forced-RLS context."""
-        async with self._sessions.for_user(user_id) as session:
-            return (
-                await session.execute(
-                    select(func.count())
-                    .select_from(Memory)
-                    .where(
-                        Memory.user_id == user_id, Memory.deleted_at.is_(None), _not_expired()
-                    )
-                )
-            ).scalar_one()
-
     async def history(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Sequence[Memory] | None:
         """Return every ancestor oldest-first, or None when the anchor is invisible.
 
@@ -1309,24 +1296,6 @@ class MemoryRepository:
                 focus=CandidatePools(vector=vector, text=text, trigram=trigram),
             )
 
-    async def most_important_active(
-        self,
-        user_id: uuid.UUID,
-        *,
-        visibility: MemoryVisibility,
-        limit: int,
-    ) -> Sequence[Memory]:
-        """Active memories ordered by importance then recency (for context)."""
-        async with self._sessions.for_user(user_id) as session:
-            stmt = (
-                select(Memory)
-                .options(*_light())
-                .where(*self._filters(user_id, visibility=visibility, category=None))
-                .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
-                .limit(limit)
-            )
-            return (await session.execute(stmt)).scalars().all()
-
     async def _similar_active_in_session(
         self,
         session: AsyncSession,
@@ -1850,19 +1819,6 @@ class MemoryRepository:
                 )
                 .values(context_count=Memory.context_count + 1)
             )
-
-    async def count_active_visible(
-        self, user_id: uuid.UUID, *, visibility: MemoryVisibility
-    ) -> int:
-        """Count active rows under a visibility filter (context transparency)."""
-        async with self._sessions.for_user(user_id) as session:
-            return (
-                await session.execute(
-                    select(func.count())
-                    .select_from(Memory)
-                    .where(*self._filters(user_id, visibility=visibility, category=None))
-                )
-            ).scalar_one()
 
     async def reassign_project(
         self,

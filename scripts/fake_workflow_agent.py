@@ -27,7 +27,7 @@ def call(
         data=body,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310
+    with urllib.request.urlopen(request, timeout=3) as response:
         return json.loads(response.read())
 
 

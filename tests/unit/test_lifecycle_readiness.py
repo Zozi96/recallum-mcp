@@ -477,11 +477,13 @@ async def test_each_exposure_validator_failure_yields_nothing_and_cleans_up(vali
 
     first_validator = fail_first if validator == "first" else noop
     second_validator = fail_second if validator == "second" else noop
-    with patch("recallum.app.validate_no_user_inputs", new=first_validator):
-        with patch("recallum.app.validate_only_tools_are_exposed", new=second_validator):
-            with pytest.raises(RuntimeError):
-                async with app.router.lifespan_context(app):
-                    pytest.fail("failed startup yielded")
+    with (
+        patch("recallum.app.validate_no_user_inputs", new=first_validator),
+        patch("recallum.app.validate_only_tools_are_exposed", new=second_validator),
+        pytest.raises(RuntimeError),
+    ):
+        async with app.router.lifespan_context(app):
+            pytest.fail("failed startup yielded")
     assert events == ["http", "engine"]
 
 
@@ -493,10 +495,9 @@ async def test_validator_failure_does_not_create_untouched_http_or_engine() -> N
     async def fail(*_args):
         raise RuntimeError("validator")
 
-    with patch("recallum.app.validate_no_user_inputs", new=fail):
-        with pytest.raises(RuntimeError):
-            async with app.router.lifespan_context(app):
-                pytest.fail("failed startup yielded")
+    with patch("recallum.app.validate_no_user_inputs", new=fail), pytest.raises(RuntimeError):
+        async with app.router.lifespan_context(app):
+            pytest.fail("failed startup yielded")
 
     assert container.http_client.initialized is False
     assert container.engine.initialized is False
@@ -766,7 +767,9 @@ def test_default_readiness_deadlines_are_wired_without_waiting_for_them() -> Non
         observed.append(timeout)
         return await original_wait_for(awaitable, timeout)
 
-    with patch("recallum.app.asyncio.wait_for", new=record_wait_for):
-        with TestClient(create_app(Settings(), container)) as client:
-            assert client.get("/readyz").status_code == 200
+    with (
+        patch("recallum.app.asyncio.wait_for", new=record_wait_for),
+        TestClient(create_app(Settings(), container)) as client,
+    ):
+        assert client.get("/readyz").status_code == 200
     assert sorted(observed) == [2.0, 2.0, 3.0]

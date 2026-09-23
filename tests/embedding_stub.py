@@ -42,13 +42,13 @@ class EmbeddingStubServer:
         model = self.model
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 if self.path.rstrip("/") == "/api/version":
                     self._json(200, {"version": "stub"})
                     return
                 self.send_error(404)
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 if self.path.rstrip("/") != "/api/embed":
                     self.send_error(404)
                     return
@@ -75,7 +75,7 @@ class EmbeddingStubServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            def log_message(self, format: str, *args: object) -> None:
                 del format, args
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

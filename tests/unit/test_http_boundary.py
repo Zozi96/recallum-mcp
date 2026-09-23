@@ -719,8 +719,10 @@ async def test_distinct_granian_proxy_smoke_preserves_redirect_method_body_and_a
     }
     async with _granian(upstream_app) as upstream:
         forwarding_proxy = _ForwardingProxy(upstream)
-        async with _granian(forwarding_proxy) as proxy:
-            async with httpx.AsyncClient(base_url=proxy, follow_redirects=True) as client:
+        async with (
+            _granian(forwarding_proxy) as proxy,
+            httpx.AsyncClient(base_url=proxy, follow_redirects=True) as client,
+        ):
                 initialized = await client.post("/mcp", json=_initialize_request(), headers=headers)
                 assert len(initialized.history) == 1
                 assert initialized.history[0].status_code == 308
@@ -1215,6 +1217,7 @@ async def test_mounted_login_reserves_ip_and_account_atomically_and_recovers(
     account_hash = hashlib.sha256(email.strip().lower().encode()).hexdigest()
     ip_key = "login-ip:198.51.100.44"
     account_key = f"login-account:198.51.100.44:{account_hash}"
+    global_key = f"login-account-global:{account_hash}"
 
     async with app.router.lifespan_context(app):
         transport = httpx2.ASGITransport(app=app, client=("198.51.100.44", 50002))
@@ -1230,9 +1233,10 @@ async def test_mounted_login_reserves_ip_and_account_atomically_and_recovers(
             assert sorted(result.status_code for result in first_wave) == [401, 401, 429]
             rejected = next(result for result in first_wave if result.status_code == 429)
             assert rejected.headers["Retry-After"] == "10"
-            assert set(limiter._buckets) == {ip_key, account_key}
+            assert set(limiter._buckets) == {ip_key, account_key, global_key}
             assert limiter._buckets[ip_key].count == 2
             assert limiter._buckets[account_key].count == 2
+            assert limiter._buckets[global_key].count == 2
             assert all(email not in key and password not in key for key in limiter._buckets)
 
             now[0] = 10.0
@@ -1240,6 +1244,7 @@ async def test_mounted_login_reserves_ip_and_account_atomically_and_recovers(
             assert recovered_failure.status_code == 401
             assert limiter._buckets[ip_key].count == 1
             assert limiter._buckets[account_key].count == 1
+            assert limiter._buckets[global_key].count == 1
 
             mode[0] = "success"
             successful = await login()
@@ -1248,6 +1253,7 @@ async def test_mounted_login_reserves_ip_and_account_atomically_and_recovers(
             # reservation remains, proving failure-retain/success-release.
             assert limiter._buckets[ip_key].count == 1
             assert limiter._buckets[account_key].count == 1
+            assert limiter._buckets[global_key].count == 1
 
     assert len(auth_calls) == 4
 

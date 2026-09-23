@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import deque
@@ -159,10 +160,8 @@ class TelemetryBuffer:
         await self._purge_expired()
         next_purge = time.monotonic() + self._purge_interval
         while True:
-            try:
+            with contextlib.suppress(TimeoutError):
                 await self._wait_for(self._wake.wait(), self._flush_interval)
-            except TimeoutError:
-                pass
             self._wake.clear()
 
             while self._pending:

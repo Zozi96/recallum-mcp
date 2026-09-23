@@ -122,7 +122,7 @@ def test_validation_rejects_unknown_and_sensitive_trace_fields() -> None:
                 }
             ],
         }
-        with pytest.raises(ValueError, match="forbidden|unknown"):
+        with pytest.raises(ValueError, match=r"forbidden|unknown"):
             validate_runs(payload, scenarios)
 
 

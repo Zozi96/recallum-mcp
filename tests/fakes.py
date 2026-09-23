@@ -48,10 +48,14 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 # semantics ship unnoticed. Stemming is pinned in the Postgres integration
 # tests instead.
 _STOPWORDS = frozenset(
-    """a an and are as at be by do does for from had has have how i if in is it
-    its me my no not of on or our so than that the their them then there these
-    they this to too very was we were what when where which who why will with
-    you your""".split()
+    [
+        "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for",
+        "from", "had", "has", "have", "how", "i", "if", "in", "is", "it", "its",
+        "me", "my", "no", "not", "of", "on", "or", "our", "so", "than", "that",
+        "the", "their", "them", "then", "there", "these", "they", "this", "to",
+        "too", "very", "was", "we", "were", "what", "when", "where", "which",
+        "who", "why", "will", "with", "you", "your",
+    ]
 )
 
 
@@ -106,10 +110,12 @@ class ScriptedEmbeddingClient:
         self.vectors = vectors
         self.available = available
         self.model = model
-        self.dimensions = (
-            len(next(iter(vectors.values()))) if vectors else 0
-        )
         self.embedded_texts: list[str] = []
+
+    @property
+    def dimensions(self) -> int:
+        # Tests inject ``vectors`` after construction; resolve lazily.
+        return len(next(iter(self.vectors.values()))) if self.vectors else 0
 
     async def embed(self, text: str) -> list[float]:
         if not self.available:
@@ -781,11 +787,6 @@ class FakeMemoryRepository:
         memory.embedding_model = model
         return True
 
-    async def count_active_visible(
-        self, user_id: uuid.UUID, *, visibility: MemoryVisibility
-    ) -> int:
-        return len(self._filtered(user_id, visibility, None))
-
     async def get_profile(self, user_id: uuid.UUID, *, project: str | None = None) -> Any:
         key = (user_id, project or "")
         row = self.profiles.get(key)
@@ -1028,18 +1029,6 @@ class FakeMemoryRepository:
         self._bump(user_id)
         return replacement
 
-    async def most_important_active(
-        self,
-        user_id: uuid.UUID,
-        *,
-        visibility: MemoryVisibility,
-        limit: int,
-    ) -> Sequence[Memory]:
-        # Matches Postgres' ORDER BY importance DESC, created_at DESC, id ASC.
-        rows = sorted(self._filtered(user_id, visibility, None), key=lambda m: str(m.id))
-        rows.sort(key=lambda m: (m.importance, m.created_at), reverse=True)
-        return rows[:limit]
-
     async def soft_delete(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> bool:
         memory = self.rows.get(memory_id)
         if memory is None or memory.user_id != user_id or memory.is_deleted:
@@ -1047,9 +1036,6 @@ class FakeMemoryRepository:
         memory.deleted_at = datetime.now(UTC)
         self._bump(user_id)
         return True
-
-    async def count_active(self, user_id: uuid.UUID) -> int:
-        return len(self._active(user_id))
 
     async def history(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Sequence[Memory] | None:
         anchor = self.rows.get(memory_id)
@@ -1115,7 +1101,7 @@ class FakeMemoryRepository:
         else:
             ordered = [user.id for user in await users.list_users()]
         page = ordered[offset : offset + limit]
-        return [(user_id, await self.count_active(user_id)) for user_id in page], len(ordered)
+        return [(user_id, len(self._active(user_id))) for user_id in page], len(ordered)
 
     async def has_any_model_mismatch(self, model: str) -> bool:
         return any(
@@ -1285,7 +1271,7 @@ class FakeUserRepository:
             return None
         user = User(
             id=uuid.uuid4(),
-            email=email,
+            email=email.lower(),
             created_at=datetime.now(UTC),
             password_hash=None,
             is_admin=False,

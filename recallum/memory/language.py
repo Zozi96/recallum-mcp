@@ -63,9 +63,11 @@ _NON_ENGLISH_STOPWORDS = frozenset(
 _DIACRITIC_CHARS = re.compile(r"[áéíóúñüàèìòùâêîôûçãõ]", re.IGNORECASE)
 
 # A "word" inside a token that survived the code-ish filter: letters (incl.
-# accented, but not the × / ÷ symbols that fall inside the naive À-ÿ range)
+# accented, but not the × / ÷ symbols inside the naive À-ÿ range)  # noqa: RUF003
 # and internal apostrophes/hyphens, so contractions count as one.
-_WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’-][A-Za-zÀ-ÖØ-öø-ÿ]+)*")
+_WORD_RE = re.compile(
+    r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’-][A-Za-zÀ-ÖØ-öø-ÿ]+)*"  # noqa: RUF001 — curly quote is deliberate
+)
 
 # Raw (punctuation-attached) tokens that look identifier-, path-, command- or
 # code-like rather than prose. These are dropped whole -- not just stripped of
@@ -135,10 +137,7 @@ def looks_non_english(content: str) -> bool:
         return True
 
     diacritic_hits = len(_DIACRITIC_CHARS.findall(content))
-    if diacritic_hits >= 2 and non_english_hits >= 1:
-        return True
-
-    return False
+    return bool(diacritic_hits >= 2 and non_english_hits >= 1)
 
 
 LANGUAGE_WARNING = (

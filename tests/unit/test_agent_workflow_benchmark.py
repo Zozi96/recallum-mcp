@@ -200,7 +200,7 @@ def test_probe_rejects_bad_auth_and_bounded_or_nonobject_requests(
             headers=headers,
         )
         with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(request, timeout=2)  # noqa: S310
+            urllib.request.urlopen(request, timeout=2)
         assert error.value.code == status
 
     rejected(b"{}", "wrong", 401)
