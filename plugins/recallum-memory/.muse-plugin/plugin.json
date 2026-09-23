@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "recallum-memory",
   "displayName": "Recallum Memory",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Persistent, project-aware memory for Muse Code through Recallum. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
   "compat": {
     "source": "native",
