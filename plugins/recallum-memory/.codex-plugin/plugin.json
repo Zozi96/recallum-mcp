@@ -10,8 +10,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Recallum Memory",
-    "composerIcon": "./assets/icon.svg",
-    "logo": "./assets/icon.svg",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png",
     "shortDescription": "Recall reusable project context across Codex sessions",
     "longDescription": "Load concise project context at session start and preserve verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
     "developerName": "Zozi",

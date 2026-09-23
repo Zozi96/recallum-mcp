@@ -9,7 +9,7 @@
   "homepage": "https://github.com/Zozi96/recallum-mcp",
   "repository": "https://github.com/Zozi96/recallum-mcp",
   "license": "MIT",
-  "logo": "assets/icon.svg",
+  "logo": "https://raw.githubusercontent.com/Zozi96/recallum-mcp/main/plugins/recallum-memory/assets/icon.png",
   "keywords": [
     "cursor",
     "memory",
