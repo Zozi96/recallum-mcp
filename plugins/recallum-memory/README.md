@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Recallum" width="132" height="132" />
+  <img src="assets/icon.svg" alt="Recallum" width="132" height="132" />
 </p>
 
 # Recallum Memory plugin
