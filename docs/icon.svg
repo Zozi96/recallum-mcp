@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Recallum">
+  <rect width="128" height="128" rx="28" fill="#14122B"/>
+  <!-- low-poly "R": a memory reassembling from facets -->
+  <g stroke="#14122B" stroke-width="1.5" stroke-linejoin="round">
+    <!-- stem -->
+    <path fill="#8B7BFF" d="M34 26h18L34 50z"/>
+    <path fill="#6D5DFC" d="M52 26v24H34z"/>
+    <path fill="#5B8CFF" d="M34 50h18L34 76z"/>
+    <path fill="#4A6FF0" d="M52 50v26H34z"/>
+    <path fill="#3FA8E8" d="M34 76h18L34 102z"/>
+    <path fill="#2F8FD8" d="M52 76v26H34z"/>
+    <!-- bowl -->
+    <path fill="#A08CFF" d="M52 26h24L52 40z"/>
+    <path fill="#7C6CFF" d="M76 26 52 40h20z"/>
+    <path fill="#9B7BFF" d="m76 26-4 14 18 6z"/>
+    <path fill="#6A7CFF" d="m72 40 18 6-14 6z"/>
+    <path fill="#4F9BF5" d="m90 46-14 6 8 10z"/>
+    <path fill="#3FC2D8" d="m76 52 8 10-24 4z"/>
+    <path fill="#5B8CFF" d="M52 52h24l-16 14z"/>
+    <path fill="#4A6FF0" d="m52 52 8 14h-8z"/>
+    <!-- leg -->
+    <path fill="#35B6E0" d="M58 66h20l-2 18z"/>
+    <path fill="#2FA0D0" d="m58 66 18 18H66z"/>
+    <path fill="#2FD3C0" d="M66 84h10l18 18z"/>
+    <path fill="#27BFB0" d="m66 84 28 18H74z"/>
+  </g>
+  <!-- drifting shards -->
+  <path fill="#9B7BFF" opacity=".8" d="m98 28 9 6-9 5z"/>
+  <path fill="#3FC2D8" opacity=".7" d="m100 76 7 9h-11z"/>
+  <path fill="#2FD3C0" opacity=".6" d="m104 106 5-6 2 8z"/>
+  <path fill="#6D5DFC" opacity=".6" d="m20 108 7-6 1 9z"/>
+</svg>
