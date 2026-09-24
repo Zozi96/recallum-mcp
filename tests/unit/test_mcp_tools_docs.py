@@ -94,7 +94,7 @@ _SKILL_COUNT_CLAIM_RE = re.compile(
 )
 
 _SKILL_DOCS = (
-    "plugins/recallum-memory/skills/recallum-setup/SKILL.md",
+    ".agents/skills/recallum-setup/SKILL.md",
     "plugins/recallum-memory/skills/recallum-update-harnesses/SKILL.md",
 )
 
@@ -399,7 +399,7 @@ def test_skill_docs_correct_tool_count_claims_pass(tmp_path, count):
 
 def test_reverting_setup_skill_to_nine_tools_fails_naming_document(tmp_path):
     root = _copy_real_docs(tmp_path)
-    skill = root / "plugins/recallum-memory/skills/recallum-setup/SKILL.md"
+    skill = root / ".agents/skills/recallum-setup/SKILL.md"
     text = skill.read_text(encoding="utf-8")
     assert "fifteen tools" in text
     skill.write_text(text.replace("fifteen tools", "nine tools"), encoding="utf-8")

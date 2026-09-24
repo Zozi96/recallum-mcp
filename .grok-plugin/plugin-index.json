@@ -10,10 +10,6 @@
             "description": "Load project context and capture verified reusable knowledge via Recallum."
           },
           {
-            "name": "recallum-setup",
-            "description": "Install, configure, and diagnose Recallum for Cursor, Grok Build, Codex, Claude Code, or Antigravity CLI."
-          },
-          {
             "name": "recallum-update-harnesses",
             "description": "Update the Recallum plugin on every installed harness after a version bump."
           }

@@ -1528,9 +1528,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(entry["version"], manifest["version"])
         components = entry["components"]
         skill_names = {s["name"] for s in components["skills"]}
-        self.assertEqual(
-            skill_names, {"recallum-memory", "recallum-setup", "recallum-update-harnesses"}
-        )
+        self.assertEqual(skill_names, {"recallum-memory", "recallum-update-harnesses"})
         hook_names = {h["name"] for h in components["hooks"]}
         self.assertEqual(hook_names, {"SessionStart", "UserPromptSubmit"})
         self.assertEqual(components["mcpServers"][0]["name"], "recallum")
@@ -1626,7 +1624,7 @@ class ManifestTests(unittest.TestCase):
         caps = manifest["capabilities"]
         self.assertEqual(
             {skill["id"] for skill in caps["skills"]},
-            {"recallum-memory", "recallum-setup", "recallum-update-harnesses"},
+            {"recallum-memory", "recallum-update-harnesses"},
         )
         for skill in caps["skills"]:
             target = PLUGIN_ROOT / skill["path"]
@@ -1660,9 +1658,14 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("muse plugin marketplace", installer)
 
     def test_skills_document_the_tool_prefix_of_each_client(self) -> None:
-        for name in ("recallum-memory", "recallum-setup", "recallum-update-harnesses"):
-            text = (PLUGIN_ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
-            with self.subTest(skill=name):
+        paths = (
+            PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md",
+            REPO_ROOT / ".agents" / "skills" / "recallum-setup" / "SKILL.md",
+            PLUGIN_ROOT / "skills" / "recallum-update-harnesses" / "SKILL.md",
+        )
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(skill=path.parent.name):
                 self.assertIn(CODEX_PREFIX, text)
                 self.assertIn(CLAUDE_PREFIX, text)
                 self.assertIn(GROK_PREFIX, text)
@@ -4174,7 +4177,9 @@ class DoctorTests(unittest.TestCase):
             self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
 
     def test_setup_skill_uses_doctor_for_secret_inspection(self) -> None:
-        skill = (PLUGIN_ROOT / "skills" / "recallum-setup" / "SKILL.md").read_text(encoding="utf-8")
+        skill = (REPO_ROOT / ".agents" / "skills" / "recallum-setup" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("recallum_doctor.py", skill)
         self.assertNotIn("json.load", skill)
         self.assertNotIn("cat ~/.cursor/mcp.json", skill)

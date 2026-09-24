@@ -9,9 +9,8 @@ Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claud
 
 The plugin ships:
 
-- three skills — `recallum-memory` (load context and capture verified reusable knowledge),
-  `recallum-setup` (install and diagnose), and `recallum-update-harnesses` (refresh every
-  installed client after a plugin version bump);
+- two skills — `recallum-memory` (load context and capture verified reusable knowledge) and
+  `recallum-update-harnesses` (refresh every installed client after a plugin version bump);
 - shared hooks — Codex, Claude Code, and Grok wire `SessionStart` plus `UserPromptSubmit`; Cursor
   wires `sessionStart` and adds an always-applied rule as a delivery fallback; Devin may wire
   SessionStart through `.devin/hooks.v1.json` if it supports plugins, but hook dispatch is
@@ -363,8 +362,7 @@ agent mcp list-tools recallum     # Cursor -> Recallum tools discovered
 `claude plugin details` / `grok plugin details` should report the skills and hooks; Grok's healthy
 MCP path is the config.toml entry, not the Claude `userConfig` placeholder.
 
-The `recallum-setup` skill walks the full diagnostic path, including a cross-session check, without
-ever revealing the key.
+`scripts/recallum_doctor.py` walks the full diagnostic path without ever revealing the key.
 
 ## Optional agent-adherence benchmark
 

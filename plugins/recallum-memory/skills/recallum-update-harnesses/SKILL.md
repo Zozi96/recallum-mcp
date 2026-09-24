@@ -7,7 +7,7 @@ description: Updates the Recallum plugin on every installed harness after a plug
 
 Refresh already-installed plugin copies so they match this checkout's
 `plugins/recallum-memory/plugin.json` version. First-time install is
-`recallum-setup`, not this skill.
+`scripts/install.sh`, not this skill.
 
 Never print, echo, interpolate, or store an API key in chat. Do not `cat`,
 `head`, `grep`, or parse `~/.cursor/mcp.json`, `~/.claude/.credentials.json`,
@@ -122,7 +122,7 @@ agy plugin install "$PLUGIN"
 agy plugin validate "$PLUGIN"
 ```
 
-Expect `skills : 3 processed` after this skill ships (was 2). Hooks reporting
+Expect `skills : 2 processed`. Hooks reporting
 `1 processed` is validation only, not dispatch.
 
 ### Muse Code (`muse`)

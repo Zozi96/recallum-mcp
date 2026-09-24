@@ -16,11 +16,6 @@
         "enabledDefault": true
       },
       {
-        "id": "recallum-setup",
-        "path": "skills/recallum-setup/SKILL.md",
-        "enabledDefault": true
-      },
-      {
         "id": "recallum-update-harnesses",
         "path": "skills/recallum-update-harnesses/SKILL.md",
         "enabledDefault": true
