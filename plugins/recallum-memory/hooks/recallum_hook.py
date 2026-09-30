@@ -43,12 +43,16 @@ from urllib.parse import urlsplit, urlunsplit
 # with no lookup step. Muse Code registers the native settings.json server
 # `recallum` as `mcp__recallum__*` too (verified live: sibling servers
 # `codegraph` and `richai` surface as `mcp__codegraph__*` /
-# `mcp__richai__*`), with no lookup step.
+# `mcp__richai__*`), with no lookup step. Factory Droid names MCP tools
+# `server___tool` with a TRIPLE underscore (verified live on droid 0.229.0:
+# `codegraph___codegraph_explore` in an exec session), so `recallum___*`;
+# deferred servers are loaded with ToolSearch.
 CODEX_TOOL_PREFIX = "mcp__recallum__"
 CLAUDE_TOOL_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 CLAUDE_NATIVE_TOOL_PREFIX = "mcp__recallum__"
 GROK_TOOL_PREFIX = "recallum__"
 MUSE_TOOL_PREFIX = "mcp__recallum__"
+DROID_TOOL_PREFIX = "recallum___"
 
 # Opt-in digest configuration. The URL cannot be read from .mcp.json (its
 # ${user_config.*} interpolations are resolved by the client, not by hooks),
@@ -309,6 +313,12 @@ def _tool(name: str) -> str:
       Muse Code 1.3.0), so Muse must be checked before Codex and Claude.
     * ``DEVIN_PROJECT_DIR`` — Devin. Devin sets this during hooks and its
       tool prefix (`mcp__recallum__*`) is identical to Codex's.
+    * ``DROID_PLUGIN_ROOT`` — Factory Droid. Droid sets it (and a
+      ``CLAUDE_PLUGIN_ROOT`` compatibility alias) for plugin hooks, so Droid
+      must be checked before the Claude branch. The VALUE is not a usable
+      path — droid 0.229.0 sets it to ``/PLUGIN_ROOT_NOT_EXPANDED_ERROR``
+      and only expands the literal ``${DROID_PLUGIN_ROOT}`` token inside the
+      hooks.json command string — but its presence identifies the client.
     * ``GROK_PLUGIN_ROOT`` — Grok Build. It also sets ``CLAUDE_PLUGIN_ROOT``
       as a compatibility alias, so Grok must be checked first.
     * ``PLUGIN_ROOT`` — Codex. Codex sets ``PLUGIN_ROOT`` *and*
@@ -327,6 +337,8 @@ def _tool(name: str) -> str:
         return f"{MUSE_TOOL_PREFIX}{name}"
     if os.environ.get("DEVIN_PROJECT_DIR"):
         return f"{CODEX_TOOL_PREFIX}{name}"
+    if os.environ.get("DROID_PLUGIN_ROOT"):
+        return f"{DROID_TOOL_PREFIX}{name}"
     if os.environ.get("GROK_PLUGIN_ROOT"):
         prefixes = [GROK_TOOL_PREFIX]
     elif os.environ.get("PLUGIN_ROOT"):
@@ -341,6 +353,7 @@ def _tool(name: str) -> str:
             CLAUDE_TOOL_PREFIX,
             CLAUDE_NATIVE_TOOL_PREFIX,
             GROK_TOOL_PREFIX,
+            DROID_TOOL_PREFIX,
         ]
     # Preserve order but drop duplicate spellings (native Claude == Codex id).
     seen: set[str] = set()
@@ -365,7 +378,9 @@ def _lookup_hint() -> str:
     builtins. Cursor exposes its tools through Available Tools without a stable
     textual prefix. Codex, Devin, and Muse Code list their MCP tools directly
     and have no lookup step, so the hint is omitted on the Codex, Devin, and
-    Muse paths, mirroring the branches in ``_tool``.
+    Muse paths, mirroring the branches in ``_tool``. Droid names MCP tools
+    `recallum___*` but can keep the server deferred, so its hint names the
+    prefix and the ToolSearch fallback.
     """
     if os.environ.get("CURSOR_PLUGIN_ROOT"):
         return (
@@ -376,6 +391,12 @@ def _lookup_hint() -> str:
         return ""
     if os.environ.get("DEVIN_PROJECT_DIR"):
         return ""
+    if os.environ.get("DROID_PLUGIN_ROOT"):
+        return (
+            " In Factory Droid, Recallum tools appear as recallum___*; if they "
+            "are not listed directly, load them with ToolSearch (+recallum or "
+            "select: of the full name) before concluding they are unavailable."
+        )
     if os.environ.get("PLUGIN_ROOT") and not os.environ.get("GROK_PLUGIN_ROOT"):
         return ""
     if os.environ.get("GROK_PLUGIN_ROOT"):

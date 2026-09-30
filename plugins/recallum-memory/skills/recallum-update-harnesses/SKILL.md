@@ -1,6 +1,6 @@
 ---
 name: recallum-update-harnesses
-description: Updates the Recallum plugin on every installed harness after a plugin version bump. Use when the user asks to update harnesses, refresh client plugins, sync Codex/Claude/.agents/Grok/Cursor/Devin/Antigravity/Muse to a new recallum-memory version, or fix VERSION DRIFT from recallum_doctor.
+description: Updates the Recallum plugin on every installed harness after a plugin version bump. Use when the user asks to update harnesses, refresh client plugins, sync Codex/Claude/.agents/Grok/Cursor/Devin/Antigravity/Muse/Droid to a new recallum-memory version, or fix VERSION DRIFT from recallum_doctor.
 ---
 
 # Recallum Update Harnesses
@@ -18,7 +18,7 @@ Tool prefixes (for new-session checks only): Codex `mcp__recallum__`, Claude
 Code plugin `mcp__plugin_recallum-memory_recallum__`, Claude native/Desktop
 `mcp__recallum__`, Grok `recallum__` via `search_tool` / `use_tool`, Cursor
 Available Tools (no stable prefix), Devin `mcp__recallum__`, Muse Code
-`mcp__recallum__`.
+`mcp__recallum__`, Factory Droid `recallum___` (ToolSearch when deferred).
 
 ## 1. Baseline
 
@@ -30,7 +30,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 
 Record `repo_version` and every `VERSION DRIFT` line. Detect CLIs with
 `command -v` for `codex`, `claude`, `grok`, `agent`/`cursor-agent`, `devin`,
-`agy`, `muse`. Skip a client that is not installed.
+`agy`, `muse`, `droid`. Skip a client that is not installed.
 
 `PLUGIN` below is `<repo>/plugins/recallum-memory`. Repo marketplace name is
 `recallum-local`.
@@ -139,6 +139,23 @@ The update changes the hook definition hashes, so both hooks go inactive until
 re-approved — the approve calls are not optional. Do not rewrite
 `settings.json` unless MCP itself is broken. Confirm version in
 `muse plugins list --json`.
+
+### Factory Droid (`droid`)
+
+The marketplace is the repo checkout itself, registered under the **directory
+basename** (for this checkout `recallum-mcp`, not `recallum-local`), so the
+plugin id is `recallum-memory@<repo-basename>`:
+
+```bash
+droid plugin update recallum-memory@recallum-mcp
+droid plugin list
+```
+
+If the update reports the plugin missing, rerun
+`plugins/recallum-memory/scripts/install.sh --target droid` instead. Do not
+rewrite `~/.factory/mcp.json` unless MCP itself is broken. The doctor's
+`Factory Droid` version-drift check reads the installed bundle's `plugin.json`,
+so rerun it after the update.
 
 ## 3. Verify
 

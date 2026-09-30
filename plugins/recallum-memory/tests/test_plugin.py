@@ -377,11 +377,44 @@ elif args[:2] == ["plugins", "approve"]:
 # Unknown subcommands succeed quietly so installer probes stay green.
 """
 
+# Fake `droid` binary for installer target tests. `droid plugin list` and
+# `droid plugin marketplace list` print PLAIN TEXT (no --json exists, verified
+# on droid 0.229.0), so this fake reproduces the exact line shapes the
+# installer parses: two-space indent, marketplace name, `local:<path>` source;
+# plugin id, `[user]` scope, tracked commit. States are driven by
+# FAKE_DROID_MARKETPLACE ("missing"/"registered") and FAKE_DROID_PLUGIN
+# ("missing"/"installed"); every mutation only gets logged.
+FAKE_DROID = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["droid", *args]) + "\\n")
+root = os.environ["EXPECTED_REPO_ROOT"]
+name = os.path.basename(root)
+if args == ["plugin", "marketplace", "list"]:
+    if os.environ.get("FAKE_DROID_MARKETPLACE") == "fail":
+        sys.exit(1)
+    if os.environ.get("FAKE_DROID_MARKETPLACE", "missing") == "registered":
+        print("Registered marketplaces:")
+        print(f'  {name}  (1 plugin)  local:{root}  "recallum-local"')
+    else:
+        print("No marketplaces registered.")
+elif args == ["plugin", "list"]:
+    if os.environ.get("FAKE_DROID_PLUGIN", "missing") == "installed":
+        print("Installed plugins:")
+        print("Active:")
+        print(f"  recallum-memory@{name}  [user]  abc1234")
+    else:
+        print("No plugins installed.")
+# marketplace add/update and plugin install/update succeed quietly.
+"""
+
 CODEX_PREFIX = "mcp__recallum__"
 CLAUDE_PREFIX = "mcp__plugin_recallum-memory_recallum__"
 GROK_PREFIX = "recallum__"
 DEVIN_PREFIX = "mcp__recallum__"
 MUSE_PREFIX = "mcp__recallum__"
+DROID_PREFIX = "recallum___"
 
 
 def run_hook(
@@ -396,6 +429,7 @@ def run_hook(
         "GROK_PLUGIN_ROOT",
         "CURSOR_PLUGIN_ROOT",
         "DEVIN_PROJECT_DIR",
+        "DROID_PLUGIN_ROOT",
         "RECALLUM_MCP_URL",
         "RECALLUM_API_KEY",
     ):
@@ -659,6 +693,7 @@ class HookTests(unittest.TestCase):
             "GROK_PLUGIN_ROOT",
             "CURSOR_PLUGIN_ROOT",
             "DEVIN_PROJECT_DIR",
+            "DROID_PLUGIN_ROOT",
             "RECALLUM_MCP_URL",
             "RECALLUM_API_KEY",
         ):
@@ -702,6 +737,51 @@ class HookTests(unittest.TestCase):
         self.assertNotIn("ToolSearch", context)
         self.assertNotIn("search_tool", context)
         self.assertNotIn("Available Tools", context)
+
+    def test_droid_is_told_the_triple_underscore_tool_name(self) -> None:
+        # Droid sets DROID_PLUGIN_ROOT plus a CLAUDE_PLUGIN_ROOT compatibility
+        # alias, both to the sentinel /PLUGIN_ROOT_NOT_EXPANDED_ERROR (only the
+        # literal ${DROID_PLUGIN_ROOT} token in the command string expands) --
+        # verified live on droid 0.229.0. Droid must win over the Claude alias
+        # so the model is told the recallum___* spelling, not the Claude one.
+        context = self._session_context(
+            {
+                "DROID_PLUGIN_ROOT": "/PLUGIN_ROOT_NOT_EXPANDED_ERROR",
+                "CLAUDE_PLUGIN_ROOT": "/PLUGIN_ROOT_NOT_EXPANDED_ERROR",
+            }
+        )
+        self.assertIn(f"{DROID_PREFIX}context", context)
+        self.assertIn(f"{DROID_PREFIX}recall", context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
+        self.assertNotIn(f"call {CODEX_PREFIX}context", context)
+        self.assertNotIn(f"call {GROK_PREFIX}context", context)
+        self.assertNotIn("Available Tools", context)
+
+    def test_droid_is_told_the_toolsearch_fallback(self) -> None:
+        # Droid can keep an MCP server deferred, so unlike Codex/Devin/Muse the
+        # hint names the ToolSearch fallback (verified: an exec session did not
+        # list a connected server's tools until they were loaded).
+        context = self._session_context(
+            {"DROID_PLUGIN_ROOT": "/PLUGIN_ROOT_NOT_EXPANDED_ERROR"}
+        )
+        self.assertIn("ToolSearch", context)
+        self.assertIn("+recallum", context)
+        self.assertIn("recallum___*", context)
+
+    def test_droid_uses_the_claude_shaped_hook_wire_format(self) -> None:
+        # Droid's SessionStart/UserPromptSubmit output contract is
+        # hookSpecificOutput.additionalContext (Factory hooks docs), not the
+        # flat Cursor shape.
+        result = run_hook(
+            "session",
+            json.dumps({"cwd": "/work/alpha"}),
+            {"DROID_PLUGIN_ROOT": "/PLUGIN_ROOT_NOT_EXPANDED_ERROR"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertIn("hookSpecificOutput", output)
+        self.assertNotIn("additional_context", output)
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "SessionStart")
 
     def test_same_basename_in_different_paths_gets_distinct_local_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1598,6 +1678,7 @@ class ManifestTests(unittest.TestCase):
                     "CLAUDE_NATIVE_TOOL_PREFIX",
                     "GROK_TOOL_PREFIX",
                     "MUSE_TOOL_PREFIX",
+                    "DROID_TOOL_PREFIX",
                 )
             ):
                 exec(line, namespace)  # noqa: S102 - constant assignments only
@@ -1606,6 +1687,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(namespace["CLAUDE_NATIVE_TOOL_PREFIX"], CODEX_PREFIX)
         self.assertEqual(namespace["GROK_TOOL_PREFIX"], GROK_PREFIX)
         self.assertEqual(namespace["MUSE_TOOL_PREFIX"], MUSE_PREFIX)
+        self.assertEqual(namespace["DROID_TOOL_PREFIX"], DROID_PREFIX)
         # Devin reuses the Codex prefix; there is no separate constant.
         self.assertIn("DEVIN_PROJECT_DIR", source)
         self.assertNotIn("DEVIN_TOOL_PREFIX", source)
@@ -1615,6 +1697,14 @@ class ManifestTests(unittest.TestCase):
         self.assertLess(
             source.index("MUSE_PLUGIN_ROOT"),
             source.index('elif os.environ.get("PLUGIN_ROOT")'),
+        )
+        # Droid's triple-underscore prefix is its own constant, and its
+        # discriminator must precede the Claude branch because Droid also sets
+        # a CLAUDE_PLUGIN_ROOT compatibility alias (to an unusable sentinel).
+        self.assertIn("DROID_PLUGIN_ROOT", source)
+        self.assertLess(
+            source.index('if os.environ.get("DROID_PLUGIN_ROOT")'),
+            source.index('elif os.environ.get("CLAUDE_PLUGIN_ROOT")'),
         )
 
     def test_muse_manifest_is_a_native_bundle_without_bundled_mcp(self) -> None:
@@ -1834,6 +1924,13 @@ class ManifestTests(unittest.TestCase):
                     self.assertIn("CLAUDE_PLUGIN_ROOT", hook["command"])
                     self.assertIn("GROK_PLUGIN_ROOT", hook["commandWindows"])
                     self.assertIn("CLAUDE_PLUGIN_ROOT", hook["commandWindows"])
+                    # Droid expands the literal ${DROID_PLUGIN_ROOT} token in
+                    # the command string; its env var is a sentinel, so the
+                    # token must appear on its own (never in a ${VAR:-...}
+                    # fallback, which Droid does not expand).
+                    self.assertIn('"${DROID_PLUGIN_ROOT}"', hook["command"])
+                    self.assertIn("'${DROID_PLUGIN_ROOT}'", hook["commandWindows"])
+                    self.assertNotIn("${DROID_PLUGIN_ROOT:-", hook["command"])
 
 
 class AntigravityMcpConfigTests(unittest.TestCase):
@@ -2080,6 +2177,7 @@ class InstallerTestCase(unittest.TestCase):
         stub_devin: bool = False,
         stub_agy: bool = False,
         stub_muse: bool = False,
+        stub_droid: bool = False,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -2092,6 +2190,7 @@ class InstallerTestCase(unittest.TestCase):
             ("devin", FAKE_DEVIN, stub_devin),
             ("agy", FAKE_AGY, stub_agy),
             ("muse", FAKE_MUSE, stub_muse),
+            ("droid", FAKE_DROID, stub_droid),
         ):
             if not wanted:
                 continue
@@ -2159,6 +2258,7 @@ class InstallerTestCase(unittest.TestCase):
         # written into the temp HOME's pluginSecrets.
         env.pop("RECALLUM_API_KEY", None)
         env.pop(TOKEN_ENV_VAR, None)
+        env.pop("FACTORY_HOME_OVERRIDE", None)
         env.update(
             {
                 # Isolate from any real codex/claude/grok on the developer's PATH.
@@ -2173,6 +2273,8 @@ class InstallerTestCase(unittest.TestCase):
                 "FAKE_CURSOR_MARKETPLACE": cursor_marketplace,
                 "FAKE_AGY_PLUGIN": "missing",
                 "FAKE_MUSE_PLUGIN": "missing",
+                "FAKE_DROID_MARKETPLACE": "missing",
+                "FAKE_DROID_PLUGIN": "missing",
                 "FAKE_AGY_INSTALL_DIR": str(root),
                 "GROK_HOME": str(grok_home),
                 "HOME": str(root),
@@ -2353,7 +2455,7 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "none of the codex, claude, grok, cursor-agent/agent, devin, agy, or muse CLIs",
+                "none of the codex, claude, grok, cursor-agent/agent, devin, agy, muse, or droid CLIs",
                 result.stderr,
             )
             self.assertFalse(log.exists())
@@ -3465,6 +3567,7 @@ class DoctorTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.pop("RECALLUM_API_KEY", None)
+        env.pop("FACTORY_HOME_OVERRIDE", None)
         env.update(
             {
                 "HOME": str(home),
@@ -4987,6 +5090,422 @@ class MuseInstallTests(InstallerTestCase):
             self.assertEqual(data["mcpServers"]["recallum"]["url"], URL)
 
 
+class DroidInstallTests(InstallerTestCase):
+    """Factory Droid installs the plugin from a local marketplace and writes a
+    native user MCP entry to ~/.factory/mcp.json.
+
+    Droid expands ${VAR} in mcp.json headers at connect time (Factory docs +
+    live verification on droid 0.229.0), so like Devin/Grok the config holds
+    an env reference and never the key itself -- these tests assert the
+    sentinel key reaches neither the CLI log nor the written file. The
+    marketplace name for a local path is the directory basename (here
+    "recallum-mcp"), not the manifest name "recallum-local".
+    """
+
+    MARKETPLACE = REPO_ROOT.name  # basename of the checkout: "recallum-mcp"
+    PLUGIN_ID = f"recallum-memory@{MARKETPLACE}"
+
+    def _droid_env(
+        self,
+        root: Path,
+        *,
+        with_key: bool = True,
+        marketplace: str = "missing",
+        plugin: str = "missing",
+    ) -> tuple[dict[str, str], Path]:
+        env, log = self._fake_clis(root, stub_droid=True)
+        env.pop(TOKEN_ENV_VAR, None)
+        if with_key:
+            env["RECALLUM_API_KEY"] = SENTINEL_KEY
+        env["FAKE_DROID_MARKETPLACE"] = marketplace
+        env["FAKE_DROID_PLUGIN"] = plugin
+        return env, log
+
+    @staticmethod
+    def _mcp_config(env: dict[str, str]) -> Path:
+        return Path(env["HOME"]) / ".factory" / "mcp.json"
+
+    def _assert_no_leak(self, result: subprocess.CompletedProcess[str], log: Path) -> None:
+        captured = result.stdout + result.stderr
+        if log.exists():
+            captured += log.read_text(encoding="utf-8")
+        self.assertNotIn(SENTINEL_KEY, captured)
+
+    def test_explicit_droid_target_requires_that_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), stub_droid=False)
+            result = self._run(env, "--url", URL, "--target", "droid", "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("droid CLI is not installed", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_auto_target_installs_droid_when_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, _ = self._droid_env(Path(directory))
+            result = self._run(env, "--url", URL, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: droid plugin marketplace add", result.stdout)
+            self.assertIn("dry-run: droid plugin install", result.stdout)
+            self.assertIn(".factory/mcp.json", result.stdout)
+
+    def test_dry_run_reports_actions_without_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._droid_env(root)
+            result = self._run(env, "--url", URL, "--target", "droid", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: droid plugin marketplace add", result.stdout)
+            self.assertIn(f"dry-run: droid plugin install {self.PLUGIN_ID}", result.stdout)
+            self.assertIn("Bearer ${RECALLUM_API_KEY}", result.stdout)
+            self.assertFalse(self._mcp_config(env).exists())
+            # Read-only probes may run, but no mutation verb may reach the CLI.
+            mutations = [
+                call
+                for call in self._calls(log)
+                if call[1:] != ["plugin", "marketplace", "list"] and call[1:] != ["plugin", "list"]
+            ]
+            self.assertEqual(mutations, [])
+            self._assert_no_leak(result, log)
+
+    def test_installs_marketplace_plugin_and_writes_mcp_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._droid_env(root)
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+
+            calls = self._calls(log)
+            self.assertIn(["droid", "plugin", "marketplace", "list"], calls)
+            self.assertIn(["droid", "plugin", "marketplace", "add", str(REPO_ROOT)], calls)
+            self.assertIn(
+                ["droid", "plugin", "install", self.PLUGIN_ID, "--scope", "user"], calls
+            )
+
+            config_path = self._mcp_config(env)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            entry = config["mcpServers"]["recallum"]
+            self.assertEqual(entry["type"], "http")
+            self.assertEqual(entry["url"], URL)
+            # Droid expands the reference at connect time; the file must hold
+            # no secret -- neither in the config nor anywhere in the output.
+            self.assertEqual(
+                entry["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}"
+            )
+            self.assertNotIn(SENTINEL_KEY, config_path.read_text(encoding="utf-8"))
+            self.assertFalse(entry["oauth"])
+            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+
+    def test_registered_marketplace_and_installed_plugin_are_refreshed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._droid_env(root, marketplace="registered", plugin="installed")
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            calls = self._calls(log)
+            self.assertIn(["droid", "plugin", "update", self.PLUGIN_ID], calls)
+            self.assertNotIn(["droid", "plugin", "marketplace", "add", str(REPO_ROOT)], calls)
+            self.assertNotIn(
+                ["droid", "plugin", "install", self.PLUGIN_ID, "--scope", "user"], calls
+            )
+
+    def test_differing_mcp_entry_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._droid_env(root)
+            config = self._mcp_config(env)
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": "http",
+                                "url": "https://old.example/mcp/",
+                                "headers": {
+                                    "Authorization": "Bearer ${RECALLUM_API_KEY}"
+                                },
+                                "oauth": False,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--force-mcp", result.stderr)
+            self._assert_no_leak(result, log)
+            self.assertNotIn(["droid", "plugin", "marketplace", "add", str(REPO_ROOT)], self._calls(log))
+            self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in self._calls(log)))
+
+    def test_force_replaces_differing_entry_and_preserves_other_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._droid_env(root)
+            config = self._mcp_config(env)
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "other": {
+                                "type": "stdio",
+                                "command": "other-server",
+                                "args": ["serve"],
+                            },
+                            "recallum": {
+                                "type": "http",
+                                "url": "https://old.example/mcp/",
+                                "headers": {"Authorization": "Bearer stale"},
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run(env, "--url", URL, "--target", "droid", "--force-mcp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            data = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(data["mcpServers"]["other"]["command"], "other-server")
+            entry = data["mcpServers"]["recallum"]
+            self.assertEqual(entry["url"], URL)
+            self.assertEqual(
+                entry["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}"
+            )
+            self.assertFalse(entry["oauth"])
+
+    def test_matching_entry_is_left_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._droid_env(root, marketplace="registered", plugin="installed")
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            first = self._mcp_config(env).read_bytes()
+
+            second = self._run(env, "--url", URL, "--target", "droid")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("already matches", second.stdout)
+            self.assertEqual(self._mcp_config(env).read_bytes(), first)
+
+    def test_custom_token_variable_is_persisted_and_referenced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._droid_env(Path(directory))
+            env.pop("RECALLUM_API_KEY")
+            env["MY_RECALLUM_TOKEN"] = SENTINEL_KEY
+            result = self._run(
+                env, "--url", URL, "--target", "droid", "--token-env-var", "MY_RECALLUM_TOKEN"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            entry = json.loads(self._mcp_config(env).read_text())["mcpServers"]["recallum"]
+            self.assertEqual(entry["headers"]["Authorization"], "Bearer ${MY_RECALLUM_TOKEN}")
+            self.assertIn(
+                "export MY_RECALLUM_TOKEN=",
+                (Path(env["HOME"]) / ".config" / "recallum" / "env").read_text(),
+            )
+
+    def test_no_store_leaves_only_reference_and_does_not_persist_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._droid_env(Path(directory))
+            result = self._run(env, "--url", URL, "--target", "droid", "--no-store-api-key")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            entry = json.loads(self._mcp_config(env).read_text())["mcpServers"]["recallum"]
+            self.assertEqual(entry["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}")
+            self.assertFalse((Path(env["HOME"]) / ".config" / "recallum" / "env").exists())
+
+    def test_factory_home_override_locates_native_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._droid_env(Path(directory))
+            env["FACTORY_HOME_OVERRIDE"] = str(Path(directory) / "alternate")
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            self.assertTrue(Path(env["FACTORY_HOME_OVERRIDE"], ".factory", "mcp.json").is_file())
+            self.assertFalse(self._mcp_config(env).exists())
+
+    def test_conflicting_marketplace_does_not_modify_mcp_or_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._droid_env(Path(directory), marketplace="registered")
+            fake = Path(env["HOME"]) / "bin" / "droid"
+            fake.write_text(FAKE_DROID.replace("local:{root}", "local:/other/checkout"))
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("different path", result.stderr)
+            self.assertFalse(self._mcp_config(env).exists())
+            self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in self._calls(log)))
+
+    def test_failing_droid_cli_aborts_with_a_diagnostic_and_no_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._droid_env(Path(directory), marketplace="fail")
+            result = self._run(env, "--url", URL, "--target", "droid")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("'droid plugin marketplace list' failed", result.stderr)
+            self.assertFalse(self._mcp_config(env).exists())
+            self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in self._calls(log)))
+
+    def test_invalid_existing_mcp_json_is_not_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._droid_env(Path(directory))
+            path = self._mcp_config(env)
+            path.parent.mkdir(parents=True)
+            path.write_text("{invalid")
+            result = self._run(env, "--url", URL, "--target", "droid", "--force-mcp")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(path.read_text(), "{invalid")
+            self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in self._calls(log)))
+
+
+class DroidDoctorTests(unittest.TestCase):
+    def _mcp(self, home: Path, *, server: dict | None = None, mode: int = 0o600) -> Path:
+        path = home / ".factory" / "mcp.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if server is None:
+            server = {
+                "type": "http",
+                "url": URL,
+                "headers": {"Authorization": "Bearer ${RECALLUM_API_KEY}"},
+                "oauth": False,
+            }
+        path.write_text(json.dumps({"mcpServers": {"recallum": server}}))
+        path.chmod(mode)
+        return path
+
+    def _plugin(self, home: Path, *, version: str = PLUGIN_VERSION) -> None:
+        factory = home / ".factory"
+        bundle = factory / "plugins" / "cache" / "recallum-memory"
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "plugin.json").write_text(json.dumps({"version": version}))
+        records = factory / "plugins" / "installed_plugins"
+        records.mkdir(parents=True, exist_ok=True)
+        (records / "recallum-memory-user.json").write_text(
+            json.dumps(
+                {
+                    "pluginId": "recallum-memory@recallum-mcp",
+                    "entry": {"scope": "user", "installPath": str(bundle)},
+                }
+            )
+        )
+
+    def _run(self, home: Path, *args: str, token: bool = True) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.pop("FACTORY_HOME_OVERRIDE", None)
+        env.pop("RECALLUM_API_KEY", None)
+        env.update(
+            {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "PATH": str(home / "bin") + ":/usr/bin:/bin",
+            }
+        )
+        if token:
+            env["RECALLUM_API_KEY"] = SENTINEL_KEY
+        return subprocess.run(
+            [str(DOCTOR), *args], cwd=REPO_ROOT, env=env,
+            text=True, capture_output=True, check=False,
+        )
+
+    def test_healthy_plugin_and_native_mcp_are_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._mcp(home)
+            self._plugin(home)
+            result = self._run(home, "--json")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            report = json.loads(result.stdout)
+            droid = report["clients"]["Factory Droid"]
+            self.assertTrue(droid["plugin_present"])
+            self.assertEqual(droid["version"], PLUGIN_VERSION)
+            self.assertEqual(droid["native_mcp"]["auth"], "Bearer ${RECALLUM_API_KEY}")
+            self.assertEqual(droid["native_mcp"]["file_mode"], "0600")
+            self.assertNotIn(SENTINEL_KEY, result.stdout + result.stderr)
+
+    def test_missing_plugin_with_config_is_unhealthy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._mcp(home)
+            result = self._run(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("plugin recallum-memory is not installed", result.stdout)
+
+    def test_plugin_without_config_is_unhealthy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._plugin(home)
+            result = self._run(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("native MCP server recallum is missing", result.stdout)
+
+    def test_invalid_type_oauth_url_and_missing_token_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._mcp(
+                home,
+                server={
+                    "type": "sse",
+                    "url": "http://example.com/mcp",
+                    "oauth": True,
+                    "headers": {"Authorization": "Bearer ${RECALLUM_API_KEY}"},
+                },
+            )
+            self._plugin(home)
+            result = self._run(home, token=False)
+            self.assertEqual(result.returncode, 1)
+            for message in ("type must be http", "oauth=false", "must use HTTPS", "environment variable is unset"):
+                self.assertIn(message, result.stdout)
+
+    def test_literal_secret_is_redacted_and_insecure_mode_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            path = self._mcp(
+                home,
+                server={
+                    "type": "http", "url": URL, "oauth": False,
+                    "headers": {"Authorization": f"Bearer {SENTINEL_KEY}"},
+                },
+                mode=0o644,
+            )
+            self._plugin(home)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+            result = self._run(home, "--json")
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn(SENTINEL_KEY, result.stdout + result.stderr)
+            self.assertIn("literal bearer file is not mode 600", result.stdout)
+
+    def test_version_drift_and_override_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            alternate = home / "alternate"
+            self._mcp(alternate)
+            self._plugin(alternate, version="0.0.0")
+            env = os.environ.copy()
+            env.pop("RECALLUM_API_KEY", None)
+            env.update({
+                "HOME": str(home), "FACTORY_HOME_OVERRIDE": str(alternate),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "PATH": str(home / "bin") + ":/usr/bin:/bin",
+                "RECALLUM_API_KEY": SENTINEL_KEY,
+            })
+            result = subprocess.run(
+                [str(DOCTOR), "--json"], cwd=REPO_ROOT, env=env,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("VERSION DRIFT: Factory Droid", result.stdout)
+            self.assertNotIn(SENTINEL_KEY, result.stdout + result.stderr)
+
+    def test_empty_home_has_no_droid_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run(Path(directory), "--json")
+            report = json.loads(result.stdout)
+            self.assertNotIn("Factory Droid", report["clients"])
+            self.assertFalse(any("Factory Droid" in p for p in report["problems"]))
+
+
 class MuseDoctorTests(unittest.TestCase):
     def _write(self, home: Path, relative: str, contents: str, mode: int = 0o600) -> None:
         path = home / relative
@@ -5050,6 +5569,7 @@ class MuseDoctorTests(unittest.TestCase):
     def _run_doctor(self, home: Path, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.pop("RECALLUM_API_KEY", None)
+        env.pop("FACTORY_HOME_OVERRIDE", None)
         env.update(
             {
                 "HOME": str(home),

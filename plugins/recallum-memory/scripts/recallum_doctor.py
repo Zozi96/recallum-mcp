@@ -776,6 +776,87 @@ def _muse(
     return result
 
 
+def _droid(
+    home: Path, expected: str | None, token_env: str, problems: list[str]
+) -> dict[str, Any]:
+    """Factory Droid: native ``~/.factory/mcp.json`` server plus the plugin
+    installation record under ``~/.factory/plugins/installed_plugins/``.
+
+    The plugin record is read from disk rather than parsed from
+    ``droid plugin list`` because that command prints plain text only (no
+    ``--json``, verified on droid 0.229.0) -- the same file-based approach as
+    the Cursor plugin-cache check. The record's ``installPath`` holds the
+    unpacked bundle, whose root ``plugin.json`` keeps the manifest version, so
+    version drift is checked against that file (Droid itself tracks the
+    marketplace commit, not the semver).
+    """
+    result: dict[str, Any] = {}
+    # FACTORY_HOME_OVERRIDE relocates the whole .factory tree (verified on
+    # droid 0.229.0: `droid mcp` then reads <override>/.factory/mcp.json).
+    override = os.environ.get("FACTORY_HOME_OVERRIDE")
+    factory_home = (Path(override) if override else home) / ".factory"
+    config_path = factory_home / "mcp.json"
+    config = _read_json(config_path)
+    server = _configured_server(config, "mcpServers", "recallum", "Factory Droid", problems)
+    if config_path.is_file() and config is None:
+        problems.append(f"config: Factory Droid MCP file is invalid ({config_path})")
+    elif config is not None and not isinstance(server, dict):
+        problems.append(
+            f"config: Factory Droid recallum server entry is missing ({config_path})"
+        )
+    if isinstance(server, dict):
+        safe = _safe_server(server)
+        result["native_mcp"] = safe
+        auth = safe["auth"]
+        _auth_problem("Factory Droid", auth, token_env, problems)
+        _record_permission(safe, config_path, auth, problems, client="Factory Droid")
+        _endpoint_problem("Factory Droid", server.get("url"), problems, "url")
+        if server.get("type") != "http":
+            problems.append("config: Factory Droid recallum server type must be http")
+        if server.get("oauth") is not False:
+            # Without oauth=false Droid attempts an OAuth discovery flow
+            # against a header-authenticated server that offers none.
+            problems.append(
+                "config: Factory Droid recallum server must set oauth=false "
+                "(header auth; Droid otherwise attempts an OAuth flow)"
+            )
+    records_dir = factory_home / "plugins" / "installed_plugins"
+    record: Any = None
+    if records_dir.is_dir():
+        for path in sorted(records_dir.glob("recallum-memory-*.json")):
+            payload = _read_json(path)
+            plugin_id = payload.get("pluginId") if isinstance(payload, dict) else None
+            if isinstance(plugin_id, str) and plugin_id.startswith("recallum-memory@"):
+                record = payload
+                break
+    if record is not None:
+        entry = record.get("entry") if isinstance(record.get("entry"), dict) else {}
+        # Record fields are local, untrusted JSON. Do not echo an arbitrary
+        # plugin id or scope into a redacted diagnostic report.
+        result["plugin"] = {
+            "scope": entry.get("scope")
+            if entry.get("scope") in ("user", "project", "local")
+            else "unknown"
+        }
+        install_path = entry.get("installPath")
+        manifest_version: Any = None
+        if isinstance(install_path, str) and install_path:
+            manifest = _read_json(Path(install_path) / "plugin.json")
+            if isinstance(manifest, dict):
+                manifest_version = manifest.get("version")
+        _version(result, "Factory Droid", manifest_version, expected, problems)
+        result["plugin_present"] = True
+        if not isinstance(server, dict) and not config_path.is_file():
+            problems.append("config: Factory Droid native MCP server recallum is missing")
+    elif isinstance(server, dict):
+        result["plugin_present"] = False
+        problems.append(
+            "config: Factory Droid plugin recallum-memory is not installed "
+            "(skills/hooks unavailable; native MCP is unaffected)"
+        )
+    return result
+
+
 def _load_expected(repo_root: Path, problems: list[str]) -> str | None:
     manifest = _read_json(repo_root / "plugins" / "recallum-memory" / "plugin.json")
     version = manifest.get("version") if isinstance(manifest, dict) else None
@@ -839,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Devin CLI", _devin(home, expected, args.token_env_var, problems)),
         ("Antigravity CLI", _antigravity(home, expected, args.token_env_var, problems)),
         ("Muse Code", _muse(home, expected, args.token_env_var, problems)),
+        ("Factory Droid", _droid(home, expected, args.token_env_var, problems)),
     ):
         if value:
             report["clients"][client] = value

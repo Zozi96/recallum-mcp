@@ -1,4 +1,4 @@
-# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, and Muse Code)
+# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, Muse Code, and Factory Droid)
 
 Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
@@ -13,7 +13,7 @@ The server exposes fifteen MCP tools: `remember`, `remember_batch`, `recall`,
 (skills), a separate entity from memories.
 
 Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build,
-Devin CLI, Antigravity CLI, and Muse Code. Cursor uses its native marketplace and Settings flow below.
+Devin CLI, Antigravity CLI, Muse Code, and Factory Droid. Cursor uses its native marketplace and Settings flow below.
 Keep credentials in client-owned settings; do not rely on a shell-only export as the sole GUI strategy,
 and verify the setup after restart.
 
@@ -263,6 +263,77 @@ flagged, even when the referenced variable is set), the file's `schema_version` 
 permission mode, and whether the plugin is listed by `muse plugins list` (with version-drift
 check). If `muse` is not on `PATH`, that last sub-check is skipped, not failed.
 
+## Factory Droid
+
+Factory Droid ships as `droid`. Install with the bundled installer:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target droid --url https://recallum.example.com/mcp/
+```
+
+Two registrations, mirroring Claude Code: the plugin bundle (skills/hooks) and the native
+user MCP server. The repo root doubles as the marketplace (Droid falls back to
+`.claude-plugin/marketplace.json` when `.factory-plugin/marketplace.json` is absent) and is
+registered with `droid plugin marketplace add <repo-root>`. For a local path Droid registers
+the **directory basename** — `recallum-mcp` for this checkout, not the manifest name
+`recallum-local` — and installs the plugin as
+`droid plugin install recallum-memory@<basename> --scope user`.
+
+The native MCP entry is written to `~/.factory/mcp.json` (mode `600`;
+`FACTORY_HOME_OVERRIDE` relocates the whole `.factory` tree):
+
+```json
+{
+  "mcpServers": {
+    "recallum": {
+      "type": "http",
+      "url": "https://recallum.example.com/mcp/",
+      "headers": { "Authorization": "Bearer ${RECALLUM_API_KEY}" },
+      "oauth": false
+    }
+  }
+}
+```
+
+`type` must be `http` and `oauth` must be `false`: without it Droid attempts an OAuth
+discovery flow against a header-authenticated server that offers none. Droid expands
+`${VAR}` in header values at connect time, so the file holds no secret — the same class as
+Devin/Grok. The key itself is persisted to `~/.config/recallum/env` (and on Linux
+`~/.config/environment.d/99-recallum.conf` for desktop sessions); with
+`--no-store-api-key` nothing is persisted, so export the variable in the environment that
+launches `droid`.
+
+`--target auto` includes Droid when `droid` is on `PATH`. `--target both` and `--remote` do
+**not** cover this target — the marketplace is always this checkout — and a differing
+existing MCP definition requires `--force-mcp`.
+
+Tools are named `recallum___*` (triple underscore). Droid can keep the server deferred, so
+if the tools are not listed directly, load them with ToolSearch (`+recallum` or `select:` of
+the full name) before concluding they are unavailable.
+
+The shared `hooks.json` wires `SessionStart` (startup|resume|clear|compact) and
+`UserPromptSubmit` for Droid, both under a 5 s timeout and failing open. Droid sets
+`DROID_PLUGIN_ROOT` (plus a `CLAUDE_PLUGIN_ROOT` compatibility alias) for plugin hooks, but
+its value is not a usable path — droid 0.229.0 sets it to
+`/PLUGIN_ROOT_NOT_EXPANDED_ERROR` and only expands the literal `${DROID_PLUGIN_ROOT}` token
+inside the hooks.json command string, which resolves the hook script from the plugin root.
+
+Diagnose with the same read-only doctor used for the other clients:
+
+```bash
+python3 plugins/recallum-memory/scripts/recallum_doctor.py
+```
+
+It reports a `Factory Droid` client: whether the `recallum` server entry is present in
+`~/.factory/mcp.json`, its `url`, the Authorization header, `type`/`oauth` correctness, the
+config file's permission mode, and the plugin installation record under
+`~/.factory/plugins/installed_plugins/` with a version-drift check (the record is read from
+disk because `droid plugin list` prints plain text only). After a `git pull`, rerun
+`install.sh --target droid` (it refreshes an existing install with
+`droid plugin update recallum-memory@<basename>`), then start a new droid session so MCP,
+skills, and hooks reload.
+
 ## Agent usage guidance
 
 Put a short instruction in each project's AGENTS.md / CLAUDE.md so agents
@@ -284,7 +355,8 @@ Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
 `mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` (native/Desktop), Grok Build
 `recallum__*` via `search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in
 Available Tools; Devin CLI uses `mcp__recallum__*`; Muse Code uses `mcp__recallum__*` (listed
-directly, no lookup step). Antigravity CLI's tool-name prefix is **not yet
+directly, no lookup step); Factory Droid uses `recallum___*` (triple underscore, loaded with
+ToolSearch when the server is deferred). Antigravity CLI's tool-name prefix is **not yet
 determined** — no prefix constant exists in `recallum_hook.py` — so prefer skill-driven tool
 discovery over assuming a specific prefix string when working in Antigravity CLI.
 
@@ -322,5 +394,7 @@ if Recallum is unavailable.
 | Grok MCP target is `${user_config.mcp_url}` | Grok does not expand Claude userConfig; run `install.sh --target grok` |
 | Devin tool calls fail with "authentication required" | `RECALLUM_API_KEY` is not exported in the shell that launched Devin; run `install.sh --target devin` to persist it to `~/.config/recallum/env` and source that file before launching Devin |
 | Muse Code tool calls fail with "authentication required" | `settings.json` holds an inert `${...}` placeholder (Muse does not expand env vars); re-run `install.sh --target muse` with a stored key so the literal token is written |
+| Droid tool calls fail with "authentication required" | `RECALLUM_API_KEY` is not exported in the environment that launched `droid`; source `~/.config/recallum/env`, or re-run `install.sh --target droid` without `--no-store-api-key` |
+| `recallum___*` tools not listed in Droid | Droid can keep the server deferred — load them with ToolSearch (`+recallum` or `select:`) before concluding they are unavailable; start a new session first |
 | `recall` returns `mode: degraded_textual` | Ollama unreachable; check `readyz` and the ollama service |
 | Client times out | MCP endpoint is `/mcp/` (trailing slash); HTTPS only via Traefik |

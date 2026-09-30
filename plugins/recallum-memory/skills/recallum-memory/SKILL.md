@@ -26,13 +26,16 @@ Claude Code namespaces a plugin-bundled MCP server:
 | Cursor | Recallum MCP tools in Available Tools | the `context` tool in Available Tools |
 | Devin CLI | `mcp__recallum__` | `mcp__recallum__context` |
 | Muse Code | `mcp__recallum__` | `mcp__recallum__context` |
+| Factory Droid | `recallum___` | `recallum___context` |
 
 Use whichever client tool names are actually present in your tool list; the session hook names the
 forms that may apply. On Claude Code, **either** the plugin prefix or the native `mcp__recallum__`
 prefix (installer dual-write for Desktop ToolSearch) may be present — use ToolSearch (`+recallum`
 or `select:`) before concluding tools are missing. Cursor does not provide a stable textual tool
 prefix, so use the names shown in Available Tools. Devin and Muse Code list MCP tools directly as
-`mcp__recallum__*` and need no lookup step. Below, tools are written unprefixed.
+`mcp__recallum__*` and need no lookup step. Factory Droid names tools `recallum___*` and can keep
+the server deferred, so use ToolSearch (`+recallum` or `select:`) before concluding tools are
+missing. Below, tools are written unprefixed.
 
 ## Skills vs Memories
 
@@ -224,7 +227,8 @@ outdated memory. A memory that agrees with both can be applied without rediscove
 This checkpoint policy is identical for Codex (`mcp__recallum__`), Claude Code
 (`mcp__plugin_recallum-memory_recallum__*` and/or `mcp__recallum__*` via ToolSearch), Grok Build
 (`recallum__` via `search_tool` / `use_tool`), Cursor (the Recallum MCP tools listed in
-Available Tools), and Devin CLI (`mcp__recallum__`): only the tool discovery step differs.
+Available Tools), Devin CLI (`mcp__recallum__`), and Factory Droid (`recallum___*` via ToolSearch
+when the server is deferred): only the tool discovery step differs.
 
 ## Delegation
 

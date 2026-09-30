@@ -5,7 +5,7 @@
 # Recallum Memory plugin
 
 Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claude Code**,
-**Devin CLI**, **Antigravity CLI**, and **Muse Code**, backed by a self-hosted Recallum MCP server.
+**Devin CLI**, **Antigravity CLI**, **Muse Code**, and **Factory Droid**, backed by a self-hosted Recallum MCP server.
 
 The plugin ships:
 
@@ -18,11 +18,14 @@ The plugin ships:
   `agy plugin validate` (`hooks : 1 processed`), but dispatch is unconfirmed — `agy` gates every
   session behind Google OAuth sign-in before any hook is reachable (see docs/clients.md). Muse Code
   wires `SessionStart` plus `UserPromptSubmit` through its native `.muse-plugin` manifest (verified
-  with `muse plugins hook test` on 1.3.0; each event needs its own wrapper script). All fail
+  with `muse plugins hook test` on 1.3.0; each event needs its own wrapper script). Factory Droid
+  runs the same `hooks.json` (`SessionStart` plus `UserPromptSubmit`; the hook script is resolved
+  through the literal `${DROID_PLUGIN_ROOT}` token in the hook command because the variable's
+  value is not a usable path). All fail
   open;
 - the MCP wiring for each client.
 
-One plugin package, seven native entry points — not a Claude-only addon:
+One plugin package, eight native entry points — not a Claude-only addon:
 
 | Client | Marketplace index | Plugin metadata |
 | --- | --- | --- |
@@ -33,6 +36,7 @@ One plugin package, seven native entry points — not a Claude-only addon:
 | Devin CLI | n/a — closed beta; use `devin mcp add` or write `~/.config/devin/mcp_config.json` | n/a — `.devin/hooks.v1.json` if plugin hooks are supported |
 | Antigravity CLI | n/a — `agy plugin install <dir>` (local dir or HTTPS GitHub URL) | `plugin.json` |
 | Muse Code | n/a — `muse plugins install <dir>` (local dir) | `.muse-plugin/plugin.json` |
+| Factory Droid | local-path marketplace (repo root; `.claude-plugin/marketplace.json` fallback, name = repo directory basename) | `plugin.json` |
 
 ## Grok only (no Claude Code)
 
@@ -156,6 +160,39 @@ muse plugins hook test plugin:recallum-memory:hook:session-start \
   --fixture '{"event": "SessionStart", "stdin": {"cwd": "$PWD"}}'
 ```
 
+## Factory Droid
+
+Factory Droid ships as `droid`:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target droid --url https://recallum.example.com/mcp/
+```
+
+That:
+
+1. Registers this checkout as a local-path marketplace with
+   `droid plugin marketplace add <repo-root>` (the repo root doubles as the marketplace; Droid
+   falls back to `.claude-plugin/marketplace.json` when `.factory-plugin/marketplace.json` is
+   absent) and installs the plugin as `droid plugin install recallum-memory@<basename> --scope user`.
+   For a local path Droid registers the **directory basename** — `recallum-mcp` for this checkout,
+   not the manifest name `recallum-local` — so the plugin id is `recallum-memory@recallum-mcp`.
+   `--remote` does not cover this target.
+2. Writes `mcpServers.recallum` into `~/.factory/mcp.json` (mode 600; `FACTORY_HOME_OVERRIDE`
+   relocates the whole `.factory` tree) with `type: http`, the real URL, `oauth: false`, and
+   `Authorization: Bearer ${RECALLUM_API_KEY}`. `oauth: false` is required: without it Droid
+   attempts an OAuth discovery flow against a header-authenticated server that offers none.
+   Droid expands `${VAR}` in header values at connect time, so the file holds no secret — the
+   key is persisted to `~/.config/recallum/env` (and `~/.config/environment.d/99-recallum.conf`
+   on Linux), or not at all with `--no-store-api-key`.
+
+`--target auto` includes Droid when `droid` is on `PATH`; `--target both` stays Codex + Claude
+Code only. Tools appear as `recallum___*` (triple underscore); Droid can keep the server
+deferred, so load them with ToolSearch (`+recallum` or `select:`) before concluding they are
+unavailable. Start a new droid session so MCP, skills, and hooks reload; after a `git pull`,
+rerun `install.sh --target droid` to refresh the installed plugin
+(`droid plugin update recallum-memory@<basename>`).
+
 ## Prerequisites
 
 - A reachable Recallum server, yours. The endpoint must be HTTPS; plain HTTP is accepted only for
@@ -164,7 +201,7 @@ muse plugins hook test plugin:recallum-memory:hook:session-start \
   to `/mcp/`. It defaults to `https://recallum.zozbit.com/mcp/`; the Cursor marketplace has no
   endpoint default, so nobody inherits another operator's server without choosing it.
 - `python3` on `PATH` — the hooks run under it. Any 3.9+ interpreter works.
-- The `agent`, `codex`, `claude`, `grok`, `devin`, and/or `agy` CLI as applicable.
+- The `agent`, `codex`, `claude`, `grok`, `devin`, `droid`, and/or `agy` CLI as applicable.
 
 ## Install
 
@@ -196,8 +233,8 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--url URL` | `https://recallum.zozbit.com/mcp/` | Recallum MCP endpoint |
-| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, `muse`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent`, `devin`, and `muse`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
-| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex, Grok, and Devin read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into pluginSecrets / userConfig and a literal Bearer in native `~/.claude.json` |
+| `--target TARGET` | `auto` | `auto`, `codex`, `claude`, `grok`, `cursor`, `devin`, `antigravity`, `muse`, `droid`, or `both`. `auto` uses every detected CLI (including `cursor-agent`/`agent`, `devin`, `muse`, and `droid`); `both` is Codex + Claude Code only; explicit targets fail if that CLI is missing |
+| `--token-env-var NAME` | `RECALLUM_API_KEY` | Environment variable Codex, Grok, Devin, and Droid read the bearer token from at connect time. For Claude Code it is only an installer-time *source*: the value is copied into pluginSecrets / userConfig and a literal Bearer in native `~/.claude.json` |
 | `--claude-scope SCOPE` | `user` | **Claude Code only.** `user`, `project`, or `local`; applied to the marketplace and the plugin install |
 | `--remote` | off | Register the private GitHub repository instead of this local checkout |
 | `--force-mcp` | off | Replace an existing setup: a differing Codex/Grok MCP definition, or an already-installed Claude Code plugin |
@@ -300,12 +337,12 @@ would put it in `argv`, shell history, and the process list).
 | Claude Code | `~/.claude/.credentials.json` → `pluginSecrets["recallum-memory@recallum-local"].api_token` (same store as `/plugin configure`; works for GUI) |
 | All selected clients | `~/.config/recallum/env` (`export …`) and, on Linux, `~/.config/environment.d/99-recallum.conf` (desktop session after re-login) |
 
-| | Codex | Claude Code | Grok Build |
-| --- | --- | --- | --- |
-| MCP registration | `codex mcp add`, separate from the plugin | native `~/.claude.json` `mcpServers.recallum` (installer); plugin does not ship `.mcp.json` | `grok mcp add` → `~/.grok/config.toml` (required; Grok does not resolve Claude `${user_config.*}`) |
-| Endpoint | `--url` | `--url` written into `~/.claude.json` | `--url` written into config.toml |
-| Key at connect time | `--token-env-var` env var | literal Bearer in `~/.claude.json` when stored; else `Bearer ${token-env-var}` | `Authorization: Bearer ${--token-env-var}` in config.toml |
-| Key set by installer | env file + environment.d | pluginSecrets + env file | env file + environment.d |
+| | Codex | Claude Code | Grok Build | Factory Droid |
+| --- | --- | --- | --- | --- |
+| MCP registration | `codex mcp add`, separate from the plugin | native `~/.claude.json` `mcpServers.recallum` (installer); plugin does not ship `.mcp.json` | `grok mcp add` → `~/.grok/config.toml` (required; Grok does not resolve Claude `${user_config.*}`) | native `~/.factory/mcp.json` `mcpServers.recallum` (installer; `type http`, `oauth false`) |
+| Endpoint | `--url` | `--url` written into `~/.claude.json` | `--url` written into config.toml | `--url` written into `~/.factory/mcp.json` |
+| Key at connect time | `--token-env-var` env var | literal Bearer in `~/.claude.json` when stored; else `Bearer ${token-env-var}` | `Authorization: Bearer ${--token-env-var}` in config.toml | `Authorization: Bearer ${--token-env-var}` in mcp.json (Droid expands it at connect time) |
+| Key set by installer | env file + environment.d | pluginSecrets + env file | env file + environment.d | env file + environment.d |
 
 Pass `--no-store-api-key` to only register marketplaces/MCP and manage the secret yourself.
 
@@ -347,6 +384,16 @@ A config.toml entry for `recallum` shadows any plugin-bundled MCP that still sho
 `~/.cursor/mcp.json` (installer `--target cursor`), not plugin Settings. Confirm `recallum`
 is enabled under Settings > Tools & MCP and that its tools appear under Available Tools.
 
+**Factory Droid** — source the env file (or re-login on desktop Linux), then start a new session:
+
+```bash
+[ -f ~/.config/recallum/env ] && . ~/.config/recallum/env
+```
+
+Tools appear as `recallum___*`; if they are not listed directly, Droid has the server deferred —
+load them with ToolSearch (`+recallum` or `select:`). With `--no-store-api-key`, export
+`RECALLUM_API_KEY` in the environment that launches `droid` instead.
+
 ## Verify
 
 ```bash
@@ -357,6 +404,7 @@ grok mcp doctor recallum          # Grok Build
 grok plugin details recallum-memory
 agent mcp list                    # Cursor -> recallum enabled
 agent mcp list-tools recallum     # Cursor -> Recallum tools discovered
+droid plugin list                 # Factory Droid -> recallum-memory@<repo-basename>
 ```
 
 `claude plugin details` / `grok plugin details` should report the skills and hooks; Grok's healthy
@@ -449,6 +497,7 @@ Claude Desktop ToolSearch (`mcp__recallum__*`):
 | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
 | Devin CLI | `mcp__recallum__` |
 | Muse Code | `mcp__recallum__` |
+| Factory Droid | `recallum___` (triple underscore; ToolSearch when deferred) |
 | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
 Both skills document this, and the session hook emits the client-appropriate name or discovery
@@ -489,12 +538,15 @@ from this repository is needed.
 | `No such tool available: mcp__plugin_recallum-memory_recallum__*` | Not the same as missing. Claude Code often leaves MCP tools behind `ToolSearch`. Search (`+recallum` or `select:`) then call. On **Desktop**, also confirm native `~/.claude.json` → `mcpServers.recallum` (`mcp__recallum__*`). Nested `claude mcp list` is not Desktop proof. |
 | Desktop ToolSearch 0 results for `recallum` (CLI works) | Plugin hooks can run while plugin MCP never enters Desktop’s deferred catalog. Rerun `install.sh --target claude --force-mcp`, fully quit Claude.app, new session, ToolSearch `+recallum` |
 | Stale Codex plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target codex`, then start a new session |
+| Stale Droid plugin behaviour after `git pull` | Rerun `plugins/recallum-memory/scripts/install.sh --target droid` (refreshes via `droid plugin update recallum-memory@<repo-basename>`), then start a new session |
 | Stale Claude Code plugin behaviour after `git pull` | The installed copy is a versioned cache under `~/.claude/plugins/cache/`, not your checkout. Rerun `plugins/recallum-memory/scripts/install.sh --target claude --force-mcp`, then start a new session |
 | Leftover Cursor `Recallum (plugin)` after plugin update | Cursor auto-loads a root `.mcp.json` copied into the plugin cache. This tree does not ship that file. On any host: `install.sh --target cursor`, update plugin `recallum-memory` from `recallum-local`, fully quit Cursor. Only native `recallum` should stay enabled. No Recallum server deploy. |
 | Claude authentication failure | Re-run `install.sh` (pluginSecrets + native `~/.claude.json` Bearer) or `/plugin configure recallum-memory@recallum-local`. Native path uses the dual-written Bearer. |
 | Grok authentication / handshake failure | Export `RECALLUM_API_KEY` and ensure `~/.grok/config.toml` has a real URL plus `Bearer ${RECALLUM_API_KEY}` — not `${user_config.mcp_url}`. Rerun `install.sh --target grok` |
 | Hook never fires | Confirm the plugin is enabled and that `python3` or `python` is on the `PATH` of the process that launched the client. The hook fails open, so a missing interpreter is silent |
 | Codex authentication failure | The named environment variable is missing from the environment that launched Codex |
+| Droid authentication failure | `RECALLUM_API_KEY` (or the custom `--token-env-var`) is missing from the environment that launched `droid`; `~/.factory/mcp.json` holds `Bearer ${RECALLUM_API_KEY}`, which Droid expands at connect time. Source `~/.config/recallum/env` or re-run `install.sh --target droid` |
+| `recallum___*` tools missing in Droid | Start a new session; Droid can keep the server deferred, so load them with ToolSearch (`+recallum` or `select:`) before concluding they are unavailable |
 
 ## Development
 

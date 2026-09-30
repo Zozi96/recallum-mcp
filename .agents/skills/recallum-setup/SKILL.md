@@ -1,6 +1,6 @@
 ---
 name: recallum-setup
-description: Set up or diagnose the Recallum plugin and remote MCP connection for Devin CLI, Cursor, Codex, Claude Code, Grok Build, or Antigravity CLI when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
+description: Set up or diagnose the Recallum plugin and remote MCP connection for Devin CLI, Cursor, Codex, Claude Code, Grok Build, Antigravity CLI, or Factory Droid when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
 ---
 
 # Recallum Setup
@@ -17,9 +17,9 @@ prompt) so clients can authenticate after install:
 
 Never pass the key as `claude --config api_token=...` or as a CLI flag (argv / process list). Use
 `--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `cursor`,
-`devin`, `antigravity`, `both`, or default `auto`. Run with `--dry-run` first to see the planned
-actions. `--target both` means Codex + Claude Code only; it does not include Grok, Cursor, Devin,
-or Antigravity CLI.
+`devin`, `antigravity`, `droid`, `both`, or default `auto`. Run with `--dry-run` first to see the
+planned actions. `--target both` means Codex + Claude Code only; it does not include Grok, Cursor,
+Devin, Antigravity CLI, or Factory Droid.
 
 Cursor: `install.sh --target cursor` (or `auto` when `cursor-agent`/`agent` is on PATH) registers the
 marketplace and writes a mode-600 `~/.cursor/mcp.json` entry. Plugin install is still done in the
@@ -307,6 +307,48 @@ the API key is written to disk in cleartext — read the whole section before ru
 6. Start a new Muse session so the plugin and MCP server are picked up. Tools appear as
    `mcp__recallum__*` (listed directly; no `search_tool` or `ToolSearch` lookup step).
 
+## Setup — Factory Droid
+
+Factory Droid ships as `droid`. Droid expands `${VAR}` in `~/.factory/mcp.json` header values at
+connect time, so the MCP config holds no secret — the key is persisted to
+`~/.config/recallum/env` (mode `600`) and, on Linux,
+`~/.config/environment.d/99-recallum.conf`.
+
+1. Confirm `droid` is on `PATH` (`droid --version`).
+2. Run the installer:
+
+   ```bash
+   export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+   plugins/recallum-memory/scripts/install.sh --target droid --url https://recallum.example.com/mcp/
+   ```
+
+   This registers this checkout as a local-path marketplace (`droid plugin marketplace add
+   <repo-root>`; the repo root doubles as the marketplace, falling back to
+   `.claude-plugin/marketplace.json`), installs the plugin as
+   `droid plugin install recallum-memory@<basename> --scope user`, and writes the `recallum`
+   server natively to `~/.factory/mcp.json` (mode `600`; `FACTORY_HOME_OVERRIDE` relocates the
+   whole `.factory` tree). For a local path Droid registers the **directory basename** —
+   `recallum-mcp`, not the manifest name `recallum-local`. The entry must keep `type: http` and
+   `oauth: false` — without `oauth: false` Droid attempts an OAuth discovery flow against a
+   header-authenticated server that offers none. `--target both` and `--remote` do not cover this
+   target; use `--target droid` explicitly.
+3. **Env-var note:** ensure `RECALLUM_API_KEY` is exported in the shell (or desktop session)
+   that launches `droid` — source `~/.config/recallum/env` or re-login. With
+   `--no-store-api-key` nothing is persisted, so the export is mandatory. Never print or echo
+   the key.
+4. Confirm the registration with the read-only doctor:
+
+   ```bash
+   python3 plugins/recallum-memory/scripts/recallum_doctor.py
+   ```
+
+   It reports the `Factory Droid` client: server presence, `url`, the Authorization header,
+   `type`/`oauth` correctness, the config file's permission mode, and the plugin installation
+   record under `~/.factory/plugins/installed_plugins/` with a version-drift check.
+5. Start a new droid session so the MCP server, skills, and hooks reload. Tools appear as
+   `recallum___*` (triple underscore); when the server is deferred, load them with ToolSearch
+   (`+recallum` or `select:` of the full name) before concluding they are unavailable.
+
 ## Shared Checks
 
 1. Check only whether the token environment variable or Claude Code fallback is present. The
@@ -329,6 +371,7 @@ the API key is written to disk in cleartext — read the whole section before ru
    | Cursor | Recallum MCP tools in Available Tools (no stable textual prefix) |
    | Devin CLI | `mcp__recallum__` |
    | Muse Code | `mcp__recallum__` |
+   | Factory Droid | `recallum___` (triple underscore; ToolSearch when deferred) |
    | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every
@@ -378,6 +421,14 @@ echo the key while doing so.
   launched Devin and that `~/.config/devin/mcp_config.json` has `Authorization: Bearer
   ${RECALLUM_API_KEY}`. Re-run `install.sh --target devin` to persist the key to
   `~/.config/recallum/env` if needed. Do not ask for the value in chat and do not read it back.
+- Authentication failure on Factory Droid: verify `RECALLUM_API_KEY` (or the custom
+  `--token-env-var`) is exported in the environment that launched `droid` and that
+  `~/.factory/mcp.json` keeps `Bearer ${RECALLUM_API_KEY}`, `type: http`, and `oauth: false`
+  (Droid expands the variable at connect time). Re-run `install.sh --target droid` to persist the
+  key to `~/.config/recallum/env` if needed. Do not ask for the value in chat and do not read it
+  back.
+- Tools missing / deferred in Factory Droid: start a new session, then ToolSearch `+recallum` —
+  Droid can keep the server deferred, so `recallum___*` may not be listed directly.
 - Connection failure: verify the URL and service readiness independently, then retry discovery.
 - Hook absent or blocked (Codex): use `/hooks` to inspect the path and trust state; never bypass the
   trust review.
@@ -394,3 +445,6 @@ echo the key while doing so.
   `.devin/hooks.v1.json` hook (`SessionStart` + `UserPromptSubmit`, keyed on `DEVIN_PROJECT_DIR`) is
   present. If the hook still does not fire, use skill-driven tool discovery instead of relying on a
   hook-injected context digest.
+- Hook not firing (Factory Droid): confirm the plugin is installed (`droid plugin list` shows
+  `recallum-memory@<repo-basename>`) and that `python3` or `python` is on the PATH of the process
+  that launched `droid`. The hook fails open, so a missing interpreter is silent.
