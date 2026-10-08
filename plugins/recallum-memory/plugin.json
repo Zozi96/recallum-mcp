@@ -1,7 +1,7 @@
 {
   "name": "recallum-memory",
   "version": "0.20.0",
-  "description": "Persistent, project-aware memory for Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, Muse Code, and Factory Droid through a self-hosted Recallum MCP server. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
+  "description": "Persistent, project-aware memory for Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, Muse Code, Factory Droid, and OMP through a self-hosted Recallum MCP server. Loads concise project context and preserves verified preferences, decisions, constraints, architecture, workflows, commands, root causes, and recurring gotchas.",
   "author": {
     "name": "Zozi"
   },
@@ -19,6 +19,7 @@
     "devin",
     "antigravity",
     "muse-code",
-    "factory-droid"
+    "factory-droid",
+    "omp"
   ]
 }

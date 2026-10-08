@@ -1,6 +1,6 @@
 ---
 name: recallum-setup
-description: Set up or diagnose the Recallum plugin and remote MCP connection for Devin CLI, Cursor, Codex, Claude Code, Grok Build, Antigravity CLI, or Factory Droid when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
+description: Set up or diagnose the Recallum plugin and remote MCP connection for Devin CLI, Cursor, Codex, Claude Code, Grok Build, Antigravity CLI, Muse Code, Factory Droid, or OMP when the user explicitly asks to install, configure, verify, troubleshoot, or test Recallum.
 ---
 
 # Recallum Setup
@@ -17,9 +17,9 @@ prompt) so clients can authenticate after install:
 
 Never pass the key as `claude --config api_token=...` or as a CLI flag (argv / process list). Use
 `--no-store-api-key` to skip persistence. Targets: `--target codex`, `claude`, `grok`, `cursor`,
-`devin`, `antigravity`, `droid`, `both`, or default `auto`. Run with `--dry-run` first to see the
+`devin`, `antigravity`, `muse`, `droid`, `omp`, `both`, or default `auto`. Run with `--dry-run` first to see the
 planned actions. `--target both` means Codex + Claude Code only; it does not include Grok, Cursor,
-Devin, Antigravity CLI, or Factory Droid.
+Devin, Antigravity CLI, Muse Code, Factory Droid, or OMP.
 
 Cursor: `install.sh --target cursor` (or `auto` when `cursor-agent`/`agent` is on PATH) registers the
 marketplace and writes a mode-600 `~/.cursor/mcp.json` entry. Plugin install is still done in the
@@ -33,7 +33,7 @@ the dedicated section below before running it.
 
 ALL status inspection must go through `plugins/recallum-memory/scripts/recallum_doctor.py`. Reading
 `~/.cursor/mcp.json`, `~/.claude/.credentials.json`, `~/.config/recallum/env`,
-`~/.grok/config.toml`, or any plugin-cache `mcp.json` with `cat`, `head`, `grep`, `python`, or
+`~/.grok/config.toml`, `~/.omp/agent/mcp.json`, or any plugin-cache `mcp.json` with `cat`, `head`, `grep`, `python`, or
 another raw-file recipe is forbidden: these files interleave ordinary configuration with a literal
 bearer token. The doctor is read-only and redacts bearer values in both text and JSON output.
 
@@ -349,6 +349,37 @@ connect time, so the MCP config holds no secret — the key is persisted to
    `recallum___*` (triple underscore); when the server is deferred, load them with ToolSearch
    (`+recallum` or `select:` of the full name) before concluding they are unavailable.
 
+## Setup — OMP
+
+OMP ships as `omp`. It expands `${VAR}` in native `mcp.json` headers at discovery time, so the
+config file holds an environment reference, not the key.
+
+1. Confirm `omp` is on `PATH` (`omp --version`).
+2. Run the installer:
+
+   ```bash
+   export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+   plugins/recallum-memory/scripts/install.sh --target omp --url https://recallum.example.com/mcp/
+   ```
+
+   This writes `~/.omp/agent/mcp.json` (or `$PI_CODING_AGENT_DIR/mcp.json`) with
+   `mcpServers.recallum` using `type: http` and `Authorization: Bearer ${RECALLUM_API_KEY}`.
+   `--target both` does not cover OMP; use `--target omp` explicitly. `--remote` does not cover
+   this target. A named profile reads `~/.omp/profiles/<name>/agent/mcp.json`; set
+   `PI_CODING_AGENT_DIR` to that directory first.
+3. Ensure `RECALLUM_API_KEY` is exported in the environment that launches OMP. The installer
+   writes `~/.config/recallum/env` and, on Linux, `~/.config/environment.d/99-recallum.conf`.
+   Source the env file or re-login. Do not read `mcp.json` to check the key.
+4. There is no plugin install and no session hook. OMP hooks are JS/TS factories, and no
+   SessionStart dispatch was observed. A project `.omp/mcp.json` entry named `recallum` wins
+   over the user file; do not write a project file.
+5. Confirm with the read-only doctor. It reports the `OMP` client: `type`, `url`, the redacted
+   Authorization header, file mode, and a hidden-by-`disabledServers` problem. A missing file is
+   not a failure.
+6. Restart OMP. Documented tool names are `mcp__recallum_<tool>` (for example
+   `mcp__recallum_context`). That spelling comes from OMP's docs and was not observed against a
+   live Recallum handshake.
+
 ## Shared Checks
 
 1. Check only whether the token environment variable or Claude Code fallback is present. The
@@ -372,6 +403,7 @@ connect time, so the MCP config holds no secret — the key is persisted to
    | Devin CLI | `mcp__recallum__` |
    | Muse Code | `mcp__recallum__` |
    | Factory Droid | `recallum___` (triple underscore; ToolSearch when deferred) |
+   | OMP | `mcp__recallum_` (`mcp__recallum_context`; documented, not a live handshake) |
    | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
    Claude Code namespaces a plugin-bundled server as `plugin:<plugin>:<server>` and rewrites every

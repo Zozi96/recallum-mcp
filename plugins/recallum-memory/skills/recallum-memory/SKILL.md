@@ -27,6 +27,7 @@ Claude Code namespaces a plugin-bundled MCP server:
 | Devin CLI | `mcp__recallum__` | `mcp__recallum__context` |
 | Muse Code | `mcp__recallum__` | `mcp__recallum__context` |
 | Factory Droid | `recallum___` | `recallum___context` |
+| OMP | `mcp__recallum_` | `mcp__recallum_context` (documented `mcp__<server>_<tool>`; not a live handshake) |
 
 Use whichever client tool names are actually present in your tool list; the session hook names the
 forms that may apply. On Claude Code, **either** the plugin prefix or the native `mcp__recallum__`
@@ -35,7 +36,9 @@ or `select:`) before concluding tools are missing. Cursor does not provide a sta
 prefix, so use the names shown in Available Tools. Devin and Muse Code list MCP tools directly as
 `mcp__recallum__*` and need no lookup step. Factory Droid names tools `recallum___*` and can keep
 the server deferred, so use ToolSearch (`+recallum` or `select:`) before concluding tools are
-missing. Below, tools are written unprefixed.
+missing. OMP's documented names use one underscore between the server and the tool
+(`mcp__recallum_context`); that spelling was not observed against a live handshake. Below, tools
+are written unprefixed.
 
 ## Skills vs Memories
 

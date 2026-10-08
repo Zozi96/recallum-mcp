@@ -1,4 +1,4 @@
-# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, Muse Code, and Factory Droid)
+# Configuring MCP Clients (Cursor, Grok Build, Codex, Claude Code, Devin CLI, Antigravity CLI, Muse Code, Factory Droid, and OMP)
 
 Recallum speaks MCP over Streamable HTTP at `https://<host>/mcp/`. Every client
 needs its own API key (issued with `recallum-admin issue-key`). Keys are per
@@ -13,7 +13,7 @@ The server exposes fifteen MCP tools: `remember`, `remember_batch`, `recall`,
 (skills), a separate entity from memories.
 
 Prefer `plugins/recallum-memory/scripts/install.sh` for Codex, Claude Code, Grok Build,
-Devin CLI, Antigravity CLI, Muse Code, and Factory Droid. Cursor uses its native marketplace and Settings flow below.
+Devin CLI, Antigravity CLI, Muse Code, Factory Droid, and OMP. Cursor uses its native marketplace and Settings flow below.
 Keep credentials in client-owned settings; do not rely on a shell-only export as the sole GUI strategy,
 and verify the setup after restart.
 
@@ -319,6 +319,41 @@ its value is not a usable path — droid 0.229.0 sets it to
 `/PLUGIN_ROOT_NOT_EXPANDED_ERROR` and only expands the literal `${DROID_PLUGIN_ROOT}` token
 inside the hooks.json command string, which resolves the hook script from the plugin root.
 
+## OMP
+
+OMP ships as `omp`. Install with the bundled installer:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target omp --url https://recallum.example.com/mcp/
+```
+
+This writes the `recallum` server natively to `~/.omp/agent/mcp.json` (or
+`$PI_CODING_AGENT_DIR/mcp.json` when that variable is set) with `type: http` and
+`Authorization: Bearer ${RECALLUM_API_KEY}`. OMP expands `${VAR}` and `${VAR:-default}` in
+native MCP files at discovery time, so the placeholder is the correct shape — the same class
+as Codex, Grok, and Devin, not the cleartext class used by Antigravity and Muse. The file is
+mode `0600`. Unrelated `mcpServers` entries are preserved. If `recallum` is listed in
+`disabledServers`, the installer removes that name: the denylist hides a server from every
+source.
+
+`--target both` remains Codex + Claude Code only and does **not** include OMP; you must pass
+`--target omp` explicitly. `--remote` does not cover this target.
+
+The installer does not install a plugin and does not register a session hook. OMP's hook
+runtime loads JS/TS factories from `.omp/hooks/pre|post/`, not the Claude command hook in
+`hooks/hooks.json`. No SessionStart dispatch was observed for this client, so none is claimed.
+A project `.omp/mcp.json` entry of the same name wins over the user file; the installer never
+writes a project file (it would be committable). A named profile (`omp --profile <name>`) reads
+`~/.omp/profiles/<name>/agent/mcp.json` instead of the default agent directory. Set
+`PI_CODING_AGENT_DIR` to that profile's agent directory before installing, or the default file
+will not be the one the profile loads.
+
+OMP's documented runtime registry names tools `mcp__<server>_<tool>` (oh-my-pi
+`docs/mcp-runtime-lifecycle.md`). That predicts `mcp__recallum_context`. This change did not
+observe a live Recallum handshake, so treat that spelling as the documented name, not as
+measured dispatch. Restart OMP so MCP reloads.
+
 Diagnose with the same read-only doctor used for the other clients:
 
 ```bash
@@ -333,6 +368,12 @@ disk because `droid plugin list` prints plain text only). After a `git pull`, re
 `install.sh --target droid` (it refreshes an existing install with
 `droid plugin update recallum-memory@<basename>`), then start a new droid session so MCP,
 skills, and hooks reload.
+
+It reports an `OMP` client when `mcp.json` exists: whether the `recallum` server entry is
+present, its `type` (must be `http`), its `url`, the Authorization header
+(`Bearer ${RECALLUM_API_KEY}` redacted; the variable is checked and reported as set or unset),
+the file mode, and whether `disabledServers` still hides `recallum`. A missing file is "not
+configured", not a failure.
 
 ## Agent usage guidance
 
@@ -356,7 +397,9 @@ Tool name prefixes differ by client: Codex `mcp__recallum__*`, Claude Code
 `recallum__*` via `search_tool` / `use_tool`; Cursor uses the Recallum MCP tools listed in
 Available Tools; Devin CLI uses `mcp__recallum__*`; Muse Code uses `mcp__recallum__*` (listed
 directly, no lookup step); Factory Droid uses `recallum___*` (triple underscore, loaded with
-ToolSearch when the server is deferred). Antigravity CLI's tool-name prefix is **not yet
+ToolSearch when the server is deferred). OMP's documented names are `mcp__recallum_<tool>` (one underscore
+between the server and the tool, so `mcp__recallum_context`); that spelling was not observed
+against a live handshake. Antigravity CLI's tool-name prefix is **not yet
 determined** — no prefix constant exists in `recallum_hook.py` — so prefer skill-driven tool
 discovery over assuming a specific prefix string when working in Antigravity CLI.
 
@@ -396,5 +439,6 @@ if Recallum is unavailable.
 | Muse Code tool calls fail with "authentication required" | `settings.json` holds an inert `${...}` placeholder (Muse does not expand env vars); re-run `install.sh --target muse` with a stored key so the literal token is written |
 | Droid tool calls fail with "authentication required" | `RECALLUM_API_KEY` is not exported in the environment that launched `droid`; source `~/.config/recallum/env`, or re-run `install.sh --target droid` without `--no-store-api-key` |
 | `recallum___*` tools not listed in Droid | Droid can keep the server deferred — load them with ToolSearch (`+recallum` or `select:`) before concluding they are unavailable; start a new session first |
+| OMP tool calls fail with "authentication required" | `RECALLUM_API_KEY` is unset in the environment that launched OMP, or a project `.omp/mcp.json` overrides the user entry; source `~/.config/recallum/env` or re-run `install.sh --target omp` |
 | `recall` returns `mode: degraded_textual` | Ollama unreachable; check `readyz` and the ollama service |
 | Client times out | MCP endpoint is `/mcp/` (trailing slash); HTTPS only via Traefik |

@@ -7,18 +7,18 @@ Usage: install.sh [OPTIONS]
 
 Install the repo-local Recallum plugin and configure its remote MCP server for
 Codex, Claude Code, Grok Build, Cursor, Devin CLI, Antigravity CLI, Muse Code,
-Factory Droid, or any combination the host has installed.
+Factory Droid, OMP, or any combination the host has installed.
 
 Options:
   --url URL                 Recallum MCP endpoint
                             (default: https://recallum.zozbit.com/mcp/)
                             Normalized to a trailing slash to avoid a redirect
                             that would expose or drop the bearer token
-  --target TARGET           auto | codex | claude | grok | cursor | devin | antigravity | muse | droid | both
+  --target TARGET           auto | codex | claude | grok | cursor | devin | antigravity | muse | droid | omp | both
                             (default: auto)
                             auto installs into every detected CLI
-                            both requires Codex and Claude Code (not Grok/Cursor/Devin/Antigravity/Muse/Droid)
-  --token-env-var NAME      Codex, Grok, Cursor, Devin, Muse, and Droid: bearer-token environment variable
+                            both requires Codex and Claude Code (not Grok/Cursor/Devin/Antigravity/Muse/Droid/OMP)
+  --token-env-var NAME      Codex, Grok, Cursor, Devin, Muse, Droid, and OMP: bearer-token environment variable
                             (default: RECALLUM_API_KEY)
   --claude-scope SCOPE      Claude Code config scope: user | local | project (default: user)
   --remote                  Register the private GitHub repository instead of the local checkout
@@ -42,7 +42,7 @@ API key handling (default: store when a key is available or can be prompted):
   Persistence:
     Claude Code  ~/.claude/.credentials.json → pluginSecrets
                  (same store as /plugin configure; works for GUI launches)
-    Codex/Grok/Cursor/Devin/Muse/Droid
+    Codex/Grok/Cursor/Devin/Muse/Droid/OMP
                  ~/.config/recallum/env  (export of the token env var)
                  and, on Linux, ~/.config/environment.d/99-recallum.conf
                  so desktop sessions also see the variable
@@ -88,6 +88,14 @@ API key handling (default: store when a key is available or can be prompted):
                $token_env_var at connection time (Droid expands ${VAR} in
                headers, so the file holds no secret). Tools appear as
                recallum___*. --remote does not cover this target.
+  OMP          writes ~/.omp/agent/mcp.json (or $PI_CODING_AGENT_DIR/mcp.json)
+               with type http and a Bearer resolved from $token_env_var at
+               discovery time. The documented tool spelling is mcp__recallum_<tool>
+               (not a live handshake). No plugin install and no session hook:
+               OMP hooks are JS/TS factories, not the Claude command hook.
+               --remote does not cover this target. A named profile reads
+               ~/.omp/profiles/<name>/agent/mcp.json; set PI_CODING_AGENT_DIR
+               to that directory before installing.
 EOF
 }
 
@@ -159,9 +167,9 @@ while (($#)); do
 done
 
 case "$target" in
-  auto | codex | claude | grok | cursor | devin | antigravity | muse | droid | both) ;;
+  auto | codex | claude | grok | cursor | devin | antigravity | muse | droid | omp | both) ;;
   *)
-    echo "error: --target must be auto, codex, claude, grok, cursor, devin, antigravity, muse, droid, or both" >&2
+    echo "error: --target must be auto, codex, claude, grok, cursor, devin, antigravity, muse, droid, omp, or both" >&2
     exit 2
     ;;
 esac
@@ -211,6 +219,7 @@ has_agy=0
 has_devin=0
 has_muse=0
 has_droid=0
+has_omp=0
 cursor_cli=""
 if command -v codex >/dev/null 2>&1; then has_codex=1; fi
 if command -v claude >/dev/null 2>&1; then has_claude=1; fi
@@ -223,6 +232,8 @@ if command -v devin >/dev/null 2>&1; then has_devin=1; fi
 if command -v muse >/dev/null 2>&1; then has_muse=1; fi
 # Factory Droid ships as `droid`.
 if command -v droid >/dev/null 2>&1; then has_droid=1; fi
+# OMP (Oh My Pi) ships as `omp`.
+if command -v omp >/dev/null 2>&1; then has_omp=1; fi
 # Cursor ships as cursor-agent; some installs expose the same binary as agent.
 if command -v cursor-agent >/dev/null 2>&1; then
   has_cursor=1
@@ -240,6 +251,7 @@ install_devin=0
 install_antigravity=0
 install_muse=0
 install_droid=0
+install_omp=0
 case "$target" in
   auto)
     install_codex=$has_codex
@@ -250,8 +262,9 @@ case "$target" in
     install_antigravity=$has_agy
     install_muse=$has_muse
     install_droid=$has_droid
-    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_devin == 0 && install_antigravity == 0 && install_muse == 0 && install_droid == 0)); then
-      echo "error: none of the codex, claude, grok, cursor-agent/agent, devin, agy, muse, or droid CLIs is on PATH" >&2
+    install_omp=$has_omp
+    if ((install_codex == 0 && install_claude == 0 && install_grok == 0 && install_cursor == 0 && install_devin == 0 && install_antigravity == 0 && install_muse == 0 && install_droid == 0 && install_omp == 0)); then
+      echo "error: none of the codex, claude, grok, cursor-agent/agent, devin, agy, muse, droid, or omp CLIs is on PATH" >&2
       exit 1
     fi
     ;;
@@ -289,6 +302,10 @@ case "$target" in
   droid)
     ((has_droid)) || { echo "error: droid CLI is not installed or not on PATH" >&2; exit 1; }
     install_droid=1
+    ;;
+  omp)
+    ((has_omp)) || { echo "error: omp CLI is not installed or not on PATH" >&2; exit 1; }
+    install_omp=1
     ;;
   both)
     ((has_codex)) || { echo "error: codex CLI is not installed or not on PATH" >&2; exit 1; }
@@ -501,7 +518,7 @@ store_env_key_files() {
   if ((install_claude)) || [[ "$token_env_var" == "RECALLUM_API_KEY" ]]; then
     names+=("RECALLUM_API_KEY")
   fi
-  if ((install_codex || install_grok || install_cursor || install_devin || install_muse || install_droid)); then
+  if ((install_codex || install_grok || install_cursor || install_devin || install_muse || install_droid || install_omp)); then
     local found=0
     local n
     if ((${#names[@]} > 0)); then
@@ -616,7 +633,7 @@ persist_api_key() {
   if ((install_claude)); then
     store_claude_plugin_secret "$resolved_api_key"
   fi
-  if ((install_codex || install_grok || install_claude || install_cursor || install_devin || install_muse || install_droid)); then
+  if ((install_codex || install_grok || install_claude || install_cursor || install_devin || install_muse || install_droid || install_omp)); then
     store_env_key_files "$resolved_api_key"
   fi
   api_key_stored=1
@@ -1850,6 +1867,84 @@ PY
   fi
 }
 
+# OMP (`omp`). User-scope native MCP only. OMP expands ${VAR} in
+# ~/.omp/agent/mcp.json (or $PI_CODING_AGENT_DIR/mcp.json) at discovery time,
+# so the bearer is an environment reference and the file holds no Recallum
+# secret. Mode 0600 anyway: the file may contain other servers' secrets.
+# Unrelated mcpServers entries are preserved. A `recallum` name in
+# disabledServers is removed, because that denylist hides every source.
+# No plugin install: OMP session hooks are JS/TS factories, and the Claude
+# command hook in hooks/hooks.json is not an OMP SessionStart path.
+install_for_omp() {
+  local omp_agent="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
+  local omp_mcp="$omp_agent/mcp.json"
+
+  if ((dry_run)); then
+    echo "dry-run: write $omp_mcp server recallum (type=http, url=$url, Bearer \${$token_env_var})"
+    return 0
+  fi
+
+  python3 - "$omp_mcp" "$url" "$token_env_var" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+mcp_path = Path(sys.argv[1])
+url = sys.argv[2]
+token_env = sys.argv[3]
+schema = (
+    "https://raw.githubusercontent.com/can1357/oh-my-pi/main/"
+    "packages/coding-agent/src/config/mcp-schema.json"
+)
+# OMP expands ${VAR} while discovering native mcp.json. The bearer is an env
+# reference resolved at runtime; this entry holds no secret.
+auth = f"Bearer ${{{token_env}}}"
+entry = {"type": "http", "url": url, "headers": {"Authorization": auth}}
+
+mcp_path.parent.mkdir(parents=True, exist_ok=True)
+data = {}
+if mcp_path.is_file():
+    try:
+        data = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+    except ValueError as exc:
+        raise SystemExit(f"error: invalid JSON in {mcp_path}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"error: {mcp_path} root must be a JSON object")
+servers = data.setdefault("mcpServers", {})
+if not isinstance(servers, dict):
+    raise SystemExit(f"error: {mcp_path} mcpServers must be an object")
+
+disabled = data.get("disabledServers")
+hidden = isinstance(disabled, list) and "recallum" in disabled
+if servers.get("recallum") == entry and not hidden:
+    print(f"OMP MCP server 'recallum' in {mcp_path} already matches; leaving it unchanged.")
+    raise SystemExit(0)
+
+servers["recallum"] = entry
+if hidden:
+    kept = [name for name in disabled if name != "recallum"]
+    if kept:
+        data["disabledServers"] = kept
+    else:
+        del data["disabledServers"]
+if "$schema" not in data:
+    data = {"$schema": schema, **data}
+
+tmp = mcp_path.with_name(mcp_path.name + ".tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+os.chmod(tmp, 0o600)
+tmp.replace(mcp_path)
+os.chmod(mcp_path, 0o600)
+print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
+PY
+
+  if [[ -z "${resolved_api_key-}" ]]; then
+    echo "warning: no API key stored; export $token_env_var (or re-run without --no-store-api-key" >&2
+    echo "         or with --api-key-file) so OMP can resolve the bearer." >&2
+  fi
+}
+
 # Antigravity CLI (`agy`). Two independent registrations, mirroring Claude:
 #   1. the plugin bundle via `agy plugin install <dir>` (skills/hooks);
 #   2. the native GLOBAL MCP config ~/.gemini/config/mcp_config.json.
@@ -2384,6 +2479,7 @@ if ((install_devin)); then install_for_devin; fi
 if ((install_antigravity)); then install_for_antigravity; fi
 if ((install_muse)); then install_for_muse; fi
 if ((install_droid)); then install_for_droid; fi
+if ((install_omp)); then install_for_omp; fi
 
 # Drop the in-memory copy once clients are configured. Files already hold it.
 resolved_api_key=""
@@ -2450,4 +2546,11 @@ if ((install_droid)); then
   echo "               from \$${token_env_var} at connect time, so the file holds no secret)."
   echo "               Tools appear as recallum___* — use ToolSearch (+recallum) if the server"
   echo "               is deferred. Start a new droid session so MCP, skills, and hooks reload."
+fi
+if ((install_omp)); then
+  echo "OMP: recallum server written to \${PI_CODING_AGENT_DIR:-\$HOME/.omp/agent}/mcp.json (mode 600,"
+  echo "     type http, bearer resolved from \${$token_env_var}). No plugin and no session hook."
+  echo "     Documented tool names are mcp__recallum_<tool>; that spelling was not observed"
+  echo "     against a live Recallum handshake. Restart OMP so MCP reloads. A named profile"
+  echo "     reads ~/.omp/profiles/<name>/agent/mcp.json — set PI_CODING_AGENT_DIR to install there."
 fi

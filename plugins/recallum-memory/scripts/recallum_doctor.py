@@ -531,7 +531,7 @@ def _endpoint_problem(
     installer accepts -- this is the one place that rule is re-expressed in
     Python and it must not be forked. ``url_key`` is the config field the client
     stores the endpoint under (``"serverUrl"`` for Antigravity, ``"url"`` for
-    Devin)."""
+    Devin and OMP)."""
     if not isinstance(raw_url, str) or not raw_url:
         problems.append(f"config: {client} {url_key} is missing")
         return
@@ -857,6 +857,57 @@ def _droid(
     return result
 
 
+def _omp_config_path(home: Path) -> Path:
+    """Native user MCP file. ``PI_CODING_AGENT_DIR`` is the documented override
+    of the default-profile agent directory; named profiles are that override
+    pointed at ``~/.omp/profiles/<name>/agent``."""
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    if override:
+        return Path(override) / "mcp.json"
+    return home / ".omp" / "agent" / "mcp.json"
+
+
+def _omp(
+    home: Path, _expected: str | None, token_env: str, problems: list[str]
+) -> dict[str, Any]:
+    """``_expected`` is unused: OMP support is a native MCP file, not a plugin
+    version. A missing file is "not configured", not a failure. A present file
+    must carry ``recallum`` as ``type: http`` with an env-expanded bearer."""
+    result: dict[str, Any] = {}
+    config_path = _omp_config_path(home)
+    if not config_path.is_file():
+        return result
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        problems.append(f"config: OMP mcp.json is unreadable ({config_path})")
+        return result
+    try:
+        config = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        problems.append(f"config: OMP mcp.json is invalid ({config_path})")
+        return result
+    if not isinstance(config, dict):
+        problems.append(f"config: OMP mcp.json root must be a JSON object ({config_path})")
+        return result
+    server = _configured_server(config, "mcpServers", "recallum", "OMP", problems)
+    if not isinstance(server, dict):
+        problems.append(f"config: OMP recallum server entry is missing ({config_path})")
+        return result
+    safe = _safe_server(server, include_type=True, url_key="url")
+    result["native_mcp"] = safe
+    if server.get("type") != "http":
+        problems.append("config: OMP recallum type must be http")
+    auth = safe["auth"]
+    _auth_problem("OMP", auth, token_env, problems)
+    _record_permission(safe, config_path, auth, problems, client="OMP")
+    _endpoint_problem("OMP", server.get("url"), problems, "url")
+    disabled = config.get("disabledServers")
+    if isinstance(disabled, list) and "recallum" in disabled:
+        problems.append(f"config: OMP disabledServers hides recallum ({config_path})")
+    return result
+
+
 def _load_expected(repo_root: Path, problems: list[str]) -> str | None:
     manifest = _read_json(repo_root / "plugins" / "recallum-memory" / "plugin.json")
     version = manifest.get("version") if isinstance(manifest, dict) else None
@@ -921,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Antigravity CLI", _antigravity(home, expected, args.token_env_var, problems)),
         ("Muse Code", _muse(home, expected, args.token_env_var, problems)),
         ("Factory Droid", _droid(home, expected, args.token_env_var, problems)),
+        ("OMP", _omp(home, expected, args.token_env_var, problems)),
     ):
         if value:
             report["clients"][client] = value

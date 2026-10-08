@@ -351,6 +351,15 @@ with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
 # Unknown subcommands succeed quietly.
 """
 
+# Fake `omp` binary. The installer only probes `command -v omp`; it never
+# invokes the CLI. The native mcp.json write is done by the installer itself.
+FAKE_OMP = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(["omp", *args]) + "\\n")
+"""
+
 # Fake `muse` binary for installer target tests. Plugin state is driven by
 # FAKE_MUSE_PLUGIN ("missing" or "installed"); install/update/approve log
 # their invocations and succeed. The native settings.json MCP entry is
@@ -1480,6 +1489,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn(DEVIN_PREFIX, skill)
         self.assertIn(MUSE_PREFIX, skill)
         self.assertIn("Muse Code", skill)
+        self.assertIn("mcp__recallum_context", skill)
+        self.assertIn("OMP", clients)
         self.assertIn("client-visible tool names", rule)
         self.assertIn(CODEX_PREFIX.rstrip("_") + "__*", clients)
         self.assertIn("Muse Code", clients)
@@ -1520,6 +1531,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("devin", grok["keywords"])
         self.assertIn("Devin", devin["description"])
         self.assertIn("devin", devin["keywords"])
+        self.assertIn("OMP", grok["description"])
+        self.assertIn("omp", grok["keywords"])
 
     def test_devin_manifest_shape_suppresses_bundled_mcp(self) -> None:
         manifest = self._load(DEVIN_MANIFEST)
@@ -1765,6 +1778,7 @@ class ManifestTests(unittest.TestCase):
                 # Muse uses the same prefix string too, so pin the client name:
                 # a row that only says the bare prefix proves nothing.
                 self.assertIn("Muse Code", text)
+                self.assertIn("mcp__recallum_context", text)
 
     def test_memory_skill_covers_reusable_context_beyond_decisions(self) -> None:
         text = (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md").read_text(encoding="utf-8")
@@ -1888,6 +1902,7 @@ class ManifestTests(unittest.TestCase):
         for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, GROK_PREFIX, DEVIN_PREFIX, MUSE_PREFIX):
             self.assertIn(prefix, text)
         self.assertIn("Muse Code", text)
+        self.assertIn("mcp__recallum_context", text)
         self.assertIn("search_tool", text)
         self.assertIn("use_tool", text)
 
@@ -2178,6 +2193,7 @@ class InstallerTestCase(unittest.TestCase):
         stub_agy: bool = False,
         stub_muse: bool = False,
         stub_droid: bool = False,
+        stub_omp: bool = False,
     ) -> tuple[dict[str, str], Path]:
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -2191,6 +2207,7 @@ class InstallerTestCase(unittest.TestCase):
             ("agy", FAKE_AGY, stub_agy),
             ("muse", FAKE_MUSE, stub_muse),
             ("droid", FAKE_DROID, stub_droid),
+            ("omp", FAKE_OMP, stub_omp),
         ):
             if not wanted:
                 continue
@@ -2455,7 +2472,7 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "none of the codex, claude, grok, cursor-agent/agent, devin, agy, muse, or droid CLIs",
+                "none of the codex, claude, grok, cursor-agent/agent, devin, agy, muse, droid, or omp CLIs",
                 result.stderr,
             )
             self.assertFalse(log.exists())
@@ -3568,6 +3585,7 @@ class DoctorTests(unittest.TestCase):
         env = os.environ.copy()
         env.pop("RECALLUM_API_KEY", None)
         env.pop("FACTORY_HOME_OVERRIDE", None)
+        env.pop("PI_CODING_AGENT_DIR", None)
         env.update(
             {
                 "HOME": str(home),
@@ -4909,6 +4927,200 @@ class DevinInstallTests(InstallerTestCase):
             self.assertEqual(backups, [])
 
 
+class OmpInstallTests(InstallerTestCase):
+    """OMP writes an environment-variable bearer into ~/.omp/agent/mcp.json.
+
+    OMP expands ${VAR} in native mcp.json at discovery time, so the config
+    holds no Recallum secret. type is http. PI_CODING_AGENT_DIR overrides the
+    agent directory. A recallum name in disabledServers is removed.
+    """
+
+    def _omp_env(
+        self, root: Path, *, with_key: bool = True
+    ) -> tuple[dict[str, str], Path]:
+        env, log = self._fake_clis(root, stub_omp=True)
+        env.pop(TOKEN_ENV_VAR, None)
+        if with_key:
+            env["RECALLUM_API_KEY"] = SENTINEL_KEY
+        return env, log
+
+    @staticmethod
+    def _config(env: dict[str, str]) -> Path:
+        override = env.get("PI_CODING_AGENT_DIR")
+        if override:
+            return Path(override) / "mcp.json"
+        return Path(env["HOME"]) / ".omp" / "agent" / "mcp.json"
+
+    @staticmethod
+    def _env_file(env: dict[str, str]) -> Path:
+        return Path(env["HOME"]) / ".config" / "recallum" / "env"
+
+    def _assert_no_leak(self, result: subprocess.CompletedProcess[str], log: Path) -> None:
+        captured = result.stdout + result.stderr
+        if log.exists():
+            captured += log.read_text(encoding="utf-8")
+        self.assertNotIn(SENTINEL_KEY, captured)
+
+    def test_explicit_target_requires_the_omp_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env, log = self._fake_clis(Path(directory), stub_omp=False)
+            result = self._run(env, "--url", URL, "--target", "omp", "--dry-run")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("omp CLI is not installed", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_dry_run_lists_omp_config_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            result = self._run(env, "--url", URL, "--target", "omp", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(".omp/agent/mcp.json", result.stdout)
+            self.assertIn("server recallum", result.stdout)
+            self.assertIn("type=http", result.stdout)
+            self._assert_no_leak(result, log)
+            self.assertFalse(self._config(env).exists())
+
+    def test_mcp_config_has_http_type_env_reference_schema_and_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            config = self._config(env)
+            self.assertTrue(config.is_file())
+            raw = config.read_text(encoding="utf-8")
+            self.assertNotIn(SENTINEL_KEY, raw)
+            data = json.loads(raw)
+            self.assertIn("$schema", data)
+            server = data["mcpServers"]["recallum"]
+            self.assertEqual(server["type"], "http")
+            self.assertEqual(server["url"], URL)
+            self.assertEqual(
+                server["headers"]["Authorization"], "Bearer ${RECALLUM_API_KEY}"
+            )
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_no_store_api_key_writes_placeholder_and_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root, with_key=False)
+            result = self._run(
+                env, "--url", URL, "--target", "omp", "--no-store-api-key"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            data = json.loads(self._config(env).read_text(encoding="utf-8"))
+            auth = data["mcpServers"]["recallum"]["headers"]["Authorization"]
+            self.assertEqual(auth, "Bearer ${RECALLUM_API_KEY}")
+            self.assertIn("no API key stored", result.stderr)
+            self.assertIn("so OMP can resolve the bearer", result.stderr)
+
+    def test_install_persists_api_key_to_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            env_file = self._env_file(env)
+            self.assertTrue(env_file.is_file())
+            self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+            contents = env_file.read_text(encoding="utf-8")
+            self.assertIn(f"RECALLUM_API_KEY={SENTINEL_KEY!r}", contents)
+
+    def test_preserves_unrelated_servers_and_drops_disabled_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            config = self._config(env)
+            config.parent.mkdir(parents=True)
+            other = {
+                "type": "http",
+                "url": "https://other.example/mcp/",
+                "headers": {"X-Keep": "yes"},
+            }
+            config.write_text(
+                json.dumps(
+                    {
+                        "theme": "dark",
+                        "disabledServers": ["recallum", "keep-me"],
+                        "mcpServers": {"other-tool": other},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            merged = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(merged["mcpServers"]["other-tool"], other)
+            self.assertEqual(merged["theme"], "dark")
+            self.assertEqual(merged["disabledServers"], ["keep-me"])
+            self.assertEqual(merged["mcpServers"]["recallum"]["type"], "http")
+            self.assertEqual(merged["mcpServers"]["recallum"]["url"], URL)
+
+    def test_coding_agent_dir_overrides_the_default_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            override = root / "profile-agent"
+            env["PI_CODING_AGENT_DIR"] = str(override)
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            self.assertTrue((override / "mcp.json").is_file())
+            self.assertFalse((Path(env["HOME"]) / ".omp" / "agent" / "mcp.json").exists())
+
+    def test_existing_literal_auth_is_replaced_by_env_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            config = self._config(env)
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "recallum": {
+                                "type": "http",
+                                "url": "https://old.example/mcp/",
+                                "headers": {"Authorization": "Bearer old-literal-key"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            data = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["mcpServers"]["recallum"]["headers"]["Authorization"],
+                "Bearer ${RECALLUM_API_KEY}",
+            )
+            backups = [p for p in config.parent.iterdir() if p != config]
+            self.assertEqual(backups, [])
+
+    def test_idempotent_rerun_does_not_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            first = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self._assert_no_leak(first, log)
+            config = self._config(env)
+            before = config.read_bytes()
+            second = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self._assert_no_leak(second, log)
+            self.assertIn("already matches", second.stdout)
+            self.assertEqual(config.read_bytes(), before)
+
+
 class MuseInstallTests(InstallerTestCase):
     """Muse Code installs a native bundle and a literal-token settings entry.
 
@@ -5570,6 +5782,7 @@ class MuseDoctorTests(unittest.TestCase):
         env = os.environ.copy()
         env.pop("RECALLUM_API_KEY", None)
         env.pop("FACTORY_HOME_OVERRIDE", None)
+        env.pop("PI_CODING_AGENT_DIR", None)
         env.update(
             {
                 "HOME": str(home),
@@ -5700,6 +5913,168 @@ class MuseDoctorTests(unittest.TestCase):
                     os.environ["XDG_CONFIG_HOME"] = old_xdg
             self.assertTrue(report["plugin_present"])
             self.assertTrue(any("Muse Code" in p and "DRIFT" in p for p in problems))
+
+
+class OmpDoctorTests(unittest.TestCase):
+    def _write(self, home: Path, relative: str, contents: str, mode: int = 0o600) -> Path:
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def _run_doctor(
+        self,
+        home: Path,
+        *args: str,
+        agent_dir: Path | None = None,
+        token: str | None = "rcl_doctor_secret_123",
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.pop("RECALLUM_API_KEY", None)
+        env.pop("PI_CODING_AGENT_DIR", None)
+        env.update(
+            {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "PATH": str(home / "bin") + ":/usr/bin:/bin",
+            }
+        )
+        if agent_dir is not None:
+            env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+        if token is not None:
+            env["RECALLUM_API_KEY"] = token
+        return subprocess.run(
+            [str(DOCTOR), *args],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _server(
+        self,
+        *,
+        url: str = "https://recallum.example/mcp/",
+        auth: str = "Bearer ${RECALLUM_API_KEY}",
+        transport: str | None = "http",
+    ) -> dict[str, object]:
+        server: dict[str, object] = {
+            "url": url,
+            "headers": {"Authorization": auth},
+        }
+        if transport is not None:
+            server["type"] = transport
+        return server
+
+    def test_placeholder_with_env_set_is_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(
+                home,
+                ".omp/agent/mcp.json",
+                json.dumps({"mcpServers": {"recallum": self._server()}}),
+            )
+            result = self._run_doctor(home, "--json")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            report = json.loads(result.stdout)
+            omp = report["clients"]["OMP"]["native_mcp"]
+            self.assertEqual(omp["type"], "http")
+            self.assertEqual(omp["url"], "https://recallum.example/mcp/")
+            self.assertEqual(omp["auth"], "Bearer ${RECALLUM_API_KEY}")
+            self.assertNotIn("rcl_doctor_secret_123", result.stdout)
+            self.assertIn("OMP", result.stdout)
+
+    def test_unset_env_reference_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(
+                home,
+                ".omp/agent/mcp.json",
+                json.dumps({"mcpServers": {"recallum": self._server()}}),
+            )
+            result = self._run_doctor(home, token=None)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("OMP environment variable is unset", result.stdout)
+
+    def test_missing_type_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(
+                home,
+                ".omp/agent/mcp.json",
+                json.dumps(
+                    {"mcpServers": {"recallum": self._server(transport=None)}}
+                ),
+            )
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("type must be http", result.stdout)
+
+    def test_disabled_servers_hides_recallum(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(
+                home,
+                ".omp/agent/mcp.json",
+                json.dumps(
+                    {
+                        "disabledServers": ["recallum"],
+                        "mcpServers": {"recallum": self._server()},
+                    }
+                ),
+            )
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("disabledServers hides recallum", result.stdout)
+
+    def test_missing_file_reports_no_client(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertNotIn("OMP", report["clients"])
+            self.assertFalse(any("OMP" in problem for problem in report["problems"]))
+
+    def test_present_file_without_server_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(home, ".omp/agent/mcp.json", "{}\n")
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("server entry is missing", result.stdout)
+
+    def test_invalid_json_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(home, ".omp/agent/mcp.json", "{")
+            result = self._run_doctor(home)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("mcp.json is invalid", result.stdout)
+
+    def test_coding_agent_dir_is_the_file_the_doctor_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            agent = home / "elsewhere"
+            self._write(
+                home,
+                ".omp/agent/mcp.json",
+                json.dumps({"mcpServers": {}}),
+            )
+            (agent).mkdir()
+            (agent / "mcp.json").write_text(
+                json.dumps({"mcpServers": {"recallum": self._server()}}),
+                encoding="utf-8",
+            )
+            (agent / "mcp.json").chmod(0o600)
+            result = self._run_doctor(home, "--json", agent_dir=agent)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            report = json.loads(result.stdout)
+            self.assertEqual(
+                report["clients"]["OMP"]["native_mcp"]["auth"],
+                "Bearer ${RECALLUM_API_KEY}",
+            )
 
 
 if __name__ == "__main__":

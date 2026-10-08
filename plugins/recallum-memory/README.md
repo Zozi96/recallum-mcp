@@ -5,7 +5,7 @@
 # Recallum Memory plugin
 
 Durable, project-aware memory for **Cursor**, **Grok Build**, **Codex**, **Claude Code**,
-**Devin CLI**, **Antigravity CLI**, **Muse Code**, and **Factory Droid**, backed by a self-hosted Recallum MCP server.
+**Devin CLI**, **Antigravity CLI**, **Muse Code**, **Factory Droid**, and **OMP**, backed by a self-hosted Recallum MCP server.
 
 The plugin ships:
 
@@ -21,11 +21,12 @@ The plugin ships:
   with `muse plugins hook test` on 1.3.0; each event needs its own wrapper script). Factory Droid
   runs the same `hooks.json` (`SessionStart` plus `UserPromptSubmit`; the hook script is resolved
   through the literal `${DROID_PLUGIN_ROOT}` token in the hook command because the variable's
-  value is not a usable path). All fail
+  value is not a usable path). OMP is MCP-only in this installer: its hook runtime is a JS/TS
+  extension factory, not this command hook, and no SessionStart dispatch was observed. All fail
   open;
 - the MCP wiring for each client.
 
-One plugin package, eight native entry points — not a Claude-only addon:
+One plugin package, nine native entry points — not a Claude-only addon:
 
 | Client | Marketplace index | Plugin metadata |
 | --- | --- | --- |
@@ -37,6 +38,7 @@ One plugin package, eight native entry points — not a Claude-only addon:
 | Antigravity CLI | n/a — `agy plugin install <dir>` (local dir or HTTPS GitHub URL) | `plugin.json` |
 | Muse Code | n/a — `muse plugins install <dir>` (local dir) | `.muse-plugin/plugin.json` |
 | Factory Droid | local-path marketplace (repo root; `.claude-plugin/marketplace.json` fallback, name = repo directory basename) | `plugin.json` |
+| OMP | n/a — native `~/.omp/agent/mcp.json` (`type: http`) | n/a — no plugin install |
 
 ## Grok only (no Claude Code)
 
@@ -193,6 +195,33 @@ unavailable. Start a new droid session so MCP, skills, and hooks reload; after a
 rerun `install.sh --target droid` to refresh the installed plugin
 (`droid plugin update recallum-memory@<basename>`).
 
+## OMP
+
+OMP ships as `omp`. Native MCP lives in `~/.omp/agent/mcp.json`, or in
+`$PI_CODING_AGENT_DIR/mcp.json` when that variable is set:
+
+```bash
+export RECALLUM_API_KEY=rcl_YOUR_API_KEY
+plugins/recallum-memory/scripts/install.sh --target omp --url https://recallum.example.com/mcp/
+```
+
+The installer writes `mcpServers.recallum` with `type: http`, the endpoint, and
+`Authorization: Bearer ${RECALLUM_API_KEY}` (mode 600). OMP expands `${VAR}` while discovering
+that file, so the config holds no Recallum secret. Other servers are preserved. A `recallum`
+name in `disabledServers` is removed, because that denylist hides the server from every source.
+`--target both` does not include OMP. `--remote` does not cover this target.
+
+There is no plugin install and no session hook. OMP hooks are JS/TS factories under
+`.omp/hooks/pre|post/`, not the Claude command hook in `hooks/hooks.json`, and this package
+does not ship one. A project `.omp/mcp.json` entry named `recallum` wins over the user file;
+the installer never writes a project file. A named profile (`omp --profile`) reads
+`~/.omp/profiles/<name>/agent/mcp.json` instead of the default agent directory — set
+`PI_CODING_AGENT_DIR` to that directory before installing.
+
+OMP's documented runtime names are `mcp__<server>_<tool>` (oh-my-pi
+`docs/mcp-runtime-lifecycle.md`). That predicts `mcp__recallum_context`. This spelling was
+not observed against a live Recallum handshake. Restart OMP so MCP reloads.
+
 ## Prerequisites
 
 - A reachable Recallum server, yours. The endpoint must be HTTPS; plain HTTP is accepted only for
@@ -201,7 +230,7 @@ rerun `install.sh --target droid` to refresh the installed plugin
   to `/mcp/`. It defaults to `https://recallum.zozbit.com/mcp/`; the Cursor marketplace has no
   endpoint default, so nobody inherits another operator's server without choosing it.
 - `python3` on `PATH` — the hooks run under it. Any 3.9+ interpreter works.
-- The `agent`, `codex`, `claude`, `grok`, `devin`, `droid`, and/or `agy` CLI as applicable.
+- The `agent`, `codex`, `claude`, `grok`, `devin`, `agy`, `muse`, `droid`, and/or `omp` CLI as applicable.
 
 ## Install
 
@@ -498,6 +527,7 @@ Claude Desktop ToolSearch (`mcp__recallum__*`):
 | Devin CLI | `mcp__recallum__` |
 | Muse Code | `mcp__recallum__` |
 | Factory Droid | `recallum___` (triple underscore; ToolSearch when deferred) |
+| OMP | `mcp__recallum_` (documented as `mcp__<server>_<tool>`, so `mcp__recallum_context`; not a live handshake) |
 | Antigravity CLI | **not yet determined** — no prefix constant exists; prefer skill-driven tool discovery |
 
 Both skills document this, and the session hook emits the client-appropriate name or discovery

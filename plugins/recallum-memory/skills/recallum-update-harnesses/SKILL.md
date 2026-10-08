@@ -1,6 +1,6 @@
 ---
 name: recallum-update-harnesses
-description: Updates the Recallum plugin on every installed harness after a plugin version bump. Use when the user asks to update harnesses, refresh client plugins, sync Codex/Claude/.agents/Grok/Cursor/Devin/Antigravity/Muse/Droid to a new recallum-memory version, or fix VERSION DRIFT from recallum_doctor.
+description: Updates the Recallum plugin on every installed harness after a plugin version bump. Use when the user asks to update harnesses, refresh client plugins, sync Codex/Claude/.agents/Grok/Cursor/Devin/Antigravity/Muse/Droid/OMP to a new recallum-memory version, or fix VERSION DRIFT from recallum_doctor.
 ---
 
 # Recallum Update Harnesses
@@ -11,14 +11,14 @@ Refresh already-installed plugin copies so they match this checkout's
 
 Never print, echo, interpolate, or store an API key in chat. Do not `cat`,
 `head`, `grep`, or parse `~/.cursor/mcp.json`, `~/.claude/.credentials.json`,
-`~/.claude.json`, `~/.config/recallum/env`, `~/.grok/config.toml`, or any
+`~/.claude.json`, `~/.config/recallum/env`, `~/.grok/config.toml`, `~/.omp/agent/mcp.json`, or any
 plugin-cache `mcp.json`.
 
 Tool prefixes (for new-session checks only): Codex `mcp__recallum__`, Claude
 Code plugin `mcp__plugin_recallum-memory_recallum__`, Claude native/Desktop
 `mcp__recallum__`, Grok `recallum__` via `search_tool` / `use_tool`, Cursor
 Available Tools (no stable prefix), Devin `mcp__recallum__`, Muse Code
-`mcp__recallum__`, Factory Droid `recallum___` (ToolSearch when deferred).
+`mcp__recallum__`, Factory Droid `recallum___` (ToolSearch when deferred), OMP `mcp__recallum_context` (documented; not a live handshake).
 
 ## 1. Baseline
 
@@ -30,7 +30,7 @@ python3 plugins/recallum-memory/scripts/recallum_doctor.py --json
 
 Record `repo_version` and every `VERSION DRIFT` line. Detect CLIs with
 `command -v` for `codex`, `claude`, `grok`, `agent`/`cursor-agent`, `devin`,
-`agy`, `muse`, `droid`. Skip a client that is not installed.
+`agy`, `muse`, `droid`, `omp`. Skip a client that is not installed.
 
 `PLUGIN` below is `<repo>/plugins/recallum-memory`. Repo marketplace name is
 `recallum-local`.
@@ -156,6 +156,13 @@ If the update reports the plugin missing, rerun
 rewrite `~/.factory/mcp.json` unless MCP itself is broken. The doctor's
 `Factory Droid` version-drift check reads the installed bundle's `plugin.json`,
 so rerun it after the update.
+
+### OMP (`omp`)
+
+OMP has no Recallum plugin to update. Leave `~/.omp/agent/mcp.json` (or
+`$PI_CODING_AGENT_DIR/mcp.json`) alone unless the endpoint itself is wrong.
+Re-run `install.sh --target omp` only to change that URL. Do not read the file
+to inspect the key; the Recallum entry is `Bearer ${RECALLUM_API_KEY}`.
 
 ## 3. Verify
 
