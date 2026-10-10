@@ -29,6 +29,15 @@ Do **not** require the advisory workflow
 (`fastmcp-candidate-advisory.yml` / continue-on-error). Advisory failures must
 never replace locked required checks on unrelated PRs.
 
+`python-3.15` and `docker-python-3.15` are extra lanes, not required checks.
+Production already requires CPython 3.15: `requires-python`, `.python-version`,
+and `deploy/Dockerfile` (Debian trixie-slim with CPython 3.15.0 installed by
+uv, because Docker Hub has no `python:3.15-slim`). The required jobs
+`postgres-integration`, `docker-build`, `vertical-granian`, and
+`traefik-pinned` install or build that 3.15 interpreter. Compiled packages
+must come from wheels; PyYAML 6.0.3 is allowed to build from source and falls
+back to pure Python.
+
 ## Apply steps (human, privileged)
 
 1. Open GitHub → Settings → Rules → Rulesets (or classic Branch protection) for `main`.

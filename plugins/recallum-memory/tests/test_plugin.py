@@ -2472,7 +2472,8 @@ class SharedInstallerTests(InstallerTestCase):
             result = self._run(env, "--url", URL, "--dry-run")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "none of the codex, claude, grok, cursor-agent/agent, devin, agy, muse, droid, or omp CLIs",
+                "none of the codex, claude, grok, cursor-agent/agent, "
+                "devin, agy, muse, droid, or omp CLIs",
                 result.stderr,
             )
             self.assertFalse(log.exists())
@@ -5449,7 +5450,10 @@ class DroidInstallTests(InstallerTestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--force-mcp", result.stderr)
             self._assert_no_leak(result, log)
-            self.assertNotIn(["droid", "plugin", "marketplace", "add", str(REPO_ROOT)], self._calls(log))
+            self.assertNotIn(
+                ["droid", "plugin", "marketplace", "add", str(REPO_ROOT)],
+                self._calls(log),
+            )
             self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in self._calls(log)))
 
     def test_force_replaces_differing_entry_and_preserves_other_servers(self) -> None:
@@ -5667,7 +5671,12 @@ class DroidDoctorTests(unittest.TestCase):
             self._plugin(home)
             result = self._run(home, token=False)
             self.assertEqual(result.returncode, 1)
-            for message in ("type must be http", "oauth=false", "must use HTTPS", "environment variable is unset"):
+            for message in (
+                "type must be http",
+                "oauth=false",
+                "must use HTTPS",
+                "environment variable is unset",
+            ):
                 self.assertIn(message, result.stdout)
 
     def test_literal_secret_is_redacted_and_insecure_mode_flagged(self) -> None:

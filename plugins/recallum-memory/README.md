@@ -621,7 +621,7 @@ uv run ruff check plugins/recallum-memory
 ```
 
 `plugins/recallum-memory/.ruff.toml` pins `target-version = "py39"` for this directory. The
-repository targets Python 3.14, and at that target `ruff format` rewrites the hook into 3.14-only
+repository targets Python 3.15, and at that target `ruff format` rewrites the hook into 3.15-only
 syntax (PEP 758 unparenthesized `except A, B:`), which is a `SyntaxError` on the interpreters this
 hook actually has to run on. A test enforces the same floor via
 `ast.parse(..., feature_version=(3, 9))`.

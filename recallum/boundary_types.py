@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import (
     AfterValidator,
@@ -110,7 +110,7 @@ def password_model(base: type[BaseModel], max_chars: int) -> type[BaseModel]:
     )
 
 
-def validate_strict(value: object, annotation: object) -> object:
+def validate_strict(value: object, annotation: Any) -> object:
     """Validate a domain argument with the same rules as transport schemas."""
     return TypeAdapter(annotation).validate_python(value)
 

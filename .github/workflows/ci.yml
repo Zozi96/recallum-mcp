@@ -19,7 +19,7 @@ jobs:
         with:
           enable-cache: true
       - name: Python toolchain
-        run: uv python install
+        run: uv python install 3.15
       - name: Sync locked deps
         run: uv sync --locked --group dev
       - name: uv lock --check
@@ -37,7 +37,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - run: uv python install 3.15
       - run: uv sync --locked --group dev
       - name: Unit tests (excl. vertical/traefik/integration)
         run: >
@@ -55,7 +55,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - run: uv python install 3.15
       - run: uv sync --locked --group dev
       - name: OpenAPI snapshot check
         run: uv run python scripts/export_web_openapi.py --check
@@ -89,6 +89,10 @@ jobs:
         run: docker run --rm --entrypoint /bin/sh recallum:ci -c 'test -x /usr/local/bin/recallum-entrypoint'
       - name: Explicit commands pass through the entrypoint
         run: docker run --rm recallum:ci /bin/echo entrypoint-passthrough-ok
+      - name: Image interpreter is CPython 3.15
+        run: >
+          docker run --rm --entrypoint /app/.venv/bin/python recallum:ci
+          -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
 
   postgres-integration:
     name: postgres-integration
@@ -98,7 +102,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - name: Python 3.15
+        run: |
+          uv python install 3.15
+          uv run python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - run: uv sync --locked --group dev
       - name: PostgreSQL + pgvector + embedding HTTP stub
         run: bash scripts/pytest_require_executed.sh tests/integration -m integration --tb=short
@@ -111,7 +118,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - name: Python 3.15
+        run: |
+          uv python install 3.15
+          uv run python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - run: uv sync --locked --group dev
       - name: External Granian vertical contract
         run: bash scripts/pytest_require_executed.sh tests/vertical -m vertical --tb=short
@@ -124,7 +134,85 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - name: Python 3.15
+        run: |
+          uv python install 3.15
+          uv run python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - run: uv sync --locked --group dev
       - name: Pinned Traefik contract
         run: bash scripts/pytest_require_executed.sh tests/traefik -m traefik --tb=short
+
+  # Host CPython 3.15 unit lane. Compiled deps must come from wheels;
+  # PyYAML 6.0.3 is the exception and builds from its sdist (pure Python
+  # when the C extension cannot be compiled).
+  python-315:
+    name: python-3.15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Python 3.15
+        run: uv python install 3.15
+      - name: Sync locked dependencies
+        run: >
+          uv sync --python 3.15 --locked --group dev
+          --no-build-package asyncpg
+          --no-build-package granian
+          --no-build-package argon2-cffi-bindings
+          --no-build-package pydantic-core
+          --no-build-package markupsafe
+          --no-build-package cffi
+          --no-build-package greenlet
+          --no-build-package watchfiles
+          --no-build-package rpds-py
+          --no-build-package cryptography
+          --no-build-package mypy
+      - name: Report whether PyYAML built its C extension
+        run: uv run --python 3.15 python -c 'import yaml; print("yaml.__with_libyaml__", yaml.__with_libyaml__)'
+      - name: Unit tests
+        run: >
+          uv run --python 3.15 pytest tests/unit
+          -m "not integration and not vertical and not traefik"
+          --tb=short
+      - name: Plugin / manifest tests
+        run: uv run --python 3.15 pytest plugins/recallum-memory/tests -q --tb=short
+
+  docker-python-315:
+    name: docker-python-3.15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image on Python 3.15
+        run: >
+          docker build -f deploy/Dockerfile
+          --target production
+          -t recallum:py315 .
+      - name: Entrypoint passes commands through on 3.15
+        run: docker run --rm recallum:py315 /bin/echo entrypoint-passthrough-ok
+      - name: Build test image on Python 3.15
+        run: >
+          docker build -f deploy/Dockerfile
+          --target ci
+          -t recallum:py315-ci .
+      - name: Image interpreter is CPython 3.15
+        run: >
+          docker run --rm --entrypoint /app/.venv/bin/python recallum:py315
+          -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
+      - name: PyYAML pure-Python fallback inside the image
+        run: >
+          docker run --rm --entrypoint /app/.venv/bin/python recallum:py315
+          -c 'import yaml; assert yaml.__with_libyaml__ is False, yaml.__with_libyaml__'
+      - name: Unit tests inside the 3.15 image
+        run: >
+          docker run --rm
+          -v "${{ github.workspace }}:/src:ro"
+          -w /src
+          -e PYTHONDONTWRITEBYTECODE=1
+          --entrypoint /app/.venv/bin/pytest
+          recallum:py315-ci
+          /src/tests/unit
+          -m "not integration and not vertical and not traefik"
+          -o cache_dir=/tmp/pytest-cache
+          --tb=short
