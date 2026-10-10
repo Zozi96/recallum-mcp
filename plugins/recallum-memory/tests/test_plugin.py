@@ -373,7 +373,7 @@ if args == ["plugins", "list", "--json"]:
     if os.environ.get("FAKE_MUSE_PLUGIN", "missing") == "installed":
         print(json.dumps({"plugins": [{
             "record": {"id": "recallum-memory"},
-            "plugin": {"id": "recallum-memory", "version": "0.20.0"},
+            "plugin": {"id": "recallum-memory", "version": "0.21.0"},
         }]}))
     else:
         print(json.dumps({"plugins": []}))
@@ -1522,7 +1522,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(codex["version"], cursor["version"])
         self.assertEqual(codex["version"], devin["version"])
         self.assertEqual(codex["version"], muse["version"])
-        self.assertEqual(codex["version"], "0.20.0")
+        self.assertEqual(codex["version"], "0.21.0")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
         self.assertIn("Cursor", grok["description"])

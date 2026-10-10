@@ -1243,7 +1243,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd77
 
 [[package]]
 name = "recallum"
-version = "0.28.0"
+version = "0.29.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
