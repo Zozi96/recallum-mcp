@@ -128,3 +128,29 @@ jobs:
       - run: uv sync --locked --group dev
       - name: Pinned Traefik contract
         run: bash scripts/pytest_require_executed.sh tests/traefik -m traefik --tb=short
+
+  # Python 3.15.0 is final, but this lane is not a required check. Production
+  # stays on 3.14 until every compiled dependency publishes a 3.15 wheel.
+  # PyYAML 6.0.3 (latest on PyPI; required by FastMCP) has none, so the
+  # wheel-only install below fails and names that package.
+  python-315:
+    name: python-3.15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Python 3.15
+        run: uv python install 3.15
+      - name: Sync locked dependencies (source builds allowed)
+        run: uv sync --python 3.15 --locked --group dev
+      - name: Unit tests
+        run: >
+          uv run --python 3.15 pytest tests/unit
+          -m "not integration and not vertical and not traefik"
+          --tb=short
+      - name: Plugin / manifest tests
+        run: uv run --python 3.15 pytest plugins/recallum-memory/tests -q --tb=short
+      - name: Compiled dependencies must install from a 3.15 wheel
+        run: uv sync --python 3.15 --locked --group dev --no-build
