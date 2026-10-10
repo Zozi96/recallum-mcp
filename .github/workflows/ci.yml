@@ -19,7 +19,7 @@ jobs:
         with:
           enable-cache: true
       - name: Python toolchain
-        run: uv python install
+        run: uv python install 3.15
       - name: Sync locked deps
         run: uv sync --locked --group dev
       - name: uv lock --check
@@ -37,7 +37,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - run: uv python install 3.15
       - run: uv sync --locked --group dev
       - name: Unit tests (excl. vertical/traefik/integration)
         run: >
@@ -55,7 +55,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - run: uv python install 3.15
       - run: uv sync --locked --group dev
       - name: OpenAPI snapshot check
         run: uv run python scripts/export_web_openapi.py --check
@@ -89,6 +89,10 @@ jobs:
         run: docker run --rm --entrypoint /bin/sh recallum:ci -c 'test -x /usr/local/bin/recallum-entrypoint'
       - name: Explicit commands pass through the entrypoint
         run: docker run --rm recallum:ci /bin/echo entrypoint-passthrough-ok
+      - name: Image interpreter is CPython 3.15
+        run: >
+          docker run --rm --entrypoint /app/.venv/bin/python recallum:ci
+          -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
 
   postgres-integration:
     name: postgres-integration
@@ -98,7 +102,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - name: Python 3.15
+        run: |
+          uv python install 3.15
+          uv run python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - run: uv sync --locked --group dev
       - name: PostgreSQL + pgvector + embedding HTTP stub
         run: bash scripts/pytest_require_executed.sh tests/integration -m integration --tb=short
@@ -111,7 +118,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - name: Python 3.15
+        run: |
+          uv python install 3.15
+          uv run python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - run: uv sync --locked --group dev
       - name: External Granian vertical contract
         run: bash scripts/pytest_require_executed.sh tests/vertical -m vertical --tb=short
@@ -124,14 +134,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv python install
+      - name: Python 3.15
+        run: |
+          uv python install 3.15
+          uv run python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - run: uv sync --locked --group dev
       - name: Pinned Traefik contract
         run: bash scripts/pytest_require_executed.sh tests/traefik -m traefik --tb=short
 
-  # Not a required check until production moves to 3.15. Compiled deps must
-  # come from wheels; PyYAML 6.0.3 is the exception and builds from its sdist
-  # (pure Python when the C extension cannot be compiled).
+  # Host CPython 3.15 unit lane. Compiled deps must come from wheels;
+  # PyYAML 6.0.3 is the exception and builds from its sdist (pure Python
+  # when the C extension cannot be compiled).
   python-315:
     name: python-3.15
     runs-on: ubuntu-latest
@@ -175,7 +188,6 @@ jobs:
         run: >
           docker build -f deploy/Dockerfile
           --target production
-          --build-arg PYTHON_IMAGE=python:3.15-slim
           -t recallum:py315 .
       - name: Entrypoint passes commands through on 3.15
         run: docker run --rm recallum:py315 /bin/echo entrypoint-passthrough-ok
@@ -183,8 +195,11 @@ jobs:
         run: >
           docker build -f deploy/Dockerfile
           --target ci
-          --build-arg PYTHON_IMAGE=python:3.15-slim
           -t recallum:py315-ci .
+      - name: Image interpreter is CPython 3.15
+        run: >
+          docker run --rm --entrypoint /app/.venv/bin/python recallum:py315
+          -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
       - name: PyYAML pure-Python fallback inside the image
         run: >
           docker run --rm --entrypoint /app/.venv/bin/python recallum:py315

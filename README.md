@@ -40,7 +40,7 @@ are generated locally with Ollama, storage is PostgreSQL with pgvector.
 
 FastAPI · FastMCP 3.x · Dependency Injector · SQLAlchemy 2.x (asyncpg) ·
 pgvector · Alembic · Ollama (`embeddinggemma:300m-qat-q4_0`, 768 dims) ·
-Python 3.14
+Python 3.15
 
 ## Quick start (local full stack)
 

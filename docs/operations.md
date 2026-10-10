@@ -17,7 +17,7 @@ Traefik labels (adjust the `Host(...)` rule).
 ## Image update policy
 
 Deploy images are pinned to immutable references in `deploy/Dockerfile`
-(`python:3.14-slim` by digest) and in `deploy/docker-compose.yml` /
+(Debian trixie-slim by digest, with CPython 3.15.0 installed by uv — Docker Hub has no `python:3.15-slim` yet) and in `deploy/docker-compose.yml` /
 `deploy/dokploy-compose.yml` (`pgvector/pgvector:pg17` by digest comment,
 `ollama/ollama:0.12.6` by tag). No deploy reference uses `:latest`.
 
