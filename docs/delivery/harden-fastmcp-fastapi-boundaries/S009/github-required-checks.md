@@ -29,11 +29,12 @@ Do **not** require the advisory workflow
 (`fastmcp-candidate-advisory.yml` / continue-on-error). Advisory failures must
 never replace locked required checks on unrelated PRs.
 
-Do **not** require `python-3.15` (`.github/workflows/ci.yml`) while it fails.
-That lane installs the locked environment on CPython 3.15 and then demands a
-binary wheel for every compiled dependency. It currently fails because
-PyYAML 6.0.3 publishes no cp315 wheel. Production, `requires-python`, and the
-other jobs stay on 3.14.
+Do **not** require `python-3.15` or `docker-python-3.15` until an owner
+promotes them. They install on CPython 3.15 (the Docker job builds
+`deploy/Dockerfile` with `PYTHON_IMAGE=python:3.15-slim`). Compiled packages
+must come from wheels; PyYAML 6.0.3 is allowed to build from source and falls
+back to pure Python. Production stays on the 3.14 image until that probe is
+green and the pins move together.
 
 ## Apply steps (human, privileged)
 

@@ -129,10 +129,9 @@ jobs:
       - name: Pinned Traefik contract
         run: bash scripts/pytest_require_executed.sh tests/traefik -m traefik --tb=short
 
-  # Python 3.15.0 is final, but this lane is not a required check. Production
-  # stays on 3.14 until every compiled dependency publishes a 3.15 wheel.
-  # PyYAML 6.0.3 (latest on PyPI; required by FastMCP) has none, so the
-  # wheel-only install below fails and names that package.
+  # Not a required check until production moves to 3.15. Compiled deps must
+  # come from wheels; PyYAML 6.0.3 is the exception and builds from its sdist
+  # (pure Python when the C extension cannot be compiled).
   python-315:
     name: python-3.15
     runs-on: ubuntu-latest
@@ -143,8 +142,22 @@ jobs:
           enable-cache: true
       - name: Python 3.15
         run: uv python install 3.15
-      - name: Sync locked dependencies (source builds allowed)
-        run: uv sync --python 3.15 --locked --group dev
+      - name: Sync locked dependencies
+        run: >
+          uv sync --python 3.15 --locked --group dev
+          --no-build-package asyncpg
+          --no-build-package granian
+          --no-build-package argon2-cffi-bindings
+          --no-build-package pydantic-core
+          --no-build-package markupsafe
+          --no-build-package cffi
+          --no-build-package greenlet
+          --no-build-package watchfiles
+          --no-build-package rpds-py
+          --no-build-package cryptography
+          --no-build-package mypy
+      - name: Report whether PyYAML built its C extension
+        run: uv run --python 3.15 python -c 'import yaml; print("yaml.__with_libyaml__", yaml.__with_libyaml__)'
       - name: Unit tests
         run: >
           uv run --python 3.15 pytest tests/unit
@@ -152,5 +165,39 @@ jobs:
           --tb=short
       - name: Plugin / manifest tests
         run: uv run --python 3.15 pytest plugins/recallum-memory/tests -q --tb=short
-      - name: Compiled dependencies must install from a 3.15 wheel
-        run: uv sync --python 3.15 --locked --group dev --no-build
+
+  docker-python-315:
+    name: docker-python-3.15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image on Python 3.15
+        run: >
+          docker build -f deploy/Dockerfile
+          --target production
+          --build-arg PYTHON_IMAGE=python:3.15-slim
+          -t recallum:py315 .
+      - name: Entrypoint passes commands through on 3.15
+        run: docker run --rm recallum:py315 /bin/echo entrypoint-passthrough-ok
+      - name: Build test image on Python 3.15
+        run: >
+          docker build -f deploy/Dockerfile
+          --target ci
+          --build-arg PYTHON_IMAGE=python:3.15-slim
+          -t recallum:py315-ci .
+      - name: PyYAML pure-Python fallback inside the image
+        run: >
+          docker run --rm --entrypoint /app/.venv/bin/python recallum:py315
+          -c 'import yaml; assert yaml.__with_libyaml__ is False, yaml.__with_libyaml__'
+      - name: Unit tests inside the 3.15 image
+        run: >
+          docker run --rm
+          -v "${{ github.workspace }}:/src:ro"
+          -w /src
+          -e PYTHONDONTWRITEBYTECODE=1
+          --entrypoint /app/.venv/bin/pytest
+          recallum:py315-ci
+          /src/tests/unit
+          -m "not integration and not vertical and not traefik"
+          -o cache_dir=/tmp/pytest-cache
+          --tb=short
