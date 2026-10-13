@@ -1,31 +1,16 @@
-# Recallum application image. CPython 3.15.0.
-# Docker Hub library/python has not published 3.15-slim or 3.15.0-slim
-# (checked 2026-10-10; the newest tag is the release candidate
-# 3.15.0rc3-slim). The runtime is the CPython 3.15.0 build uv installs,
-# on a pinned Debian slim base, not that release-candidate image.
-ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
-FROM ${DEBIAN_IMAGE} AS runtime
+# Recallum application image. Base: python:3.15-slim (CPython 3.15.0).
+ARG PYTHON_IMAGE=python:3.15-slim@sha256:ea4f1f290e071bf7d28199cfb3e09f5dbad31b50e9c32fd58f2f2d7be915f3ae
+FROM ${PYTHON_IMAGE} AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON_INSTALL_DIR=/opt/python \
-    UV_PYTHON=3.15.0
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
 
-# ca-certificates: uv downloads CPython. passwd: groupadd/useradd.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates passwd \
-    && rm -rf /var/lib/apt/lists/*
-
-# uv 0.13.0 is the release that installs CPython 3.15.0.
 COPY --from=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 /uv /usr/local/bin/uv
-
-RUN uv python install 3.15.0 \
-    && ln -sf "$(uv python find 3.15.0)" /usr/local/bin/python \
-    && ln -sf /usr/local/bin/python /usr/local/bin/python3
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY recallum ./recallum
