@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail-open context hints for the Recallum plugin
-(Cursor, Codex, Claude Code, Grok, Devin, Muse Code).
+(Cursor, Codex, Claude Code, Grok, Devin, Muse Code, Factory Droid, OMP).
 
 Runs under whichever ``python3`` is on the host PATH, so this module must stay
 compatible with older interpreters. Do not use syntax newer than Python 3.9.
@@ -325,6 +325,9 @@ def _tool(name: str) -> str:
       ``CLAUDE_PLUGIN_ROOT`` for Claude-hook compatibility, so presence of
       ``CLAUDE_PLUGIN_ROOT`` alone does not identify Claude Code.
     * ``CLAUDE_PLUGIN_ROOT`` alone — Claude Code.
+    * ``RECALLUM_OMP`` — OMP. The extension sets this before calling the hook.
+      The documented spelling is ``mcp__recallum_<tool>`` and is not part of
+      the undifferentiated fallback list.
 
     Testing Claude first would make every Codex and Grok session look
     ambiguous and emit multiple spellings, which is noise the model has to
@@ -347,6 +350,8 @@ def _tool(name: str) -> str:
         # Plugin-bundled and installer dual-write native user MCP may both
         # exist; name either form so Desktop (native) and CLI (either) work.
         prefixes = [CLAUDE_TOOL_PREFIX, CLAUDE_NATIVE_TOOL_PREFIX]
+    elif os.environ.get("RECALLUM_OMP"):
+        return f"mcp__recallum_{name}"
     else:
         prefixes = [
             CODEX_TOOL_PREFIX,
@@ -413,6 +418,8 @@ def _lookup_hint() -> str:
             "use ToolSearch with +recallum or select: of the full name before "
             "concluding they are unavailable."
         )
+    if os.environ.get("RECALLUM_OMP"):
+        return ""
     return (
         " If tools are not listed directly, look them up with the client's tool "
         "search (ToolSearch in Claude Code; search_tool in Grok Build) before "

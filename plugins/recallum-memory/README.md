@@ -38,7 +38,7 @@ One plugin package, nine native entry points — not a Claude-only addon:
 | Antigravity CLI | n/a — `agy plugin install <dir>` (local dir or HTTPS GitHub URL) | `plugin.json` |
 | Muse Code | n/a — `muse plugins install <dir>` (local dir) | `.muse-plugin/plugin.json` |
 | Factory Droid | local-path marketplace (repo root; `.claude-plugin/marketplace.json` fallback, name = repo directory basename) | `plugin.json` |
-| OMP | n/a — native `~/.omp/agent/mcp.json` (`type: http`) | n/a — no plugin install |
+| OMP | local-path marketplace (repo root; catalog name `recallum-local`) | `package.json` (`omp.extensions` / `pi.extensions`) |
 
 ## Grok only (no Claude Code)
 
@@ -211,9 +211,11 @@ that file, so the config holds no Recallum secret. Other servers are preserved. 
 name in `disabledServers` is removed, because that denylist hides the server from every source.
 `--target both` does not include OMP. `--remote` does not cover this target.
 
-There is no plugin install and no session hook. OMP hooks are JS/TS factories under
-`.omp/hooks/pre|post/`, not the Claude command hook in `hooks/hooks.json`, and this package
-does not ship one. A project `.omp/mcp.json` entry named `recallum` wins over the user file;
+The installer registers this checkout as marketplace `recallum-local` and installs
+`recallum-memory@recallum-local`. OMP 18.10.4 does not execute `hooks/hooks.json`; the
+plugin's `package.json` points `omp.extensions` and `pi.extensions` at
+`hooks/omp-extension.js`, which runs the shared session hook. A project `.omp/mcp.json`
+entry named `recallum` wins over the user file;
 the installer never writes a project file. A named profile (`omp --profile`) reads
 `~/.omp/profiles/<name>/agent/mcp.json` instead of the default agent directory — set
 `PI_CODING_AGENT_DIR` to that directory before installing.

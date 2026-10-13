@@ -340,10 +340,12 @@ source.
 `--target both` remains Codex + Claude Code only and does **not** include OMP; you must pass
 `--target omp` explicitly. `--remote` does not cover this target.
 
-The installer does not install a plugin and does not register a session hook. OMP's hook
-runtime loads JS/TS factories from `.omp/hooks/pre|post/`, not the Claude command hook in
-`hooks/hooks.json`. No SessionStart dispatch was observed for this client, so none is claimed.
-A project `.omp/mcp.json` entry of the same name wins over the user file; the installer never
+The installer registers this checkout as marketplace `recallum-local` and installs
+`recallum-memory@recallum-local` (`omp plugin install --scope user`). OMP 18.10.4 does
+not execute `hooks/hooks.json`. The plugin `package.json` lists `omp.extensions` and
+`pi.extensions` at `hooks/omp-extension.js`, which injects the shared session hook.
+`--dry-run` prints those commands and never passes `--dry-run` to `omp` (that flag still
+writes). A project `.omp/mcp.json` entry of the same name wins over the user file; the installer never
 writes a project file (it would be committable). A named profile (`omp --profile <name>`) reads
 `~/.omp/profiles/<name>/agent/mcp.json` instead of the default agent directory. Set
 `PI_CODING_AGENT_DIR` to that profile's agent directory before installing, or the default file
@@ -369,11 +371,14 @@ disk because `droid plugin list` prints plain text only). After a `git pull`, re
 `droid plugin update recallum-memory@<basename>`), then start a new droid session so MCP,
 skills, and hooks reload.
 
-It reports an `OMP` client when `mcp.json` exists: whether the `recallum` server entry is
-present, its `type` (must be `http`), its `url`, the Authorization header
-(`Bearer ${RECALLUM_API_KEY}` redacted; the variable is checked and reported as set or unset),
-the file mode, and whether `disabledServers` still hides `recallum`. A missing file is "not
-configured", not a failure.
+It reports an `OMP` client when `mcp.json` or the plugin record exists: whether the
+`recallum` server entry is present, its `type` (must be `http`), its `url`, the Authorization
+header (`Bearer ${RECALLUM_API_KEY}` redacted; the variable is checked and reported as set
+or unset), the file mode, and whether `disabledServers` still hides `recallum`. The plugin
+record is `~/.omp/plugins/installed_plugins.json` (no secrets). Native MCP without
+`recallum-memory@recallum-local` is a problem; a present plugin must include
+`hooks/omp-extension.js` and reports its version. If neither the mcp file nor the plugin
+record exists, that is "not configured", not a failure.
 
 ## Agent usage guidance
 

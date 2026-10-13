@@ -1,0 +1,11 @@
+{
+  "name": "recallum-memory",
+  "private": true,
+  "type": "module",
+  "omp": {
+    "extensions": ["./hooks/omp-extension.js"]
+  },
+  "pi": {
+    "extensions": ["./hooks/omp-extension.js"]
+  }
+}

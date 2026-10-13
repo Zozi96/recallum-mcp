@@ -867,32 +867,93 @@ def _omp_config_path(home: Path) -> Path:
     return home / ".omp" / "agent" / "mcp.json"
 
 
+def _omp_plugins_path(home: Path) -> Path:
+    """Install record beside the agent dir's ``.omp`` tree, not a profile copy."""
+    agent = _omp_config_path(home).parent
+    for parent in agent.parents:
+        if parent.name == ".omp":
+            return parent / "plugins" / "installed_plugins.json"
+    return home / ".omp" / "plugins" / "installed_plugins.json"
+
+
+def _omp_plugin_entry(home: Path) -> dict[str, Any] | None:
+    payload = _read_json(_omp_plugins_path(home))
+    plugins = payload.get("plugins") if isinstance(payload, dict) else None
+    raw = plugins.get(PLUGIN_ID) if isinstance(plugins, dict) else None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list):
+        for item in reversed(raw):
+            if isinstance(item, dict):
+                return item
+    return None
+
+
+def _record_omp_plugin(
+    home: Path,
+    result: dict[str, Any],
+    mcp_has_recallum: bool,
+    expected: str | None,
+    problems: list[str],
+) -> None:
+    entry = _omp_plugin_entry(home)
+    if entry is None:
+        if mcp_has_recallum:
+            result["plugin_present"] = False
+            problems.append(
+                "config: OMP plugin recallum-memory is not installed "
+                "(skills/hooks unavailable; native MCP is unaffected)"
+            )
+        return
+    result["plugin_present"] = True
+    _version(result, "OMP", entry.get("version"), expected, problems)
+    install_path = entry.get("installPath")
+    extension = (
+        Path(install_path) / "hooks" / "omp-extension.js"
+        if isinstance(install_path, str) and install_path
+        else None
+    )
+    if extension is None or not extension.is_file():
+        problems.append(
+            "config: OMP plugin recallum-memory is missing hooks/omp-extension.js"
+        )
+
+
 def _omp(
-    home: Path, _expected: str | None, token_env: str, problems: list[str]
+    home: Path, expected: str | None, token_env: str, problems: list[str]
 ) -> dict[str, Any]:
-    """``_expected`` is unused: OMP support is a native MCP file, not a plugin
-    version. A missing file is "not configured", not a failure. A present file
-    must carry ``recallum`` as ``type: http`` with an env-expanded bearer."""
+    """Native MCP plus the marketplace plugin record.
+
+    A missing mcp.json and a missing plugin record together are "not
+    configured", not a failure. A present file must carry ``recallum`` as
+    ``type: http`` with an env-expanded bearer. Native MCP without the plugin
+    id is a problem; a present plugin must include ``hooks/omp-extension.js``.
+    """
     result: dict[str, Any] = {}
     config_path = _omp_config_path(home)
     if not config_path.is_file():
+        _record_omp_plugin(home, result, False, expected, problems)
         return result
     try:
         raw = config_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         problems.append(f"config: OMP mcp.json is unreadable ({config_path})")
+        _record_omp_plugin(home, result, False, expected, problems)
         return result
     try:
         config = json.loads(raw or "{}")
     except json.JSONDecodeError:
         problems.append(f"config: OMP mcp.json is invalid ({config_path})")
+        _record_omp_plugin(home, result, False, expected, problems)
         return result
     if not isinstance(config, dict):
         problems.append(f"config: OMP mcp.json root must be a JSON object ({config_path})")
+        _record_omp_plugin(home, result, False, expected, problems)
         return result
     server = _configured_server(config, "mcpServers", "recallum", "OMP", problems)
     if not isinstance(server, dict):
         problems.append(f"config: OMP recallum server entry is missing ({config_path})")
+        _record_omp_plugin(home, result, False, expected, problems)
         return result
     safe = _safe_server(server, include_type=True, url_key="url")
     result["native_mcp"] = safe
@@ -905,6 +966,7 @@ def _omp(
     disabled = config.get("disabledServers")
     if isinstance(disabled, list) and "recallum" in disabled:
         problems.append(f"config: OMP disabledServers hides recallum ({config_path})")
+    _record_omp_plugin(home, result, True, expected, problems)
     return result
 
 

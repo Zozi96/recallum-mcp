@@ -159,10 +159,17 @@ so rerun it after the update.
 
 ### OMP (`omp`)
 
-OMP has no Recallum plugin to update. Leave `~/.omp/agent/mcp.json` (or
-`$PI_CODING_AGENT_DIR/mcp.json`) alone unless the endpoint itself is wrong.
-Re-run `install.sh --target omp` only to change that URL. Do not read the file
-to inspect the key; the Recallum entry is `Bearer ${RECALLUM_API_KEY}`.
+If the plugin or `hooks/omp-extension.js` changed, reinstall with `--force`
+(that is `install.sh --force-mcp`, which runs
+`omp plugin install --force recallum-memory@recallum-local --scope user`):
+
+```bash
+plugins/recallum-memory/scripts/install.sh --target omp --force-mcp
+```
+
+Leave `~/.omp/agent/mcp.json` (or `$PI_CODING_AGENT_DIR/mcp.json`) alone unless
+the endpoint itself is wrong. Do not read the file to inspect the key; the
+Recallum entry is `Bearer ${RECALLUM_API_KEY}`.
 
 ## 3. Verify
 

@@ -88,12 +88,14 @@ API key handling (default: store when a key is available or can be prompted):
                $token_env_var at connection time (Droid expands ${VAR} in
                headers, so the file holds no secret). Tools appear as
                recallum___*. --remote does not cover this target.
-  OMP          writes ~/.omp/agent/mcp.json (or $PI_CODING_AGENT_DIR/mcp.json)
+  OMP          registers this checkout as marketplace recallum-local, installs
+               recallum-memory@recallum-local (skills + hooks/omp-extension.js),
+               and writes ~/.omp/agent/mcp.json (or $PI_CODING_AGENT_DIR/mcp.json)
                with type http and a Bearer resolved from $token_env_var at
                discovery time. The documented tool spelling is mcp__recallum_<tool>
-               (not a live handshake). No plugin install and no session hook:
-               OMP hooks are JS/TS factories, not the Claude command hook.
-               --remote does not cover this target. A named profile reads
+               (not a live handshake). OMP 18.10.4 does not execute hooks/hooks.json;
+               the session hook is the package.json extension. --remote does not
+               cover this target. A named profile reads
                ~/.omp/profiles/<name>/agent/mcp.json; set PI_CODING_AGENT_DIR
                to that directory before installing.
 EOF
@@ -1867,24 +1869,24 @@ PY
   fi
 }
 
-# OMP (`omp`). User-scope native MCP only. OMP expands ${VAR} in
-# ~/.omp/agent/mcp.json (or $PI_CODING_AGENT_DIR/mcp.json) at discovery time,
-# so the bearer is an environment reference and the file holds no Recallum
-# secret. Mode 0600 anyway: the file may contain other servers' secrets.
-# Unrelated mcpServers entries are preserved. A `recallum` name in
-# disabledServers is removed, because that denylist hides every source.
-# No plugin install: OMP session hooks are JS/TS factories, and the Claude
-# command hook in hooks/hooks.json is not an OMP SessionStart path.
+# OMP (`omp`). Native MCP plus a user-scope marketplace plugin.
+# OMP expands ${VAR} in ~/.omp/agent/mcp.json (or $PI_CODING_AGENT_DIR/mcp.json)
+# at discovery time, so the bearer is an environment reference and the file
+# holds no Recallum secret. Mode 0600 anyway: the file may contain other
+# servers' secrets. Unrelated mcpServers entries are preserved. A `recallum`
+# name in disabledServers is removed, because that denylist hides every source.
+# OMP 18.10.4 does not execute hooks/hooks.json. `omp plugin marketplace add`
+# of this checkout loads package.json omp.extensions / pi.extensions
+# (hooks/omp-extension.js). --dry-run must never be passed to omp: that flag
+# still writes. Probes are read-only and run even during dry-run.
 install_for_omp() {
   local omp_agent="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}"
   local omp_mcp="$omp_agent/mcp.json"
 
   if ((dry_run)); then
     echo "dry-run: write $omp_mcp server recallum (type=http, url=$url, Bearer \${$token_env_var})"
-    return 0
-  fi
-
-  python3 - "$omp_mcp" "$url" "$token_env_var" <<'PY'
+  else
+    python3 - "$omp_mcp" "$url" "$token_env_var" <<'PY'
 import json
 import os
 import sys
@@ -1939,9 +1941,66 @@ os.chmod(mcp_path, 0o600)
 print(f"Wrote {mcp_path} server 'recallum' (secret not printed).")
 PY
 
-  if [[ -z "${resolved_api_key-}" ]]; then
-    echo "warning: no API key stored; export $token_env_var (or re-run without --no-store-api-key" >&2
-    echo "         or with --api-key-file) so OMP can resolve the bearer." >&2
+    if [[ -z "${resolved_api_key-}" ]]; then
+      echo "warning: no API key stored; export $token_env_var (or re-run without --no-store-api-key" >&2
+      echo "         or with --api-key-file) so OMP can resolve the bearer." >&2
+    fi
+  fi
+
+  # Read-only even on dry-run. A line whose first field is recallum-local is
+  # present; it matches only when that line contains this checkout's realpath.
+  local marketplace_state
+  if ! marketplace_state=$(omp plugin marketplace list 2>/dev/null | awk -v p="$repo_root" '
+    $1 == "recallum-local" { print (index($0, p) ? "match" : "conflict"); found=1; exit }
+    END { if (!found) print "missing" }
+  '); then
+    echo "error: 'omp plugin marketplace list' failed; check that the omp CLI runs." >&2
+    exit 1
+  fi
+  case "$marketplace_state" in
+    match)
+      echo "OMP marketplace 'recallum-local' is already registered for this checkout."
+      ;;
+    conflict)
+      echo "error: omp marketplace 'recallum-local' is registered to a different path." >&2
+      echo "       remove recallum-local ('omp plugin marketplace remove recallum-local') and rerun." >&2
+      exit 1
+      ;;
+    missing) ;;
+    *)
+      echo "error: unexpected omp marketplace state: $marketplace_state" >&2
+      exit 1
+      ;;
+  esac
+
+  local plugin_state
+  if ! plugin_state=$(omp plugin list --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    raise SystemExit(1)
+items = data.get("marketplace") if isinstance(data, dict) else None
+if not isinstance(items, list):
+    raise SystemExit(1)
+wanted = "recallum-memory@recallum-local"
+print("installed" if any(isinstance(i, dict) and i.get("id") == wanted for i in items) else "missing")
+'); then
+    echo "error: 'omp plugin list --json' failed; check that the omp CLI runs." >&2
+    exit 1
+  fi
+
+  if [[ "$marketplace_state" == "missing" ]]; then
+    run_action omp plugin marketplace add "$repo_root"
+  fi
+  if [[ "$plugin_state" == "installed" ]]; then
+    if ((force_mcp)); then
+      run_action omp plugin install --force recallum-memory@recallum-local --scope user
+    else
+      echo "OMP plugin 'recallum-memory@recallum-local' is already installed; leaving it in place."
+    fi
+  else
+    run_action omp plugin install recallum-memory@recallum-local --scope user
   fi
 }
 
@@ -2548,9 +2607,11 @@ if ((install_droid)); then
   echo "               is deferred. Start a new droid session so MCP, skills, and hooks reload."
 fi
 if ((install_omp)); then
-  echo "OMP: recallum server written to \${PI_CODING_AGENT_DIR:-\$HOME/.omp/agent}/mcp.json (mode 600,"
-  echo "     type http, bearer resolved from \${$token_env_var}). No plugin and no session hook."
-  echo "     Documented tool names are mcp__recallum_<tool>; that spelling was not observed"
-  echo "     against a live Recallum handshake. Restart OMP so MCP reloads. A named profile"
-  echo "     reads ~/.omp/profiles/<name>/agent/mcp.json — set PI_CODING_AGENT_DIR to install there."
+  echo "OMP: marketplace recallum-local and plugin recallum-memory@recallum-local installed"
+  echo "     (skills + hooks/omp-extension.js). recallum server written to"
+  echo "     \${PI_CODING_AGENT_DIR:-\$HOME/.omp/agent}/mcp.json (mode 600, type http, bearer"
+  echo "     resolved from \${$token_env_var}). Documented tool names are mcp__recallum_<tool>;"
+  echo "     that spelling was not observed against a live Recallum handshake. Restart OMP so"
+  echo "     MCP and the extension reload. A named profile reads ~/.omp/profiles/<name>/agent/mcp.json"
+  echo "     — set PI_CODING_AGENT_DIR to install there."
 fi

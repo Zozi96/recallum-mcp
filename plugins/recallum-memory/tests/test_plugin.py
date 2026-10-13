@@ -351,13 +351,25 @@ with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
 # Unknown subcommands succeed quietly.
 """
 
-# Fake `omp` binary. The installer only probes `command -v omp`; it never
-# invokes the CLI. The native mcp.json write is done by the installer itself.
+# Fake `omp` binary. Marketplace list is a header plus an optional
+# `recallum-local <path>` line (FAKE_OMP_MARKETPLACE). Plugin list is JSON.
+# add/install are logged and exit 0; they are not actually applied.
 FAKE_OMP = """#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(["omp", *args]) + "\\n")
+if args == ["plugin", "marketplace", "list"]:
+    print("Configured Marketplaces:")
+    path = os.environ.get("FAKE_OMP_MARKETPLACE", "")
+    if path:
+        print(f"recallum-local {path}")
+elif args == ["plugin", "list", "--json"]:
+    marketplace = []
+    if os.environ.get("FAKE_OMP_PLUGIN") == "installed":
+        marketplace.append({"id": "recallum-memory@recallum-local"})
+    print(json.dumps({"npm": [], "marketplace": marketplace}))
+# add/install and unknown commands exit 0.
 """
 
 # Fake `muse` binary for installer target tests. Plugin state is driven by
@@ -441,6 +453,7 @@ def run_hook(
         "DROID_PLUGIN_ROOT",
         "RECALLUM_MCP_URL",
         "RECALLUM_API_KEY",
+        "RECALLUM_OMP",
     ):
         env.pop(key, None)
     env.update(client_env or {})
@@ -776,6 +789,15 @@ class HookTests(unittest.TestCase):
         self.assertIn("ToolSearch", context)
         self.assertIn("+recallum", context)
         self.assertIn("recallum___*", context)
+
+    def test_omp_session_names_the_documented_tool_and_not_the_fallback(self) -> None:
+        context = self._session_context({"RECALLUM_OMP": "1"})
+        self.assertIn("mcp__recallum_context", context)
+        self.assertNotIn("mcp__recallum__context", context)
+        self.assertNotIn(CLAUDE_PREFIX, context)
+        self.assertNotIn(GROK_PREFIX, context)
+        self.assertNotIn(DROID_PREFIX, context)
+        self.assertNotIn("ToolSearch", context)
 
     def test_droid_uses_the_claude_shaped_hook_wire_format(self) -> None:
         # Droid's SessionStart/UserPromptSubmit output contract is
@@ -4937,12 +4959,19 @@ class OmpInstallTests(InstallerTestCase):
     """
 
     def _omp_env(
-        self, root: Path, *, with_key: bool = True
+        self,
+        root: Path,
+        *,
+        with_key: bool = True,
+        marketplace: str = "",
+        plugin: str = "missing",
     ) -> tuple[dict[str, str], Path]:
         env, log = self._fake_clis(root, stub_omp=True)
         env.pop(TOKEN_ENV_VAR, None)
         if with_key:
             env["RECALLUM_API_KEY"] = SENTINEL_KEY
+        env["FAKE_OMP_MARKETPLACE"] = marketplace
+        env["FAKE_OMP_PLUGIN"] = plugin
         return env, log
 
     @staticmethod
@@ -5120,6 +5149,110 @@ class OmpInstallTests(InstallerTestCase):
             self._assert_no_leak(second, log)
             self.assertIn("already matches", second.stdout)
             self.assertEqual(config.read_bytes(), before)
+
+    def test_dry_run_plans_marketplace_plugin_and_mcp_without_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            result = self._run(env, "--url", URL, "--target", "omp", "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dry-run: omp plugin marketplace add", result.stdout)
+            self.assertIn(
+                "dry-run: omp plugin install recallum-memory@recallum-local",
+                result.stdout,
+            )
+            self.assertIn(".omp/agent/mcp.json", result.stdout)
+            self.assertNotIn("--dry-run", result.stdout)
+            self.assertFalse(self._config(env).exists())
+            calls = self._calls(log)
+            self.assertFalse(any(call[1:4] == ["plugin", "marketplace", "add"] for call in calls))
+            self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in calls))
+            self.assertFalse(any("--dry-run" in call for call in calls))
+            self._assert_no_leak(result, log)
+
+    def test_install_registers_marketplace_and_plugin_and_writes_env_bearer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root)
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self._assert_no_leak(result, log)
+            calls = self._calls(log)
+            self.assertIn(["omp", "plugin", "marketplace", "add", str(REPO_ROOT)], calls)
+            self.assertIn(
+                [
+                    "omp",
+                    "plugin",
+                    "install",
+                    "recallum-memory@recallum-local",
+                    "--scope",
+                    "user",
+                ],
+                calls,
+            )
+            data = json.loads(self._config(env).read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["mcpServers"]["recallum"]["headers"]["Authorization"],
+                "Bearer ${RECALLUM_API_KEY}",
+            )
+            self.assertNotIn(SENTINEL_KEY, self._config(env).read_text(encoding="utf-8"))
+
+    def test_matching_marketplace_is_not_readded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root, marketplace=str(REPO_ROOT))
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(
+                any(call[1:4] == ["plugin", "marketplace", "add"] for call in self._calls(log))
+            )
+            self._assert_no_leak(result, log)
+
+    def test_conflicting_marketplace_errors_without_removing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root, marketplace="/tmp/other-recallum-checkout")
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("recallum-local", result.stderr)
+            self.assertIn("remove", result.stderr)
+            calls = self._calls(log)
+            self.assertFalse(any(call[1:4] == ["plugin", "marketplace", "add"] for call in calls))
+            self.assertFalse(any(call[1:3] == ["plugin", "marketplace", "remove"] for call in calls))
+            self._assert_no_leak(result, log)
+
+    def test_installed_plugin_is_not_reinstalled_unless_force_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env, log = self._omp_env(root, marketplace=str(REPO_ROOT), plugin="installed")
+            result = self._run(env, "--url", URL, "--target", "omp")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(any(call[1:3] == ["plugin", "install"] for call in self._calls(log)))
+            forced = self._run(env, "--url", URL, "--target", "omp", "--force-mcp")
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+            self.assertIn(
+                [
+                    "omp",
+                    "plugin",
+                    "install",
+                    "--force",
+                    "recallum-memory@recallum-local",
+                    "--scope",
+                    "user",
+                ],
+                self._calls(log),
+            )
+            self._assert_no_leak(forced, log)
+
+    def test_package_json_points_at_the_omp_factory(self) -> None:
+        package = json.loads((PLUGIN_ROOT / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package["name"], "recallum-memory")
+        self.assertIs(package["private"], True)
+        self.assertNotIn("dependencies", package)
+        factory = "./hooks/omp-extension.js"
+        self.assertEqual(package["omp"]["extensions"], [factory])
+        self.assertEqual(package["pi"]["extensions"], [factory])
+        self.assertTrue((PLUGIN_ROOT / "hooks" / "omp-extension.js").is_file())
 
 
 class MuseInstallTests(InstallerTestCase):
@@ -5977,6 +6110,26 @@ class OmpDoctorTests(unittest.TestCase):
             server["type"] = transport
         return server
 
+    def _write_plugin(self, home: Path, install_path: Path | None = None) -> None:
+        self._write(
+            home,
+            ".omp/plugins/installed_plugins.json",
+            json.dumps(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "recallum-memory@recallum-local": [
+                            {
+                                "scope": "user",
+                                "installPath": str(install_path or PLUGIN_ROOT),
+                                "version": PLUGIN_VERSION,
+                            }
+                        ]
+                    },
+                }
+            ),
+        )
+
     def test_placeholder_with_env_set_is_healthy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -5985,6 +6138,7 @@ class OmpDoctorTests(unittest.TestCase):
                 ".omp/agent/mcp.json",
                 json.dumps({"mcpServers": {"recallum": self._server()}}),
             )
+            self._write_plugin(home)
             result = self._run_doctor(home, "--json")
             self.assertEqual(result.returncode, 0, result.stdout)
             report = json.loads(result.stdout)
@@ -6077,6 +6231,7 @@ class OmpDoctorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (agent / "mcp.json").chmod(0o600)
+            self._write_plugin(home)
             result = self._run_doctor(home, "--json", agent_dir=agent)
             self.assertEqual(result.returncode, 0, result.stdout)
             report = json.loads(result.stdout)
@@ -6084,6 +6239,43 @@ class OmpDoctorTests(unittest.TestCase):
                 report["clients"]["OMP"]["native_mcp"]["auth"],
                 "Bearer ${RECALLUM_API_KEY}",
             )
+
+    def test_plugin_gap_only_when_mcp_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bare = self._run_doctor(home, "--json")
+            report = json.loads(bare.stdout)
+            self.assertFalse(
+                any("plugin recallum-memory is not installed" in p for p in report["problems"])
+            )
+            self._write(
+                home,
+                ".omp/agent/mcp.json",
+                json.dumps({"mcpServers": {"recallum": self._server()}}),
+            )
+            gap = self._run_doctor(home, "--json")
+            self.assertEqual(gap.returncode, 1)
+            self.assertTrue(
+                any(
+                    "plugin recallum-memory is not installed" in p
+                    for p in json.loads(gap.stdout)["problems"]
+                )
+            )
+
+    def test_plugin_present_reports_version_and_requires_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write_plugin(home)
+            present = self._run_doctor(home, "--json")
+            self.assertEqual(present.returncode, 0, present.stdout)
+            report = json.loads(present.stdout)
+            self.assertEqual(report["clients"]["OMP"]["version"], PLUGIN_VERSION)
+            missing = home / "empty-plugin"
+            missing.mkdir()
+            self._write_plugin(home, missing)
+            broken = self._run_doctor(home, "--json")
+            self.assertEqual(broken.returncode, 1)
+            self.assertIn("hooks/omp-extension.js", broken.stdout)
 
 
 if __name__ == "__main__":

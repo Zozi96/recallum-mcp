@@ -370,12 +370,16 @@ config file holds an environment reference, not the key.
 3. Ensure `RECALLUM_API_KEY` is exported in the environment that launches OMP. The installer
    writes `~/.config/recallum/env` and, on Linux, `~/.config/environment.d/99-recallum.conf`.
    Source the env file or re-login. Do not read `mcp.json` to check the key.
-4. There is no plugin install and no session hook. OMP hooks are JS/TS factories, and no
-   SessionStart dispatch was observed. A project `.omp/mcp.json` entry named `recallum` wins
+4. The installer registers marketplace `recallum-local` and installs
+   `recallum-memory@recallum-local`. The session hook is `hooks/omp-extension.js`
+   (`package.json` `omp.extensions` / `pi.extensions`); OMP does not execute
+   `hooks/hooks.json`. A project `.omp/mcp.json` entry named `recallum` wins
    over the user file; do not write a project file.
 5. Confirm with the read-only doctor. It reports the `OMP` client: `type`, `url`, the redacted
-   Authorization header, file mode, and a hidden-by-`disabledServers` problem. A missing file is
-   not a failure.
+   Authorization header, file mode, a hidden-by-`disabledServers` problem, and a plugin gap
+   only when native MCP has `recallum` but `recallum-memory@recallum-local` is absent. A
+   missing mcp file and a missing plugin record together are not a failure. A present plugin
+   must include `hooks/omp-extension.js`.
 6. Restart OMP. Documented tool names are `mcp__recallum_<tool>` (for example
    `mcp__recallum_context`). That spelling comes from OMP's docs and was not observed against a
    live Recallum handshake.
