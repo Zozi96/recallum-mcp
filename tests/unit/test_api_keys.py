@@ -238,9 +238,9 @@ class CountingApiKeyRepository(FakeApiKeyRepository):
         self.touches += 1
         await super().touch(key_id)
 
-    async def find_active_by_hash(self, key_hash):
+    async def find_active_by_hash(self, key_hash, **kwargs):
         self.lookups += 1
-        return await super().find_active_by_hash(key_hash)
+        return await super().find_active_by_hash(key_hash, **kwargs)
 
 
 async def _issue(keys: CountingApiKeyRepository, users: FakeUserRepository) -> str:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from recallum.db.models import ApiKey, User
 from recallum.db.session import SessionProvider
@@ -30,8 +31,14 @@ class ApiKeyRepository:
             await session.refresh(key)
             return key
 
-    async def find_active_by_hash(self, key_hash: str) -> tuple[ApiKey, User] | None:
-        """Resolve a bearer token hash to a non-revoked key and its user."""
+    async def find_active_by_hash(
+        self, key_hash: str, *, refresh_before: datetime | None = None
+    ) -> tuple[ApiKey, User] | None:
+        """Resolve a bearer token hash to a non-revoked key and its user.
+
+        ``refresh_before`` refreshes ``last_used_at`` in this same admin
+        transaction when it is null or at/before the cutoff (age >= interval).
+        """
         async with self._sessions.admin() as session:
             stmt = (
                 select(ApiKey, User)
@@ -39,14 +46,22 @@ class ApiKeyRepository:
                 .where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
             )
             row = (await session.execute(stmt)).one_or_none()
-            return (row.ApiKey, row.User) if row is not None else None
-
-    async def touch(self, key_id: uuid.UUID) -> None:
-        """Best-effort last-used timestamp."""
-        async with self._sessions.admin() as session:
-            await session.execute(
-                update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=func.now())
-            )
+            if row is None:
+                return None
+            key, user = row.ApiKey, row.User
+            if refresh_before is not None:
+                await session.execute(
+                    update(ApiKey)
+                    .where(
+                        ApiKey.id == key.id,
+                        or_(
+                            ApiKey.last_used_at.is_(None),
+                            ApiKey.last_used_at <= refresh_before,
+                        ),
+                    )
+                    .values(last_used_at=func.now())
+                )
+            return key, user
 
     async def revoke(self, key_id: uuid.UUID) -> bool:
         """Revoke a key. Returns False when the key does not exist/already revoked."""

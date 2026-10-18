@@ -5218,7 +5218,9 @@ class OmpInstallTests(InstallerTestCase):
             self.assertIn("remove", result.stderr)
             calls = self._calls(log)
             self.assertFalse(any(call[1:4] == ["plugin", "marketplace", "add"] for call in calls))
-            self.assertFalse(any(call[1:3] == ["plugin", "marketplace", "remove"] for call in calls))
+            self.assertFalse(
+                any(call[1:3] == ["plugin", "marketplace", "remove"] for call in calls)
+            )
             self._assert_no_leak(result, log)
 
     def test_installed_plugin_is_not_reinstalled_unless_force_mcp(self) -> None:

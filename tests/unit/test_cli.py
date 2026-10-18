@@ -320,6 +320,7 @@ async def test_eval_usage_weight_reaches_service_limits_and_report_tunables(
 
     assert code == 0
     assert captured["service"]._limits.recall_usage_weight == 0.3
+    assert captured["service"]._usage is container.usage_buffer()
     out = capsys.readouterr().out
     assert "tunables: recall_usage_weight=0.3" in out
 

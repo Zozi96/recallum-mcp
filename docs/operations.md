@@ -67,13 +67,19 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__DATABASE__STATEMENT_TIMEOUT_SECONDS` | `30` | Server-side statement_timeout |
 | `RECALLUM__OLLAMA__URL` | `http://localhost:11434` | Ollama base URL |
 | `RECALLUM__OLLAMA__MODEL` | `embeddinggemma:300m-qat-q4_0` | Embedding model |
-| `RECALLUM__OLLAMA__TIMEOUT_SECONDS` | `30` | Embedding timeout |
+| `RECALLUM__OLLAMA__TIMEOUT_SECONDS` | `30` | Write embedding timeout |
+| `RECALLUM__OLLAMA__READ_TIMEOUT_SECONDS` | `3` | Read embedding timeout for `recall`, `context` focus and `match_skills` |
+| `RECALLUM__OLLAMA__READ_NEGATIVE_WINDOW_SECONDS` | `5` | After a read failure, skip further read embeds until this window ends |
+| `RECALLUM__OLLAMA__READ_CACHE_SIZE` | `256` | LRU cap for successful read embeddings |
 | `RECALLUM__AUTH__KEY_PREFIX` | `rcl_` | API key prefix |
 | `RECALLUM__TELEMETRY__BATCH_SIZE` | `100` | Pending tool events written per database batch |
 | `RECALLUM__TELEMETRY__FLUSH_INTERVAL_SECONDS` | `5` | Maximum delay before pending activity is flushed |
 | `RECALLUM__TELEMETRY__BUFFER_LIMIT` | `1000` | Maximum in-memory events; overflow drops the oldest |
 | `RECALLUM__TELEMETRY__RETENTION_DAYS` | `90` | Age after which persisted activity is purged |
 | `RECALLUM__TELEMETRY__METRICS_TOKEN` | empty | Operator token for `GET /metrics`; required off loopback (compose sets it) |
+| `RECALLUM__USAGE__BATCH_SIZE` | `100` | Pending usage keys applied per database batch |
+| `RECALLUM__USAGE__FLUSH_INTERVAL_SECONDS` | `5` | Maximum delay before pending usage is flushed |
+| `RECALLUM__USAGE__BUFFER_LIMIT` | `1000` | Maximum distinct pending usage keys; overflow drops new keys |
 | `RECALLUM__RUNTIME__WORKERS` | `1` | Granian workers; must stay `1` while MCP is stateful |
 | `RECALLUM__RUNTIME__MCP_STATELESS_HTTP` | `false` | Reserved flag only; does not unlock `workers > 1` until FastMCP is wired for stateless HTTP |
 | `RECALLUM__LIMITS__*` | see `src/recallum/config.py` | Content/metadata/retrieval limits |

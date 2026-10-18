@@ -258,7 +258,7 @@ class SkillService:
         mode = "hybrid"
         query_embedding: list[float] | None = None
         try:
-            query_embedding = await self._embeddings.embed(normalized_query)
+            query_embedding = await self._embeddings.embed_read(normalized_query)
         except EmbeddingError:
             logger.warning("embedding unavailable for match_skills; using textual fallback")
             mode = "degraded_textual"

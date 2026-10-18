@@ -57,7 +57,14 @@ class TelemetryBuffer:
         return len(self._pending)
 
     def snapshot(
-        self, readiness: dict[str, str] | None = None
+        self,
+        readiness: dict[str, str] | None = None,
+        *,
+        identity_cache_hits: int = 0,
+        identity_cache_misses: int = 0,
+        usage_dropped: int = 0,
+        usage_flush_failures: int = 0,
+        usage_pending: int = 0,
     ) -> MetricsSnapshot:
         """Read in-memory counters; readiness is supplied by the health router."""
         tools = [
@@ -93,6 +100,11 @@ class TelemetryBuffer:
                 "database": "ok" if checks.get("database") == "ok" else "unavailable",
                 "embeddings": "ok" if checks.get("embeddings") == "ok" else "unavailable",
             },
+            identity_cache_hits=identity_cache_hits,
+            identity_cache_misses=identity_cache_misses,
+            usage_dropped=usage_dropped,
+            usage_flush_failures=usage_flush_failures,
+            usage_pending=usage_pending,
         )
 
     def _observe(self, event: ToolActivityEvent) -> None:

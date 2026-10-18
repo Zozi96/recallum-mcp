@@ -36,6 +36,11 @@ class MetricsSnapshot(BaseModel):
     embedding_unavailable_write_ratio: float = Field(ge=0, le=1)
     tools: list[ToolLatencySnapshot] = Field(default_factory=list)
     readiness: dict[str, Literal["ok", "unavailable"]]
+    identity_cache_hits: int = Field(default=0, ge=0)
+    identity_cache_misses: int = Field(default=0, ge=0)
+    usage_dropped: int = Field(default=0, ge=0)
+    usage_flush_failures: int = Field(default=0, ge=0)
+    usage_pending: int = Field(default=0, ge=0)
 
 
 def presented_metrics_token(

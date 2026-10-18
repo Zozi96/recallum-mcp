@@ -9,11 +9,29 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Date, String, cast, func, literal, or_, select, text, true, update
-from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Integer,
+    String,
+    and_,
+    bindparam,
+    cast,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, REGCONFIG, TSQUERY, array
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased, defer
+from sqlalchemy.orm import aliased, defer, joinedload, noload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from recallum.config import EMBEDDING_DIMENSIONS, TEXT_SEARCH_CONFIG
 from recallum.db.models import Memory, MemoryAnchor, MemoryProfile, User
@@ -38,6 +56,15 @@ def _light() -> tuple[Any, ...]:
         defer(Memory.embedding, raiseload=True),
         defer(Memory.content_tsv, raiseload=True),
     )
+
+
+def _pool() -> tuple[Any, ...]:
+    """Search-pool loaders: light columns, no anchor selectin.
+
+    ``lazy='selectin'`` would fire one anchor query per pool SELECT.
+    Served rows get their anchors in one later query.
+    """
+    return (*_light(), noload(Memory.anchors))
 
 
 def _not_expired() -> Any:
@@ -297,6 +324,17 @@ class MemoryRepository:
         async with self._sessions.for_user(user_id) as session:
             yield session
 
+    @asynccontextmanager
+    async def _session(
+        self, user_id: uuid.UUID, session: AsyncSession | None
+    ) -> AsyncIterator[AsyncSession]:
+        """Use the caller's open transaction, or start one user session."""
+        if session is not None:
+            yield session
+            return
+        async with self._sessions.for_user(user_id) as opened:
+            yield opened
+
     @staticmethod
     async def _increment_generation(session: AsyncSession, user_id: uuid.UUID) -> None:
         await session.execute(
@@ -308,126 +346,139 @@ class MemoryRepository:
     async def history(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Sequence[Memory] | None:
         """Return every ancestor oldest-first, or None when the anchor is invisible.
 
-        Supersession became many-to-one with ``merge_memories``: several
-        retired rows may point at one replacement, so ancestry is a tree,
-        walked level by level and flattened by age. A linear ``update`` chain
-        comes out in exactly the order it always did. The seen-set makes the
-        walk bounded regardless of data (cycles are structurally impossible
-        -- a replacement is always a freshly inserted row -- but an infinite
-        loop is not a graceful way to learn otherwise).
+        Supersession is many-to-one: several retired rows may point at one
+        replacement, so ancestry is a tree. The seed is the anchor existence
+        check (an empty walk means the anchor is invisible). The path array is
+        the seen-set, so a cycle cannot extend the walk. Flattened by
+        ``(created_at, str(id))``, the same key a linear update chain used.
         """
         async with self._sessions.for_user(user_id) as session:
-            anchor = (
+            seed = (
+                select(
+                    Memory.id.label("id"),
+                    literal(0).label("depth"),
+                    array([Memory.id]).label("path"),
+                )
+                .where(Memory.id == memory_id, Memory.user_id == user_id)
+                .cte("ancestry", recursive=True)
+            )
+            ancestor = aliased(Memory)
+            walk = seed.union_all(
+                select(
+                    ancestor.id,
+                    (seed.c.depth + 1).label("depth"),
+                    (seed.c.path + array([ancestor.id])).label("path"),
+                ).where(
+                    ancestor.user_id == user_id,
+                    ancestor.superseded_by == seed.c.id,
+                    func.array_position(seed.c.path, ancestor.id).is_(None),
+                )
+            )
+            # joinedload keeps anchors on this statement; mapper selectin would add another.
+            loaded = (
                 await session.execute(
-                    select(Memory.id).where(
-                        Memory.id == memory_id,
-                        Memory.user_id == user_id,
-                    )
+                    select(Memory, walk.c.depth)
+                    .options(*_light(), joinedload(Memory.anchors))
+                    .join(walk, Memory.id == walk.c.id)
                 )
-            ).scalar_one_or_none()
-            if anchor is None:
-                return None
-            ancestors: dict[uuid.UUID, Memory] = {}
-            frontier: list[uuid.UUID] = [memory_id]
-            while frontier:
-                rows = (
-                    (
-                        await session.execute(
-                            select(Memory)
-                            .options(*_light())
-                            .where(
-                                Memory.user_id == user_id,
-                                Memory.superseded_by.in_(frontier),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                frontier = [row.id for row in rows if row.id not in ancestors]
-                for row in rows:
-                    ancestors.setdefault(row.id, row)
-            return sorted(ancestors.values(), key=lambda m: (m.created_at, str(m.id)))
+            ).unique().all()
+        if not loaded:
+            return None
+        return sorted(
+            (memory for memory, depth in loaded if depth > 0),
+            key=lambda m: (m.created_at, str(m.id)),
+        )
 
     async def statistics(self, user_id: uuid.UUID) -> dict[str, Any]:
         """Derive per-user aggregates in one forced-RLS transaction."""
         async with self._sessions.for_user(user_id) as session:
             user_filter = Memory.user_id == user_id
-            active_filter = [user_filter, Memory.deleted_at.is_(None), _not_expired()]
-
-            active = (
-                await session.execute(
-                    select(func.count()).select_from(Memory).where(*active_filter)
-                )
-            ).scalar_one()
-
-            superseded = (
-                await session.execute(
-                    select(func.count())
-                    .select_from(Memory)
-                    .where(user_filter, Memory.superseded_by.is_not(None))
-                )
-            ).scalar_one()
-
-            retired = (
-                await session.execute(
-                    select(func.count())
-                    .select_from(Memory)
-                    .where(
-                        user_filter,
-                        Memory.deleted_at.is_not(None),
-                        Memory.superseded_by.is_(None),
-                    )
-                )
-            ).scalar_one()
-
+            active_pred = and_(Memory.deleted_at.is_(None), _not_expired())
             category_key = func.coalesce(Memory.category, "none")
-            by_category = dict(
-                (
-                    await session.execute(
-                        select(category_key, func.count())
-                        .select_from(Memory)
-                        .where(*active_filter)
-                        .group_by(category_key)
-                    )
-                ).all()
-            )
-
             scope_key = func.coalesce(Memory.scope, "none")
-            by_scope = dict(
-                (
-                    await session.execute(
-                        select(scope_key, func.count())
-                        .select_from(Memory)
-                        .where(*active_filter)
-                        .group_by(scope_key)
-                    )
-                ).all()
-            )
-
             project_key = func.coalesce(Memory.project, "none")
-            by_project = dict(
-                (
-                    await session.execute(
-                        select(project_key, func.count())
-                        .select_from(Memory)
-                        .where(*active_filter)
-                        .group_by(project_key)
-                    )
-                ).all()
-            )
-
             importance_key = func.coalesce(cast(Memory.importance, String), "none")
-            by_importance = dict(
-                (
-                    await session.execute(
-                        select(importance_key, func.count())
-                        .select_from(Memory)
-                        .where(*active_filter)
-                        .group_by(importance_key)
+            # () is the grand total. Grouped sets include inactive rows, so a
+            # zero active count is an empty bucket and must be omitted.
+            grouped = (
+                await session.execute(
+                    select(
+                        func.grouping(category_key).label("g_category"),
+                        func.grouping(scope_key).label("g_scope"),
+                        func.grouping(project_key).label("g_project"),
+                        func.grouping(importance_key).label("g_importance"),
+                        category_key.label("category"),
+                        scope_key.label("scope"),
+                        project_key.label("project"),
+                        importance_key.label("importance"),
+                        func.count().filter(active_pred).label("active"),
+                        func.count()
+                        .filter(Memory.superseded_by.is_not(None))
+                        .label("superseded"),
+                        func.count()
+                        .filter(
+                            and_(
+                                Memory.deleted_at.is_not(None),
+                                Memory.superseded_by.is_(None),
+                            )
+                        )
+                        .label("retired"),
+                        func.coalesce(
+                            func.sum(
+                                func.octet_length(Memory.content) + EMBEDDING_DIMENSIONS * 4
+                            ),
+                            0,
+                        ).label("volume_bytes"),
                     )
-                ).all()
-            )
+                    .where(user_filter)
+                    .group_by(
+                        func.grouping_sets(
+                            tuple_(),
+                            tuple_(category_key),
+                            tuple_(scope_key),
+                            tuple_(project_key),
+                            tuple_(importance_key),
+                        )
+                    )
+                )
+            ).all()
+            active = superseded = retired = 0
+            volume_bytes = 0
+            by_category: dict[str, int] = {}
+            by_scope: dict[str, int] = {}
+            by_project: dict[str, int] = {}
+            by_importance: dict[str, int] = {}
+            for (
+                g_category,
+                g_scope,
+                g_project,
+                g_importance,
+                category,
+                scope,
+                project,
+                importance,
+                n_active,
+                n_superseded,
+                n_retired,
+                volume,
+            ) in grouped:
+                if g_category and g_scope and g_project and g_importance:
+                    active = int(n_active)
+                    superseded = int(n_superseded)
+                    retired = int(n_retired)
+                    volume_bytes = int(volume)
+                    continue
+                if not n_active:
+                    continue
+                count = int(n_active)
+                if not g_category and g_scope and g_project and g_importance:
+                    by_category[str(category)] = count
+                elif g_category and not g_scope and g_project and g_importance:
+                    by_scope[str(scope)] = count
+                elif g_category and g_scope and not g_project and g_importance:
+                    by_project[str(project)] = count
+                elif g_category and g_scope and g_project and not g_importance:
+                    by_importance[str(importance)] = count
 
             day = cast(
                 func.date_trunc(
@@ -446,24 +497,6 @@ class MemoryRepository:
                     )
                 ).all()
             }
-
-            volume_bytes = int(
-                (
-                    await session.execute(
-                        select(
-                            func.coalesce(
-                                func.sum(
-                                    func.octet_length(Memory.content)
-                                    + EMBEDDING_DIMENSIONS * 4
-                                ),
-                                0,
-                            )
-                        )
-                        .select_from(Memory)
-                        .where(user_filter)
-                    )
-                ).scalar_one()
-            )
 
         return {
             "active": active,
@@ -788,6 +821,63 @@ class MemoryRepository:
                 session, user_id, scope=scope, project=project, content_hash=content_hash
             )
 
+    async def find_active_hashes(
+        self,
+        user_id: uuid.UUID,
+        keys: Sequence[tuple[str, str | None, str]],
+    ) -> set[tuple[str, str, str]]:
+        """Active ``(scope, project or "", content_hash)`` triples among ``keys``.
+
+        One query. An empty key list does not touch the database.
+        """
+        if not keys:
+            return set()
+        wanted = {(scope, project or "", digest) for scope, project, digest in keys}
+        hashes = list({digest for *_, digest in wanted})
+        async with self._sessions.for_user(user_id) as session:
+            rows = (
+                await session.execute(
+                    select(Memory.scope, Memory.project, Memory.content_hash).where(
+                        Memory.user_id == user_id,
+                        Memory.deleted_at.is_(None),
+                        _not_expired(),
+                        Memory.content_hash.in_(hashes),
+                    )
+                )
+            ).all()
+        return {
+            (scope, project or "", digest)
+            for scope, project, digest in rows
+            if (scope, project or "", digest) in wanted
+        }
+
+    async def attach_anchors(self, user_id: uuid.UUID, memories: Sequence[Memory]) -> None:
+        """Populate ``anchors`` on detached pool rows so serialization does no IO.
+
+        One ``memory_id IN (...)`` query. Rows with no anchors get an empty list,
+        so a later attribute access cannot lazy-load outside the session.
+        """
+        if not memories:
+            return
+        ids = list(dict.fromkeys(memory.id for memory in memories))
+        async with self._sessions.for_user(user_id) as session:
+            rows = (
+                await session.execute(
+                    select(
+                        MemoryAnchor.memory_id,
+                        MemoryAnchor.anchor_type,
+                        MemoryAnchor.identifier,
+                    ).where(MemoryAnchor.memory_id.in_(ids))
+                )
+            ).all()
+        grouped: dict[uuid.UUID, list[MemoryAnchor]] = {memory_id: [] for memory_id in ids}
+        for memory_id, anchor_type, identifier in rows:
+            grouped.setdefault(memory_id, []).append(
+                MemoryAnchor(anchor_type=anchor_type, identifier=identifier)
+            )
+        for memory in memories:
+            set_committed_value(memory, "anchors", grouped.get(memory.id, []))
+
     async def get_active(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
         async with self._sessions.for_user(user_id) as session:
             stmt = (
@@ -926,11 +1016,28 @@ class MemoryRepository:
         limit: int,
         min_similarity: float,
     ) -> Sequence[ScoredMemory]:
-        """Return seed-centered thematic neighbours under one user's RLS."""
+        """Return seed-centered thematic neighbours under one user's RLS.
+
+        The seed vector is read first so neighbours can ``ORDER BY embedding <=> :seed``.
+        A column-to-column distance cannot use the HNSW index. Missing, foreign,
+        retired, and expired seeds return an empty list, same as the old join.
+        """
         async with self._sessions.for_user(user_id) as session:
-            seed = aliased(Memory, name="related_seed")
+            seed = (
+                await session.execute(
+                    select(Memory.embedding, Memory.embedding_model).where(
+                        Memory.id == memory_id,
+                        Memory.user_id == user_id,
+                        Memory.deleted_at.is_(None),
+                        _not_expired(),
+                        Memory.embedding_model.is_not(None),
+                    )
+                )
+            ).one_or_none()
+            if seed is None:
+                return []
             neighbour = aliased(Memory, name="related_neighbour")
-            distance = seed.embedding.cosine_distance(neighbour.embedding)
+            distance = neighbour.embedding.cosine_distance(seed.embedding)
             score = (literal(1.0) - distance).label("similarity")
             stmt = (
                 select(neighbour, score)
@@ -939,20 +1046,15 @@ class MemoryRepository:
                     defer(neighbour.content_tsv, raiseload=True),
                 )
                 .where(
-                    seed.id == memory_id,
-                    seed.user_id == user_id,
-                    seed.deleted_at.is_(None),
-                    or_(seed.expires_at.is_(None), seed.expires_at > func.now()),
-                    seed.embedding_model.is_not(None),
                     neighbour.user_id == user_id,
                     neighbour.deleted_at.is_(None),
                     or_(neighbour.expires_at.is_(None), neighbour.expires_at > func.now()),
-                    neighbour.id != seed.id,
+                    neighbour.id != memory_id,
                     neighbour.embedding_model.is_not(None),
-                    seed.embedding_model == neighbour.embedding_model,
+                    neighbour.embedding_model == seed.embedding_model,
                     distance <= (1.0 - min_similarity),
                 )
-                .order_by(score.desc(), neighbour.id)
+                .order_by(distance, neighbour.id)
                 .limit(limit)
             )
             return [
@@ -1047,7 +1149,6 @@ class MemoryRepository:
         rows despite the filter. ``vector_min_similarity`` is an optional
         cosine floor applied in this query; None keeps the unfiltered pool.
         """
-        await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
         distance = Memory.embedding.cosine_distance(embedding)
         similarity = literal(1.0) - distance
         score = similarity.label("score")
@@ -1060,7 +1161,7 @@ class MemoryRepository:
             predicates.append(similarity >= vector_min_similarity)
         stmt = (
             select(Memory, score)
-            .options(*_light())
+            .options(*_pool())
             .where(*predicates)
             .order_by(distance)
             .limit(limit)
@@ -1090,7 +1191,7 @@ class MemoryRepository:
         rank = func.ts_rank_cd(Memory.content_tsv, ts_query).label("score")
         stmt = (
             select(Memory, rank)
-            .options(*_light())
+            .options(*_pool())
             .where(*filters, Memory.content_tsv.op("@@")(ts_query))
             .order_by(rank.desc(), Memory.created_at.desc())
             .limit(limit)
@@ -1123,14 +1224,14 @@ class MemoryRepository:
                 func.set_config(
                     "pg_trgm.word_similarity_threshold",
                     str(min_word_similarity),
-                    True,  # transaction-local, like the hnsw knob above
+                    True,  # transaction-local; value comes from the caller
                 )
             )
         )
         score = func.word_similarity(query, Memory.content).label("score")
         stmt = (
             select(Memory, score)
-            .options(*_light())
+            .options(*_pool())
             .where(*filters, literal(query).op("<%")(Memory.content))
             .order_by(score.desc(), Memory.created_at.desc())
             .limit(limit)
@@ -1148,7 +1249,7 @@ class MemoryRepository:
         visibility: MemoryVisibility,
         category: str | None,
         kind: str | None = None,
-        top_limit: int,
+        per_category_limit: int,
         candidate_limit: int,
         query: str | None,
         embedding: list[float] | None,
@@ -1173,7 +1274,9 @@ class MemoryRepository:
         ``project_top``) and the focus pools only. The always-on materialized
         profile (``dynamic_candidates``, which feeds its dynamic slice) and
         the category totals are not a memory candidate set for retrieval and
-        stay unfiltered.
+        stay unfiltered. Importance tops are one statement per scope pool: a
+        ``ROW_NUMBER`` window partitioned by category, not a pool-wide ``LIMIT``,
+        because assembly packs category-by-category.
         """
         global_visibility = MemoryVisibility.global_only()
         project_visibility = MemoryVisibility.project_only(project) if project is not None else None
@@ -1193,45 +1296,49 @@ class MemoryRepository:
                     await session.execute(select(User.memory_generation).where(User.id == user_id))
                 ).scalar_one()
             )
-            global_top = (
-                (
-                    await session.execute(
-                        select(Memory)
-                        .options(*_light())
-                        .where(
-                            *self._filters(
-                                user_id, visibility=global_visibility, category=None, kind=kind
-                            )
-                        )
-                        .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
-                        .limit(top_limit)
-                    )
+
+            async def _category_top(pool_visibility: MemoryVisibility) -> Sequence[Memory]:
+                filters = self._filters(
+                    user_id, visibility=pool_visibility, category=None, kind=kind
                 )
-                .scalars()
-                .all()
-            )
-            project_top: Sequence[Memory] = []
-            if project_visibility is not None:
-                project_top = (
+                rank = func.row_number().over(
+                    partition_by=Memory.category,
+                    order_by=(
+                        Memory.importance.desc(),
+                        Memory.created_at.desc(),
+                        Memory.id,
+                    ),
+                )
+                ranked = (
+                    select(Memory.id.label("id"), rank.label("rn")).where(*filters).subquery()
+                )
+                return (
                     (
                         await session.execute(
                             select(Memory)
-                            .options(*_light())
+                            .options(*_pool())
                             .where(
-                                *self._filters(
-                                    user_id,
-                                    visibility=project_visibility,
-                                    category=None,
-                                    kind=kind,
+                                Memory.id.in_(
+                                    select(ranked.c.id).where(
+                                        ranked.c.rn <= per_category_limit
+                                    )
                                 )
                             )
-                            .order_by(Memory.importance.desc(), Memory.created_at.desc(), Memory.id)
-                            .limit(top_limit)
+                            .order_by(
+                                Memory.importance.desc(),
+                                Memory.created_at.desc(),
+                                Memory.id,
+                            )
                         )
                     )
                     .scalars()
                     .all()
                 )
+
+            global_top = await _category_top(global_visibility)
+            project_top: Sequence[Memory] = []
+            if project_visibility is not None:
+                project_top = await _category_top(project_visibility)
             # Up to ``static_limit`` recent rows may also win the static slice;
             # fetch that bounded overlap so read-time assembly can still fill
             # dynamic from lower-ranked recent rows.
@@ -1239,7 +1346,7 @@ class MemoryRepository:
                 (
                     await session.execute(
                         select(Memory)
-                        .options(*_light())
+                        .options(*_pool())
                         .where(
                             *self._filters(user_id, visibility=visibility, category=None),
                             Memory.last_recalled_at.is_not(None),
@@ -1309,7 +1416,6 @@ class MemoryRepository:
         limit: int,
         exclude_id: uuid.UUID | None = None,
     ) -> Sequence[ScoredMemory]:
-        await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
         distance = Memory.embedding.cosine_distance(embedding)
         score = (literal(1.0) - distance).label("score")
         filters = [
@@ -1328,7 +1434,7 @@ class MemoryRepository:
             filters.append(Memory.id != exclude_id)
         stmt = (
             select(Memory, score)
-            .options(*_light())
+            .options(*_pool())
             .where(*filters)
             .order_by(distance)
             .limit(limit)
@@ -1768,57 +1874,62 @@ class MemoryRepository:
         async with self._sessions.for_user(user_id) as session:
             return await self._mark_reconfirmed_in_session(session, user_id, memory_id)
 
-    async def mark_recalled(self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]) -> None:
-        """Record that these memories matched a ``recall`` query.
-
-        Recall hits only: ``context`` snapshot serves go through
-        ``mark_seen_in_context``, because snapshots select by importance and
-        folding their serves in here would turn ``recall_count`` -- the
-        signal ``recall_usage_weight`` is waiting on -- into an importance
-        echo. One bounded UPDATE, outside the read that produced the ids.
-        Callers treat failure as loggable noise: usage is a signal, never a
-        dependency of the read path.
-
-        Deliberately does NOT bump ``memory_generation``: usage is not a
-        corpus or static-eligibility mutation, so a recall must never force
-        the next ``context`` to rebuild the materialized profile.
-        """
-        if not memory_ids:
-            return
-        async with self._sessions.for_user(user_id) as session:
-            await session.execute(
-                update(Memory)
-                .where(
-                    Memory.user_id == user_id,
-                    Memory.id.in_(list(memory_ids)),
-                    Memory.deleted_at.is_(None),
-                )
-                .values(
-                    recall_count=Memory.recall_count + 1,
-                    last_recalled_at=func.now(),
-                )
-            )
-
-    async def mark_seen_in_context(
-        self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
+    async def apply_usage(
+        self,
+        user_id: uuid.UUID,
+        memory_ids: Sequence[uuid.UUID],
+        recall_deltas: Sequence[int],
+        context_deltas: Sequence[int],
+        served_at: Sequence[datetime | None],
     ) -> None:
-        """Record that these memories rode along in a ``context`` snapshot.
+        """Apply one user's deferred serve deltas in a single UPDATE.
 
-        Same failure contract as ``mark_recalled``; deliberately a separate
-        counter so snapshot exposure never masquerades as query relevance.
+        Sums ``recall_count`` / ``context_count``. ``last_recalled_at`` advances
+        only when ``served_at`` is set and never moves backward. Does not touch
+        ``memory_generation``.
         """
         if not memory_ids:
             return
+        # GREATEST is null if either side is null; COALESCE keeps the recall time.
+        statement = text(
+            """
+            UPDATE memories AS m
+            SET
+                recall_count = m.recall_count + v.recall_delta,
+                context_count = m.context_count + v.context_delta,
+                last_recalled_at = CASE
+                    WHEN v.served_at IS NULL THEN m.last_recalled_at
+                    ELSE COALESCE(GREATEST(m.last_recalled_at, v.served_at), v.served_at)
+                END
+            FROM unnest(
+                CAST(:memory_ids AS uuid[]),
+                CAST(:recall_deltas AS integer[]),
+                CAST(:context_deltas AS integer[]),
+                CAST(:served_at AS timestamptz[])
+            ) AS v(memory_id, recall_delta, context_delta, served_at)
+            WHERE m.user_id = :user_id
+              AND m.id = v.memory_id
+              AND m.deleted_at IS NULL
+            """
+        ).bindparams(
+            bindparam("memory_ids", type_=ARRAY(PG_UUID(as_uuid=True))),
+            bindparam("recall_deltas", type_=ARRAY(Integer())),
+            bindparam("context_deltas", type_=ARRAY(Integer())),
+            bindparam("served_at", type_=ARRAY(DateTime(timezone=True))),
+            bindparam("user_id", type_=PG_UUID(as_uuid=True)),
+        )
         async with self._sessions.for_user(user_id) as session:
             await session.execute(
-                update(Memory)
-                .where(
-                    Memory.user_id == user_id,
-                    Memory.id.in_(list(memory_ids)),
-                    Memory.deleted_at.is_(None),
-                )
-                .values(context_count=Memory.context_count + 1)
+                statement,
+                {
+                    "user_id": user_id,
+                    "memory_ids": list(memory_ids),
+                    "recall_deltas": list(recall_deltas),
+                    "context_deltas": list(context_deltas),
+                    "served_at": list(served_at),
+                },
             )
+
 
     async def reassign_project(
         self,
@@ -1911,10 +2022,12 @@ class MemoryRepository:
                 )
             ).scalar_one_or_none()
 
-    async def get_memory_generation(self, user_id: uuid.UUID) -> int:
-        async with self._sessions.for_user(user_id) as session:
+    async def get_memory_generation(
+        self, user_id: uuid.UUID, *, session: AsyncSession | None = None
+    ) -> int:
+        async with self._session(user_id, session) as active:
             value = (
-                await session.execute(select(User.memory_generation).where(User.id == user_id))
+                await active.execute(select(User.memory_generation).where(User.id == user_id))
             ).scalar_one()
             return int(value)
 
@@ -1938,13 +2051,14 @@ class MemoryRepository:
         source_memory_ids: Sequence[uuid.UUID],
         content_hash: str,
         expected_generation: int,
+        session: AsyncSession | None = None,
     ) -> MemoryProfile:
         """Insert or replace only if the source generation is still current."""
         key = self._profile_key(project)
         ids = list(source_memory_ids)
-        async with self._sessions.for_user(user_id) as session:
+        async with self._session(user_id, session) as active:
             current = (
-                await session.execute(
+                await active.execute(
                     select(User.memory_generation).where(User.id == user_id).with_for_update()
                 )
             ).scalar_one()
@@ -1975,8 +2089,8 @@ class MemoryRepository:
                 )
                 .returning(MemoryProfile)
             )
-            row = (await session.execute(stmt)).scalar_one()
-            await session.refresh(row, attribute_names=["built_at"])
+            row = (await active.execute(stmt)).scalar_one()
+            await active.refresh(row, attribute_names=["built_at"])
             return row
 
     async def list_active_for_profile(
@@ -1988,10 +2102,11 @@ class MemoryRepository:
         dynamic_limit: int,
         dynamic_since: datetime,
         static_min_importance: int = 8,
+        session: AsyncSession | None = None,
     ) -> Sequence[Memory]:
         """Fetch bounded static and recent-dynamic candidates in their own orders."""
         del static_min_importance  # obsolete; category gates static before LIMIT
-        async with self._sessions.for_user(user_id) as session:
+        async with self._session(user_id, session) as active:
             filters = self._filters(user_id, visibility=visibility, category=None)
             static_stmt = (
                 select(Memory)
@@ -2021,8 +2136,8 @@ class MemoryRepository:
                 # dynamic from lower-ranked recent rows.
                 .limit(dynamic_limit + static_limit)
             )
-            static = (await session.execute(static_stmt)).scalars().all()
-            dynamic = (await session.execute(dynamic_stmt)).scalars().all()
+            static = (await active.execute(static_stmt)).scalars().all()
+            dynamic = (await active.execute(dynamic_stmt)).scalars().all()
             unique: dict[uuid.UUID, Memory] = {}
             for memory in (*static, *dynamic):
                 unique.setdefault(memory.id, memory)

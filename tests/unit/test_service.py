@@ -9,6 +9,7 @@ import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -16,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import ScoredMemory
 from recallum.diagnostics import EMBEDDING_UNAVAILABLE_MESSAGE
-from recallum.embeddings.ollama import EmbeddingError
+from recallum.embeddings.ollama import EmbeddingError, OllamaEmbeddingClient
 from recallum.memory import MemoryValidationError, MemoryVisibility
 from recallum.memory.limits import MemoryLimits
 from recallum.memory.schemas import Anchor, MemoryOut, RememberBatchItem
@@ -860,6 +861,36 @@ async def test_remember_batch_embeds_unique_contents_once():
     assert result.failed == 0
 
 
+async def test_remember_exact_duplicate_does_not_embed():
+    service, _, embedder = make_service()
+    await service.remember(USER, content="exact duplicate fact", category="fact")
+    embedder.embedded_texts.clear()
+
+    again = await service.remember(USER, content="exact duplicate fact", category="fact")
+
+    assert again.created is False
+    assert embedder.embedded_texts == []
+
+
+async def test_remember_batch_embeds_only_missing_hashes():
+    service, _, embedder = make_service()
+    await service.remember(USER, content="already stored", category="fact")
+    embedder.embedded_texts.clear()
+
+    result = await service.remember_batch(
+        USER,
+        items=[
+            RememberBatchItem(content="already stored", category="fact"),
+            RememberBatchItem(content="brand new fact", category="fact"),
+        ],
+    )
+
+    assert embedder.embedded_texts == ["brand new fact"]
+    assert result.deduplicated == 1
+    assert result.stored == 1
+    assert result.failed == 0
+
+
 async def test_update_content_supersedes_and_returns_a_new_memory():
     service, _, _ = make_service()
     original = await service.remember(
@@ -1302,6 +1333,69 @@ async def test_context_profile_items_excluded_from_omitted_by_category():
     # 3 constraints total: 1 served via profile, 1 via the group budget,
     # 1 left out -- the profile item is not double-counted as omitted.
     assert result.omitted_by_category == {"constraint": 1}
+
+
+async def test_context_serves_early_category_below_proportional_top_window():
+    """Importance-ordered tops must not starve an earlier packing category.
+
+    A window of effective_max_items + profile overlap + 1 drops this decision
+    (rank 4). The cap window still fetches it, so architecture packing serves it.
+    """
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(context_max_items_cap=8, context_default_max_items=8)
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+    for index in range(3):
+        await service.remember(USER, content=f"later fact {index}", category="fact", importance=9)
+    await service.remember(USER, content="early decision", category="decision", importance=1)
+
+    result = await service.context(USER, max_items=1, strategy="architecture")
+
+    assert [item.content for group in result.groups for item in group.items] == ["early decision"]
+    assert result.omitted_by_category == {"fact": 3}
+
+
+async def test_context_per_category_window_matches_unbounded_tops():
+    """Tight budget over interleaved categories matches an unbounded top fetch."""
+    repo = FakeMemoryRepository()
+    limits = MemoryLimits(
+        context_default_max_items=4,
+        context_max_items_cap=4,
+        profile_context_max_items=2,
+    )
+    service = MemoryService(
+        repository=repo, embeddings=FakeEmbeddingClient(dimensions=8), limits=limits
+    )
+
+    async def _ignore_usage(*_args, **_kwargs):
+        return None
+
+    service._record_context_served = _ignore_usage  # type: ignore[method-assign]
+    for index in range(6):
+        await service.remember(USER, content=f"late fact {index}", category="fact", importance=9)
+    await service.remember(USER, content="prefer tabs", category="preference", importance=8)
+    await service.remember(USER, content="prefer dry", category="preference", importance=7)
+    await service.remember(USER, content="prefer quiet", category="preference", importance=2)
+    await service.remember(USER, content="ship small", category="decision", importance=1)
+    await service.context(USER, max_items=4)
+
+    windowed = await service.context(USER, max_items=4)
+
+    async def _unbounded(*args, **kwargs):
+        kwargs["per_category_limit"] = 10_000
+        return await FakeMemoryRepository.context_snapshot(repo, *args, **kwargs)
+
+    repo.context_snapshot = _unbounded  # type: ignore[method-assign]
+    unbounded = await service.context(USER, max_items=4)
+
+    assert windowed.model_dump()["groups"] == unbounded.model_dump()["groups"]
+    assert windowed.omitted_by_category == unbounded.omitted_by_category
+    assert [item.content for group in windowed.groups for item in group.items] == [
+        "prefer quiet",
+        "ship small",
+    ]
+    assert windowed.omitted_by_category == {"fact": 6}
 
 
 async def test_memory_graph_crosses_projects_and_categories_and_keeps_isolated_nodes():
@@ -1849,6 +1943,133 @@ async def test_remember_embeds_before_opening_a_session():
     await service.remember(USER, content="ordered fact", category="fact")
 
     assert events == ["embed", "session"]
+
+
+class _Nested:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _TrackingSession:
+    """Truthy stand-in so remember_batch takes the shared-transaction path."""
+
+    def begin_nested(self):
+        return _Nested()
+
+    async def commit(self) -> None:
+        return None
+
+
+def _track_sessions(repo, events: list[str], open_sessions: dict[str, int], *, yield_session):
+    original = repo.session_for
+
+    def session_for(user_id):
+        inner = original(user_id)
+
+        class _Wrap:
+            async def __aenter__(self):
+                open_sessions["n"] += 1
+                events.append("session-open")
+                entered = await inner.__aenter__()
+                return yield_session if yield_session is not None else entered
+
+            async def __aexit__(self, *args):
+                try:
+                    return await inner.__aexit__(*args)
+                finally:
+                    open_sessions["n"] -= 1
+                    events.append("session-close")
+
+        return _Wrap()
+
+    repo.session_for = session_for
+
+
+async def test_remember_vanished_duplicate_embeds_outside_the_session():
+    """A duplicate deleted between the pre-check and the write must not embed in-session."""
+    events: list[str] = []
+    open_sessions = {"n": 0}
+    repo = FakeMemoryRepository()
+    embedder = FakeEmbeddingClient(dimensions=8)
+    service = MemoryService(repository=repo, embeddings=embedder)
+    first = await service.remember(USER, content="vanished fact", category="fact")
+    embedder.embedded_texts.clear()
+    original_find = repo.find_active_by_hash
+    calls = {"n": 0}
+
+    async def vanish(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            row = await original_find(*args, **kwargs)
+            assert row is not None
+            row.deleted_at = datetime.now(UTC)
+            return row
+        return await original_find(*args, **kwargs)
+
+    original_embed = embedder.embed
+
+    async def embed(text):
+        events.append(f"embed:{open_sessions['n']}")
+        return await original_embed(text)
+
+    repo.find_active_by_hash = vanish
+    embedder.embed = embed
+    _track_sessions(repo, events, open_sessions, yield_session=None)
+
+    second = await service.remember(USER, content="vanished fact", category="fact")
+
+    assert second.created is True
+    assert second.memory.id != first.memory.id
+    assert "embed:0" in events
+    assert all(not event.startswith("embed:") or event == "embed:0" for event in events)
+    assert events.index("embed:0") > events.index("session-close")
+
+
+async def test_remember_batch_vanished_duplicate_embeds_outside_the_session():
+    """The shared batch transaction must close before a vanished hash is embedded."""
+    events: list[str] = []
+    open_sessions = {"n": 0}
+    repo = FakeMemoryRepository()
+    embedder = FakeEmbeddingClient(dimensions=8)
+    service = MemoryService(repository=repo, embeddings=embedder)
+    await service.remember(USER, content="vanished batch fact", category="fact")
+    embedder.embedded_texts.clear()
+    original_hashes = repo.find_active_hashes
+
+    async def vanish_hashes(user_id, keys):
+        found = await original_hashes(user_id, keys)
+        for row in list(repo.rows.values()):
+            if row.content == "vanished batch fact":
+                row.deleted_at = datetime.now(UTC)
+        return found
+
+    original_embed = embedder.embed
+
+    async def embed(text):
+        events.append(f"embed:{open_sessions['n']}")
+        return await original_embed(text)
+
+    repo.find_active_hashes = vanish_hashes
+    embedder.embed = embed
+    _track_sessions(repo, events, open_sessions, yield_session=_TrackingSession())
+
+    result = await service.remember_batch(
+        USER, items=[RememberBatchItem(content="vanished batch fact", category="fact")]
+    )
+
+    assert result.stored == 1
+    assert result.failed == 0
+    assert result.results[0].created is True
+    assert events == [
+        "session-open",
+        "session-close",
+        "embed:0",
+        "session-open",
+        "session-close",
+    ]
 
 
 async def test_remember_retry_reuses_the_computed_embedding():
@@ -2655,3 +2876,235 @@ async def test_remember_batch_propagates_non_dedup_integrity_error():
     ]
     with pytest.raises(IntegrityError, match="fk_user_id"):
         await service.remember_batch(USER, items=items)
+
+
+class _Payload:
+    def __init__(self, body: dict) -> None:
+        self._body = body
+        self.status_code = 200
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._body
+
+
+class _HTTP:
+    """Fake Ollama HTTP. A delay longer than ``timeout`` models httpx cancellation."""
+
+    def __init__(self, dimensions: int = 8) -> None:
+        self.calls: list[tuple[float, list[str]]] = []
+        self.delay = 0.0
+        self.fail = False
+        self.vector = [1.0] + [0.0] * (dimensions - 1)
+
+    async def post(self, url: str, *, json: dict, timeout: float) -> _Payload:
+        texts = list(json["input"])
+        self.calls.append((float(timeout), texts))
+        if self.delay > timeout:
+            await asyncio.sleep(timeout)
+            raise httpx.TimeoutException(f"slow after {timeout}")
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail:
+            raise httpx.ConnectError("down")
+        return _Payload({"embeddings": [list(self.vector) for _ in texts]})
+
+
+def _read_client(http: _HTTP, *, read_timeout: float = 0.05, window: float = 5.0, cache: int = 256):
+    return OllamaEmbeddingClient(
+        "http://ollama",
+        "read-model",
+        http,  # type: ignore[arg-type]
+        timeout_seconds=30.0,
+        dimensions=8,
+        read_timeout_seconds=read_timeout,
+        read_negative_window_seconds=window,
+        read_cache_size=cache,
+    )
+
+
+async def test_slow_read_embed_degrades_recall_and_context_within_budget():
+    http = _HTTP()
+    service = MemoryService(FakeMemoryRepository(), _read_client(http))
+    await service.remember(USER, content="la base de datos es postgres", category="fact")
+    http.delay = 1.0
+
+    started = time.perf_counter()
+    result = await service.recall(USER, query="postgres")
+    elapsed = time.perf_counter() - started
+
+    assert result.mode == "degraded_textual"
+    assert [item.content for item in result.results] == ["la base de datos es postgres"]
+    assert elapsed < 0.5
+    assert http.calls[-1] == (0.05, ["postgres"])
+
+    focus_http = _HTTP()
+    focus = MemoryService(FakeMemoryRepository(), _read_client(focus_http))
+    focus_http.delay = 1.0
+    started = time.perf_counter()
+    await focus.context(USER, focus="task focus")
+    assert time.perf_counter() - started < 0.5
+    assert focus_http.calls == [(0.05, ["task focus"])]
+
+
+async def test_read_failure_window_skips_http_then_retries_hybrid(monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr("recallum.embeddings.ollama.time.monotonic", lambda: now["t"])
+    http = _HTTP()
+    service = MemoryService(FakeMemoryRepository(), _read_client(http, window=5.0))
+    await service.remember(USER, content="postgres stores the memories", category="fact")
+    http.fail = True
+    reads = len(http.calls)
+
+    first = await service.recall(USER, query="postgres")
+    second = await service.recall(USER, query="postgres")
+
+    assert first.mode == "degraded_textual"
+    assert second.mode == "degraded_textual"
+    assert len(http.calls) == reads + 1
+
+    now["t"] = 1005.0
+    http.fail = False
+    recovered = await service.recall(USER, query="postgres")
+    assert recovered.mode == "hybrid"
+    assert len(http.calls) == reads + 2
+
+    http.fail = True
+    opened = len(http.calls)
+    await service.recall(USER, query="other query")
+    assert len(http.calls) == opened + 1
+    again = await service.recall(USER, query="other query")
+    assert again.mode == "degraded_textual"
+    assert len(http.calls) == opened + 1
+
+
+async def test_read_cache_skips_http_and_evicts_oldest():
+    http = _HTTP()
+    client = _read_client(http, cache=2)
+    first = await client.embed_read("same")
+    first[0] = 999.0
+    second = await client.embed_read("same")
+    assert second[0] == 1.0
+    assert second is not first
+    assert len(http.calls) == 1
+
+    await client.embed_read("b")
+    await client.embed_read("c")
+    assert len(http.calls) == 3
+    await client.embed_read("b")
+    await client.embed_read("c")
+    assert len(http.calls) == 3
+    await client.embed_read("same")
+    assert http.calls[-1][1] == ["same"]
+    assert len(http.calls) == 4
+
+    repeated = _HTTP()
+    service = MemoryService(FakeMemoryRepository(), _read_client(repeated))
+    await service.recall(USER, query="repeated focus")
+    await service.recall(USER, query="repeated focus")
+    assert repeated.calls == [(0.05, ["repeated focus"])]
+
+
+async def test_cache_hit_ignores_open_negative_window():
+    http = _HTTP()
+    client = _read_client(http)
+    cached = await client.embed_read("cached query")
+    http.fail = True
+    with pytest.raises(EmbeddingError):
+        await client.embed_read("other")
+    http.fail = False
+    assert await client.embed_read("cached query") == cached
+    assert http.calls[-1][1] == ["other"]
+
+
+async def test_write_embed_ignores_read_window_and_read_cache():
+    http = _HTTP()
+    client = _read_client(http)
+    repo = FakeMemoryRepository()
+    service = MemoryService(repo, client)
+    seeded = await service.remember(USER, content="seed fact", category="fact")
+    await client.embed_read("rewritten claim")
+    http.vector = [0.0, 1.0] + [0.0] * 6
+    http.fail = True
+    await service.recall(USER, query="unrelated outage")
+    http.fail = False
+    before = len(http.calls)
+
+    fresh = await service.remember(USER, content="fresh fact", category="fact")
+    updated = await service.update(USER, seeded.memory.id, content="rewritten claim")
+    await service.remember_batch(
+        USER, items=[RememberBatchItem(content="batch fact", category="fact")]
+    )
+
+    assert fresh.embedding_degraded is False
+    assert updated.updated is True
+    assert all(timeout == 30.0 for timeout, _texts in http.calls[before:])
+    assert len(http.calls) > before
+    stored = {row.content: row.embedding for row in repo.rows.values()}
+    assert stored["fresh fact"][0] == 0.0
+    assert stored["rewritten claim"][0] == 0.0
+    assert stored["rewritten claim"] != [1.0] + [0.0] * 7
+
+
+async def test_usage_apply_failure_still_returns_reads():
+    service, repo, _ = make_service()
+    stored = await service.remember(USER, content="resilient fact", category="fact")
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("usage backend exploded")
+
+    recalled = await service.recall(USER, query="resilient")
+    assert [item.content for item in recalled.results] == ["resilient fact"]
+    repo.apply_usage = boom  # type: ignore[method-assign]
+
+    snapshot = await service.context(USER)
+    assert snapshot.total_items >= 1
+    served = {item.id for group in snapshot.groups for item in group.items}
+    served.update(snapshot.profile.source_memory_ids)
+    assert stored.memory.id in served
+    assert service._usage.flush_failures == 1
+
+    again = await service.recall(USER, query="resilient")
+    assert [item.content for item in again.results] == ["resilient fact"]
+    profile = await service.get_profile(USER)
+    assert profile.available is True
+
+
+async def test_deferred_usage_counters_and_list_is_not_usage():
+    service, _, _ = make_service()
+    assert service._usage._worker is None
+    stored = await service.remember(USER, content="counted fact", category="fact")
+
+    await service.list_memories(USER)
+    await service._usage.flush()
+    untouched = await service.get(USER, stored.memory.id)
+    assert untouched.memory is not None
+    assert untouched.memory.recall_count == 0
+    assert untouched.memory.context_count == 0
+    assert untouched.memory.last_recalled_at is None
+
+    await service.context(USER)
+    await service._usage.flush()
+    after_context = await service.get(USER, stored.memory.id)
+    assert after_context.memory is not None
+    assert after_context.memory.context_count == 1
+    assert after_context.memory.recall_count == 0
+    assert after_context.memory.last_recalled_at is None
+
+    hits = await service.recall(USER, query="counted")
+    assert hits.results[0].id == stored.memory.id
+    assert hits.results[0].recall_count == 0
+    await service.context(USER)
+    after_recall = await service.get(USER, stored.memory.id)
+    assert after_recall.memory is not None
+    assert after_recall.memory.recall_count == 1
+    assert after_recall.memory.last_recalled_at is not None
+    assert after_recall.memory.context_count == 1
+    await service._usage.flush()
+    flushed = await service.get(USER, stored.memory.id)
+    assert flushed.memory is not None
+    assert flushed.memory.recall_count == 1
+    assert flushed.memory.context_count == 2
+    assert flushed.memory.last_recalled_at == after_recall.memory.last_recalled_at

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import cast, func, literal, or_, select, text, update
+from sqlalchemy import cast, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
@@ -178,7 +178,6 @@ class SkillRepository:
         limit: int,
     ) -> list[ScoredSkill]:
         """Nearest neighbours by cosine similarity (1 - distance)."""
-        await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
         distance = Skill.embedding.cosine_distance(embedding)
         score = (literal(1.0) - distance).label("score")
         stmt = (
@@ -228,7 +227,6 @@ class SkillRepository:
         ``memory_repo.similar_active``.
         """
         async with self._sessions.for_user(user_id) as session:
-            await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
             distance = Skill.embedding.cosine_distance(embedding)
             score = (literal(1.0) - distance).label("score")
             filters = [

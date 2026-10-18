@@ -154,6 +154,13 @@ class Memory(Base):
             "id",
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # Serves dynamic selection ordered by last_recalled_at.
+        Index(
+            "ix_memories_user_last_recalled",
+            "user_id",
+            text("last_recalled_at DESC"),
+            postgresql_where=text("deleted_at IS NULL AND last_recalled_at IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

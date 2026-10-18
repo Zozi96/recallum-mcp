@@ -28,6 +28,7 @@ from recallum.db.session import SessionProvider
 from recallum.embeddings.ollama import OllamaEmbeddingClient
 from recallum.memory.profile_rebuild import ProfileRebuildQueue
 from recallum.memory.service import MemoryService
+from recallum.memory.usage import UsageBuffer
 from recallum.skills.service import SkillService
 from recallum.telemetry.buffer import TelemetryBuffer
 from recallum.telemetry.repository import TelemetryRepository
@@ -45,6 +46,9 @@ def _database_connect_args(
         "command_timeout": command_timeout_seconds,
         "server_settings": {
             "statement_timeout": str(max(1, round(statement_timeout_seconds * 1000))),
+            # Process constants. Trigram threshold stays a per-search set_config.
+            "hnsw.iterative_scan": "strict_order",
+            "hnsw.ef_search": "100",
         },
     }
 
@@ -104,6 +108,9 @@ class Container(containers.DeclarativeContainer):
         model=config.ollama.model,
         http_client=providers.Factory(_LazyProvider, provider=http_client.provider),
         timeout_seconds=config.ollama.timeout_seconds.as_float(),
+        read_timeout_seconds=config.ollama.read_timeout_seconds.as_float(),
+        read_negative_window_seconds=config.ollama.read_negative_window_seconds.as_float(),
+        read_cache_size=config.ollama.read_cache_size.as_int(),
         dimensions=config.ollama.dimensions.as_int(),
     )
 
@@ -186,12 +193,20 @@ class Container(containers.DeclarativeContainer):
         batch_size=16,
         buffer_limit=1024,
     )
+    usage_buffer = providers.Singleton(
+        UsageBuffer,
+        repository=memory_repository,
+        batch_size=config.usage.batch_size.as_int(),
+        flush_interval_seconds=config.usage.flush_interval_seconds.as_float(),
+        buffer_limit=config.usage.buffer_limit.as_int(),
+    )
     memory_service = providers.Singleton(
         MemoryService,
         repository=memory_repository,
         embeddings=embedding_client,
         limits=config.limits,
         profile_rebuild_queue=profile_rebuild_queue,
+        usage_buffer=usage_buffer,
     )
     skill_service = providers.Singleton(
         SkillService,
@@ -221,10 +236,15 @@ def create_container(settings: Settings) -> Container:
 
 
 async def init_container_resources(container: Container) -> None:
-    """Initialize Resource providers (engine, HTTP client) before first use."""
+    """Initialize Resource providers, then start the usage flusher.
+
+    CLI and other container entry points share this path with the app lifespan,
+    so an orderly ``shutdown_container`` can flush pending usage.
+    """
     resources = container.init_resources()
     if resources is not None:
         await resources
+    await container.usage_buffer().start()
 
 
 async def shutdown_container(container: Container) -> None:
@@ -237,8 +257,10 @@ async def shutdown_container(container: Container) -> None:
     if state is None:
         state = {
             "http": False,
+            "usage": False,
             "engine": False,
             "http_resource": None,
+            "usage_resource": None,
             "engine_resource": None,
             "lock": asyncio.Lock(),
             "lock_owner": None,
@@ -246,6 +268,8 @@ async def shutdown_container(container: Container) -> None:
         container._recallum_shutdown_state = state
     else:
         state.setdefault("lock_owner", None)
+        state.setdefault("usage", False)
+        state.setdefault("usage_resource", None)
 
     async def close_one(name: str, provider, method_name: str) -> BaseException | None:
         if state[name]:
@@ -281,10 +305,12 @@ async def shutdown_container(container: Container) -> None:
         try:
             errors: list[BaseException] = []
             cancellation: asyncio.CancelledError | None = None
-            # HTTP must drain before the engine it may still use. Always
-            # attempt the engine even when HTTP fails or is cancelled.
+            # HTTP must drain before the engine it may still use. Usage flush
+            # also needs the engine, so it stops between those two. Always
+            # attempt later steps even when an earlier one fails or is cancelled.
             for name, provider, method in (
                 ("http", container.http_client, "aclose"),
+                ("usage", container.usage_buffer, "stop"),
                 ("engine", container.engine, "dispose"),
             ):
                 error = await close_one(name, provider, method)

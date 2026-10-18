@@ -8,14 +8,18 @@ that unknown/foreign/retired ids leak nothing for ``get_skill``/``forget_skill``
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from recallum.db.models import Skill
 from recallum.db.repositories.skill_repo import ScoredSkill
+from recallum.embeddings.ollama import OllamaEmbeddingClient
 from recallum.skills import SkillValidationError
 from recallum.skills.service import SkillService
 from tests.fakes import (
@@ -342,3 +346,98 @@ async def test_match_skills_rejects_over_limit_query():
         await service.match_skills(USER, query="x" * 2001)
     match = await service.match_skills(USER, query="x" * 2000)
     assert match.results == []
+
+
+class _SkillHTTP:
+    def __init__(self) -> None:
+        self.calls: list[tuple[float, list[str]]] = []
+        self.delay = 0.0
+        self.fail = False
+        self.vector = [1.0] + [0.0] * 7
+
+    async def post(self, url: str, *, json: dict, timeout: float):
+        texts = list(json["input"])
+        self.calls.append((float(timeout), texts))
+        if self.delay > timeout:
+            await asyncio.sleep(timeout)
+            raise httpx.TimeoutException("slow")
+        if self.fail:
+            raise httpx.ConnectError("down")
+        body = {"embeddings": [list(self.vector) for _ in texts]}
+
+        class _Payload:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return body
+
+        return _Payload()
+
+
+def _skill_client(http: _SkillHTTP) -> OllamaEmbeddingClient:
+    return OllamaEmbeddingClient(
+        "http://ollama",
+        "read-model",
+        http,  # type: ignore[arg-type]
+        timeout_seconds=30.0,
+        dimensions=8,
+        read_timeout_seconds=0.05,
+        read_negative_window_seconds=5.0,
+        read_cache_size=8,
+    )
+
+
+async def test_slow_match_skills_degrades_without_waiting_full_timeout():
+    http = _SkillHTTP()
+    service = SkillService(FakeSkillRepository(), _skill_client(http))
+    await service.save_skill(USER, **_save_kwargs())
+    http.delay = 1.0
+    started = time.perf_counter()
+    match = await service.match_skills(USER, query="alembic migration schema")
+    assert time.perf_counter() - started < 0.5
+    assert match.mode == "degraded_textual"
+    assert http.calls[-1][0] == 0.05
+
+
+async def test_match_skills_failure_window_skips_http_until_it_expires(monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr("recallum.embeddings.ollama.time.monotonic", lambda: now["t"])
+    http = _SkillHTTP()
+    service = SkillService(FakeSkillRepository(), _skill_client(http))
+    await service.save_skill(USER, **_save_kwargs())
+    http.fail = True
+    reads = len(http.calls)
+    first = await service.match_skills(USER, query="schema change")
+    second = await service.match_skills(USER, query="schema change")
+    assert first.mode == "degraded_textual"
+    assert second.mode == "degraded_textual"
+    assert len(http.calls) == reads + 1
+
+    now["t"] = 1005.0
+    http.fail = False
+    recovered = await service.match_skills(USER, query="schema change")
+    assert recovered.mode == "hybrid"
+    assert len(http.calls) == reads + 2
+
+
+async def test_save_skill_ignores_read_window_and_read_cache():
+    http = _SkillHTTP()
+    repo = FakeSkillRepository()
+    client = _skill_client(http)
+    service = SkillService(repo, client)
+    kwargs = _save_kwargs()
+    searchable = " ".join([kwargs["description"], *kwargs["triggers"], *kwargs["steps"]])
+    await client.embed_read(searchable)
+    http.vector = [0.0, 1.0] + [0.0] * 6
+    http.fail = True
+    failed = await service.match_skills(USER, query="open the window")
+    assert failed.mode == "degraded_textual"
+    http.fail = False
+    before = len(http.calls)
+    saved = await service.save_skill(USER, **kwargs)
+    assert saved.created is True
+    assert http.calls[before:] == [(30.0, [searchable])]
+    assert next(iter(repo.rows.values())).embedding[1] == 1.0

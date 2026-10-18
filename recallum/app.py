@@ -255,11 +255,18 @@ def create_health_router(container: Container, settings: Settings | None = None)
             readiness.per_dependency_timeout_seconds,
             readiness.aggregate_timeout_seconds,
         )
+        authenticator = container.authenticator()
+        usage = container.usage_buffer()
         return container.telemetry_buffer().snapshot(
             {
                 "database": "ok" if database_ok else "unavailable",
                 "embeddings": "ok" if embeddings_ok else "unavailable",
-            }
+            },
+            identity_cache_hits=authenticator.identity_cache_hits,
+            identity_cache_misses=authenticator.identity_cache_misses,
+            usage_dropped=usage.dropped,
+            usage_flush_failures=usage.flush_failures,
+            usage_pending=usage.pending_count,
         )
 
     return router
@@ -307,6 +314,9 @@ def create_app(settings: Settings | None = None, container: Container | None = N
             await telemetry.start()
             # Registration is synchronous immediately after successful start.
             coordinator.register_worker(telemetry)
+            usage = resolved_container.usage_buffer()
+            await usage.start()
+            coordinator.register_worker(usage)
             profiles = resolved_container.profile_rebuild_queue()
             await profiles.start()
             coordinator.register_worker(profiles)

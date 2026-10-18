@@ -14,6 +14,7 @@ import hashlib
 import math
 import time
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import bindparam, event, text
@@ -84,6 +85,21 @@ async def test_skills_hnsw_index_excludes_soft_deleted_rows(container):
         ).scalar_one()
     assert "USING hnsw" in definition
     assert "deleted_at IS NULL" in definition
+
+
+async def test_pooled_connection_reports_hnsw_server_settings(container):
+    """HNSW knobs are pool startup settings, not per-search SET LOCAL."""
+    async with container.engine().connect() as connection:
+        await connection.execute(text("SELECT '[1]'::vector"))
+        iterative = (
+            await connection.execute(text("SELECT current_setting('hnsw.iterative_scan')"))
+        ).scalar_one()
+        ef_search = (
+            await connection.execute(text("SELECT current_setting('hnsw.ef_search')"))
+        ).scalar_one()
+    assert iterative == "strict_order"
+    assert str(ef_search) == "100"
+
 
 
 async def test_search_text_collapses_inflections(container):
@@ -157,16 +173,16 @@ async def test_recall_still_works_when_embeddings_are_unavailable(container):
     )
 
     embedder = container.embedding_client()
-    original_embed = embedder.embed
+    original_embed = embedder.embed_read
 
     async def unavailable(_text: str) -> list[float]:
         raise EmbeddingError("embedding unavailable")
 
-    embedder.embed = unavailable  # type: ignore[method-assign]
+    embedder.embed_read = unavailable  # type: ignore[method-assign]
     try:
         result = await service.recall(user_id, query="how are deploys handled in production")
     finally:
-        embedder.embed = original_embed  # type: ignore[method-assign]
+        embedder.embed_read = original_embed  # type: ignore[method-assign]
 
     assert result.mode == "degraded_textual"
     assert stored.memory.id in {r.id for r in result.results}
@@ -263,17 +279,17 @@ async def test_recall_vector_threshold_does_not_fill_when_embeddings_unavailable
     )
 
     embedder = container.embedding_client()
-    original_embed = embedder.embed
+    original_embed = embedder.embed_read
 
     async def unavailable(_text: str) -> list[float]:
         raise EmbeddingError("embedding unavailable")
 
-    embedder.embed = unavailable  # type: ignore[method-assign]
+    embedder.embed_read = unavailable  # type: ignore[method-assign]
     try:
         result = await service.recall(user_id, query="how are deploys handled in production")
         miss = await service.recall(user_id, query="frobnicate widget xyzzy")
     finally:
-        embedder.embed = original_embed  # type: ignore[method-assign]
+        embedder.embed_read = original_embed  # type: ignore[method-assign]
 
     assert result.mode == "degraded_textual"
     assert stored.memory.id in {r.id for r in result.results}
@@ -387,10 +403,10 @@ async def test_remember_flags_a_similar_existing_memory(container, monkeypatch):
 async def test_remember_batch_shares_one_transaction(container):
     """Per-item persistence runs in one shared transaction via savepoints.
 
-    The stub embedder has no database side effects, so counting SQLAlchemy
-    ``begin``/``begin_nested`` events isolates the persistence phase. Three
-    items must produce three savepoints (not three transactions) and the
-    profile rebuild stays outside the shared transaction.
+    Hash resolution is a short read before that transaction, so embeddings are
+    not computed while a connection is held. The stub embedder has no database
+    side effects. Three items must produce three savepoints (not three write
+    transactions) and the profile rebuild stays outside the shared transaction.
     """
     user_id = await _make_user_with_key(container, "batch-tx@example.com")
     service = container.memory_service()
@@ -422,9 +438,10 @@ async def test_remember_batch_shares_one_transaction(container):
 
     assert result.failed == 0
     assert result.stored == 3
-    # One shared persistence transaction. The profile rebuild is enqueued and
-    # its transactions run on the background worker, outside this listen window.
-    assert begins == 1
+    # Short hash read, then one shared persistence transaction. The profile
+    # rebuild is enqueued and its transactions run on the background worker,
+    # outside this listen window.
+    assert begins == 2
     # Two savepoints per created item: one isolating the item write, one
     # isolating the advisory similar check inside it.
     assert nested == 6
@@ -792,11 +809,21 @@ async def test_recall_symbol_filter_excludes_unanchored_similar_memory_in_postgr
     result_ids = {r.id for r in result.results}
     assert anchored.memory.id in result_ids
     assert unanchored.memory.id not in result_ids
+    anchored_hit = next(row for row in result.results if row.id == anchored.memory.id)
+    assert {(a.type, a.identifier) for a in anchored_hit.anchors} == {
+        ("symbol", "PaymentService.capture")
+    }
 
     unfiltered = await service.recall(user_id, query="PaymentService.capture")
     unfiltered_ids = {r.id for r in unfiltered.results}
     assert anchored.memory.id in unfiltered_ids
     assert unanchored.memory.id in unfiltered_ids
+    anchored_unfiltered = next(row for row in unfiltered.results if row.id == anchored.memory.id)
+    unanchored_hit = next(row for row in unfiltered.results if row.id == unanchored.memory.id)
+    assert {(a.type, a.identifier) for a in anchored_unfiltered.anchors} == {
+        ("symbol", "PaymentService.capture")
+    }
+    assert unanchored_hit.anchors == []
 
 
 async def test_update_content_change_keeps_anchor_reachable_via_recall_symbol_in_postgres(
@@ -1085,7 +1112,9 @@ async def test_profile_static_overflow_can_enter_dynamic_in_postgres(container):
         category="preference",
         importance=9,
     )
-    await container.memory_repository().mark_recalled(user_id, [overflow.memory.id])
+    await container.memory_repository().apply_usage(
+        user_id, [overflow.memory.id], [1], [0], [datetime.now(UTC)]
+    )
 
     profile = await service.get_profile(user_id)
 
@@ -1166,7 +1195,7 @@ async def test_forget_excludes_from_all_queries(container):
     assert context.total_items == 0
 
 
-_HEAD_REVISION = "0021_skills_hnsw_partial"
+_HEAD_REVISION = "0022_last_recalled_index"
 _PREV_REVISION = "0019_memory_code_anchors"
 
 
@@ -1549,7 +1578,7 @@ async def test_memory_profile_context_combinations_after_invalidation(container)
             user_id, content="the auth service uses Granian", category="fact", importance=1
         )
     ).memory
-    await repository.mark_recalled(user_id, [unrelated.id])
+    await repository.apply_usage(user_id, [unrelated.id], [1], [0], [datetime.now(UTC)])
 
     await _alembic_downgrade_0019()
     try:
@@ -1611,18 +1640,18 @@ async def test_memory_profile_context_combinations_after_invalidation(container)
         from recallum.embeddings.ollama import EmbeddingError
 
         embedder = container.embedding_client()
-        original_embed = embedder.embed
+        original_embed = embedder.embed_read
 
         async def unavailable(_text: str) -> list[float]:
             raise EmbeddingError("embedding unavailable")
 
-        embedder.embed = unavailable  # type: ignore[method-assign]
+        embedder.embed_read = unavailable  # type: ignore[method-assign]
         try:
             textual = await service.context(
                 user_id, focus="auth service Granian", max_items=2, max_chars=400
             )
         finally:
-            embedder.embed = original_embed  # type: ignore[method-assign]
+            embedder.embed_read = original_embed  # type: ignore[method-assign]
         _assert_two_slot(textual, expect_dynamic=False)
     finally:
         await _alembic_upgrade_head()

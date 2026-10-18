@@ -6,6 +6,8 @@ import asyncio
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -20,6 +22,10 @@ from tests.fakes import FakeEmbeddingClient, FakeMemoryRepository, ScriptedEmbed
 from tests.unit.test_service import make_service
 
 USER = uuid.uuid4()
+
+async def _stamp_recalled(repo: FakeMemoryRepository, ids: list[uuid.UUID]) -> None:
+    now = datetime.now(UTC)
+    await repo.apply_usage(USER, ids, [1] * len(ids), [0] * len(ids), [now] * len(ids))
 
 
 async def _eventually(predicate, timeout=1.0):
@@ -289,6 +295,7 @@ async def test_context_records_usage_for_profile_items():
         USER, content="prefer black formatter", category="preference"
     )
     await service.context(USER)
+    await service._usage.flush()
     row = repo.rows[remembered.memory.id]
     assert row.context_count >= 1
 
@@ -314,7 +321,7 @@ async def test_recent_low_importance_dynamic_survives_candidate_cap():
             USER, content=f"recent work {index}", category="fact", importance=1
         )
         ids.append(result.memory.id)
-    await repo.mark_recalled(USER, ids)
+    await _stamp_recalled(repo, ids)
     block = await service.get_profile(USER)
     assert [item.content for item in block.dynamic] == ["recent work 7", "recent work 6"]
 
@@ -333,7 +340,7 @@ async def test_recent_static_overflow_can_fall_through_to_dynamic():
     overflow = await service.remember(
         USER, content="recent overflow preference", category="preference", importance=9
     )
-    await repo.mark_recalled(USER, [overflow.memory.id])
+    await _stamp_recalled(repo, [overflow.memory.id])
 
     block = await service.get_profile(USER)
 
@@ -356,7 +363,7 @@ async def test_served_digest_covers_live_dynamic_and_built_at_stays_static():
     built_at = stored.built_at
     generation = repo.generations[USER]
 
-    await repo.mark_recalled(USER, [fact.memory.id])
+    await _stamp_recalled(repo, [fact.memory.id])
     block = await service.get_profile(USER)
 
     assert repo.generations[USER] == generation
@@ -388,6 +395,26 @@ async def test_context_after_recall_reuses_static_and_shows_dynamic():
     assert second.profile.built_at == built_at
     assert any(item.id == pref.memory.id for item in second.profile.static)
     assert [item.id for item in second.profile.dynamic] == [fact.memory.id]
+
+
+async def test_profile_read_after_recall_shows_dynamic_without_rebuild():
+    service, repo, _ = make_service()
+    pref = await service.remember(
+        USER, content="prefer type hints", category="preference", importance=8
+    )
+    fact = await service.remember(
+        USER, content="payment webhooks retry twice", category="fact", importance=1
+    )
+    first = await service.get_profile(USER)
+    built_at = first.built_at
+    generation = repo.generations[USER]
+    recalled = await service.recall(USER, query="payment webhooks retry")
+    assert any(item.id == fact.memory.id for item in recalled.results)
+    second = await service.get_profile(USER)
+    assert repo.generations[USER] == generation
+    assert second.built_at == built_at
+    assert any(item.id == pref.memory.id for item in second.static)
+    assert [item.id for item in second.dynamic] == [fact.memory.id]
 
 
 async def test_project_profile_is_combined_without_cross_project_memory():
@@ -444,6 +471,56 @@ async def test_rebuild_retries_generation_cas_and_forget_wins():
     block = await service.rebuild_profile(USER)
     assert remembered.memory.id not in block.source_memory_ids
 
+async def test_rebuild_profile_uses_one_session_per_attempt():
+    service, repo, _ = make_service()
+    await service.remember(USER, content="one session preference", category="preference")
+    opens = 0
+    seen: list[object] = []
+    original_session = repo.session_for
+    original_generation = repo.get_memory_generation
+    original_candidates = repo.list_active_for_profile
+    original_upsert = repo.upsert_profile
+
+    @asynccontextmanager
+    async def counting(user_id):
+        nonlocal opens
+        opens += 1
+        async with original_session(user_id) as session:
+            yield session if session is not None else object()
+
+    async def generation(user_id, *, session=None):
+        seen.append(session)
+        return await original_generation(user_id)
+
+    async def candidates(*args, **kwargs):
+        seen.append(kwargs.get("session"))
+        return await original_candidates(*args, **kwargs)
+
+    async def upsert(*args, **kwargs):
+        seen.append(kwargs.get("session"))
+        return await original_upsert(*args, **kwargs)
+
+    repo.session_for = counting  # type: ignore[method-assign]
+    repo.get_memory_generation = generation  # type: ignore[method-assign]
+    repo.list_active_for_profile = candidates  # type: ignore[method-assign]
+    repo.upsert_profile = upsert  # type: ignore[method-assign]
+    await service.rebuild_profile(USER)
+    assert opens == 1
+    assert len(seen) == 3
+    assert seen[0] is seen[1] is seen[2]
+
+    async def conflict_once(*args, **kwargs):
+        repo.upsert_profile = upsert  # type: ignore[method-assign]
+        raise ProfileGenerationConflict
+
+    repo.upsert_profile = conflict_once  # type: ignore[method-assign]
+    opens = 0
+    seen.clear()
+    await service.rebuild_profile(USER)
+    assert opens == 2
+    assert len(seen) == 5
+
+
 
 async def _two_slot_corpus(service: MemoryService, repo: FakeMemoryRepository):
     constraint = await service.remember(
@@ -455,7 +532,7 @@ async def _two_slot_corpus(service: MemoryService, repo: FakeMemoryRepository):
     matching = await service.remember(
         USER, content="the auth service uses Granian", category="fact", importance=1
     )
-    await repo.mark_recalled(USER, [unrelated.memory.id])
+    await _stamp_recalled(repo, [unrelated.memory.id])
     return constraint, unrelated, matching
 
 
@@ -532,7 +609,7 @@ async def test_context_blank_focus_keeps_recency_dynamic():
         USER, content="payment webhooks retry twice", category="fact", importance=1
     )
     await service.get_profile(USER)
-    await repo.mark_recalled(USER, [fact.memory.id])
+    await _stamp_recalled(repo, [fact.memory.id])
     for focus in (None, "", "   "):
         ctx = await service.context(USER, focus=focus)
         assert any(item.id == pref.memory.id for item in ctx.profile.static)
@@ -548,7 +625,7 @@ async def test_get_profile_keeps_dynamic_when_context_focus_empties_it():
         USER, content="payment webhooks retry twice", category="fact", importance=1
     )
     await service.get_profile(USER)
-    await repo.mark_recalled(USER, [fact.memory.id])
+    await _stamp_recalled(repo, [fact.memory.id])
     focused = await service.context(USER, focus="payment webhooks retry")
     block = await service.get_profile(USER)
     assert focused.profile.dynamic == []
@@ -563,7 +640,7 @@ async def test_focused_context_empties_dynamic_on_hot_and_cold_paths():
     fact = await service.remember(
         USER, content="payment webhooks retry twice", category="fact", importance=1
     )
-    await repo.mark_recalled(USER, [fact.memory.id])
+    await _stamp_recalled(repo, [fact.memory.id])
     await service.get_profile(USER)
     hot = await service.context(USER, focus="payment webhooks retry")
     assert hot.profile.dynamic == []
@@ -584,7 +661,7 @@ async def test_focused_context_recent_relevant_still_recoverable():
     fact = await service.remember(
         USER, content="the auth service uses Granian", category="fact", importance=1
     )
-    await repo.mark_recalled(USER, [fact.memory.id])
+    await _stamp_recalled(repo, [fact.memory.id])
     ctx = await service.context(
         USER, focus="auth service Granian", max_items=5, max_chars=400
     )
@@ -624,7 +701,7 @@ async def test_focused_context_zero_matches_still_empties_dynamic():
     unrelated = await service.remember(
         USER, content="lunch is at noon in the cafeteria", category="fact", importance=1
     )
-    await repo.mark_recalled(USER, [unrelated.memory.id])
+    await _stamp_recalled(repo, [unrelated.memory.id])
     ctx = await service.context(
         USER, focus="quantum entanglement experiments", max_items=5, max_chars=400
     )
@@ -652,6 +729,7 @@ async def test_focused_context_dedup_omitted_built_at_and_usage():
     assert ctx.profile.built_at == built_at
     assert repo.generations[USER] == generation
     assert ctx.profile.digest == profile_content_hash(ctx.profile.static, [])
+    await service._usage.flush()
     assert repo.rows[constraint.memory.id].context_count >= 1
     assert repo.rows[matching.memory.id].context_count >= 1
     assert repo.rows[unrelated.memory.id].context_count == 0

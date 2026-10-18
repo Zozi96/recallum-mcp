@@ -123,6 +123,7 @@ async def test_context_and_recall_record_usage_in_separate_counters():
     snapshot = await service.context(USER, max_items=1)
 
     assert [i.id for g in snapshot.groups for i in g.items] == [served.memory.id]
+    await service._usage.flush()
     row = repo.rows[served.memory.id]
     assert row.context_count == 1
     assert row.recall_count == 0
@@ -133,9 +134,10 @@ async def test_context_and_recall_record_usage_in_separate_counters():
     # is deterministically the top hit; limit=1 keeps "beta fact" unserved.
     hits = await service.recall(USER, query="alpha", limit=1)
     assert [r.id for r in hits.results] == [served.memory.id]
-    # The response carries the pre-serve counters; the row is already bumped.
+    # The response carries the pre-flush counters.
     assert hits.results[0].recall_count == 0
     assert hits.results[0].context_count == 1
+    await service._usage.flush()
     assert row.recall_count == 1
     assert row.last_recalled_at is not None
     assert row.context_count == 1  # recall never touches the snapshot counter
@@ -148,14 +150,13 @@ async def test_usage_recording_failure_never_fails_the_read():
     async def boom(*_args, **_kwargs):
         raise RuntimeError("usage backend exploded")
 
-    repo.mark_recalled = boom  # type: ignore[method-assign]
-    repo.mark_seen_in_context = boom  # type: ignore[method-assign]
-
     result = await service.recall(USER, query="resilient")
     assert [r.content for r in result.results] == ["resilient fact"]
+    repo.apply_usage = boom  # type: ignore[method-assign]
 
     snapshot = await service.context(USER)
     assert snapshot.total_items == 1
+    assert service._usage.flush_failures == 1
 
 
 async def test_recall_usage_weight_breaks_retrieval_ties():

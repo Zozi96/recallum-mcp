@@ -1279,9 +1279,10 @@ class MemoryRepositoryContract:
         )
         generation_before = await repo.get_memory_generation(user_id)
 
-        await repo.mark_recalled(user_id, [mine.id, foreign.id])
-        await repo.mark_recalled(user_id, [mine.id])
-        await repo.mark_recalled(user_id, [])
+        now = datetime.now(UTC)
+        await repo.apply_usage(user_id, [mine.id, foreign.id], [1, 1], [0, 0], [now, now])
+        await repo.apply_usage(user_id, [mine.id], [1], [0], [now])
+        await repo.apply_usage(user_id, [], [], [], [])
 
         refreshed = await repo.get_active(user_id, mine.id)
         assert refreshed.recall_count == 2
@@ -1314,7 +1315,7 @@ class MemoryRepositoryContract:
             ),
         )
         generation = await repo.get_memory_generation(user_id)
-        await repo.mark_recalled(user_id, [fact.id])
+        await repo.apply_usage(user_id, [fact.id], [1], [0], [datetime.now(UTC)])
         since = datetime.now(UTC) - timedelta(days=14)
 
         snap = await repo.context_snapshot(
@@ -1322,7 +1323,7 @@ class MemoryRepositoryContract:
             project=None,
             visibility=MemoryVisibility.global_only(),
             category=None,
-            top_limit=10,
+            per_category_limit=10,
             candidate_limit=10,
             query="payment webhooks retry",
             embedding=None,
@@ -1342,6 +1343,50 @@ class MemoryRepositoryContract:
         text_ids = {scored.memory.id for scored in snap.focus.text}
         assert fact.id in text_ids
         assert list(snap.focus.vector) == []
+
+
+    async def test_context_snapshot_tops_are_per_category(self, repo, user_id):
+        """A limit of 1 keeps one row per category, not one row per pool."""
+        for index in range(3):
+            await repo.create_memory(
+                user_id,
+                **self._kwargs(
+                    content=f"high fact {index}",
+                    category="fact",
+                    content_hash=_hash(f"per-cat-fact-{index}"),
+                    importance=9,
+                ),
+            )
+        low = await repo.create_memory(
+            user_id,
+            **self._kwargs(
+                content="low preference",
+                category="preference",
+                content_hash=_hash("per-cat-pref"),
+                importance=1,
+            ),
+        )
+
+        snap = await repo.context_snapshot(
+            user_id,
+            project=None,
+            visibility=MemoryVisibility.global_only(),
+            category=None,
+            per_category_limit=1,
+            candidate_limit=10,
+            query=None,
+            embedding=None,
+            embedding_model=None,
+            trigram_min_word_similarity=None,
+            static_limit=12,
+            dynamic_limit=8,
+            dynamic_since=datetime.now(UTC) - timedelta(days=14),
+            static_min_importance=8,
+        )
+
+        assert snap.project_top == []
+        assert sum(memory.category == "fact" for memory in snap.global_top) == 1
+        assert low.id in {memory.id for memory in snap.global_top}
 
     async def test_list_active_staleness_filters_use_last_confirmation(self, repo, user_id):
         """Pins the comparison direction and that the total honours the filter.
@@ -1377,13 +1422,13 @@ class MemoryRepositoryContract:
     async def test_mark_seen_in_context_counts_apart_from_recall(self, repo, user_id):
         row = await repo.create_memory(user_id, **self._kwargs(content="counted row"))
 
-        await repo.mark_seen_in_context(user_id, [row.id])
-        await repo.mark_seen_in_context(user_id, [row.id])
-        await repo.mark_recalled(user_id, [row.id])
+        await repo.apply_usage(user_id, [row.id], [0], [1], [None])
+        await repo.apply_usage(user_id, [row.id], [0], [1], [None])
+        await repo.apply_usage(user_id, [row.id], [1], [0], [datetime.now(UTC)])
 
         fresh = await repo.get_active(user_id, row.id)
         # Snapshot exposure and query relevance are separate signals: only
-        # mark_recalled may ever feed the usage voter.
+        # a recall delta may ever feed the usage voter.
         assert fresh.context_count == 2
         assert fresh.recall_count == 1
 

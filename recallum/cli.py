@@ -290,12 +290,13 @@ async def _run(args: argparse.Namespace, container: Container) -> int:
         if args.vector_min_similarity is not None:
             overrides["recall_vector_min_similarity"] = args.vector_min_similarity
         if overrides:
-            # Same graph, one knob turned: the configured limits with the
-            # overrides applied, so an A/B differs only in what was asked.
+            # Same graph, one knob turned: configured limits, plus the
+            # lifecycle-managed usage buffer so eval does not orphan a flusher.
             service = MemoryService(
                 repository=container.memory_repository(),
                 embeddings=container.embedding_client(),
                 limits=get_settings().limits.model_copy(update=overrides),
+                usage_buffer=container.usage_buffer(),
             )
         else:
             service = container.memory_service()

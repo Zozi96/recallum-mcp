@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from collections import OrderedDict
+
 import httpx
 
 
@@ -10,10 +13,11 @@ class EmbeddingError(Exception):
 
 
 class OllamaEmbeddingClient:
-    """Calls the local Ollama ``/api/embed`` endpoint synchronously per text.
+    """Calls the local Ollama ``/api/embed`` endpoint.
 
-    Memories are short and initial volume is low, so one blocking-style async
-    call per operation is enough; failures raise ``EmbeddingError``.
+    Writes (``embed`` / ``embed_batch``) use the full timeout and always try.
+    Reads (``embed_read``) use a shorter timeout, skip HTTP during a short
+    window after a read failure, and reuse a bounded LRU of successful vectors.
     """
 
     def __init__(
@@ -23,12 +27,20 @@ class OllamaEmbeddingClient:
         http_client: httpx.AsyncClient,
         timeout_seconds: float = 30.0,
         dimensions: int = 768,
+        read_timeout_seconds: float = 3.0,
+        read_negative_window_seconds: float = 5.0,
+        read_cache_size: int = 256,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._http = http_client
         self._timeout = timeout_seconds
+        self._read_timeout = read_timeout_seconds
+        self._negative_window = read_negative_window_seconds
+        self._read_cache_size = read_cache_size
         self._dimensions = dimensions
+        self._read_failed_until = 0.0
+        self._read_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
 
     @property
     def model(self) -> str:
@@ -48,16 +60,46 @@ class OllamaEmbeddingClient:
         """Return one embedding vector per text or raise ``EmbeddingError``."""
         if not texts:
             return []
+        return await self._post(texts, self._timeout)
+
+    async def embed(self, text: str) -> list[float]:
+        """Write-path embed: full timeout, no read window and no read cache."""
+        return (await self.embed_batch([text]))[0]
+
+    async def embed_read(self, text: str) -> list[float]:
+        """Read-path embed for recall, context focus and match_skills."""
+        key = (self._model, text)
+        cached = self._read_cache.get(key)
+        if cached is not None:
+            self._read_cache.move_to_end(key)
+            # A hit is not evidence Ollama recovered; leave the window alone.
+            return list(cached)
+        if time.monotonic() < self._read_failed_until:
+            raise EmbeddingError("embedding read skipped during negative window")
+        try:
+            vector = (await self._post([text], self._read_timeout))[0]
+        except EmbeddingError:
+            self._read_failed_until = time.monotonic() + self._negative_window
+            raise
+        self._read_failed_until = 0.0
+        stored = list(vector)
+        self._read_cache[key] = stored
+        self._read_cache.move_to_end(key)
+        while len(self._read_cache) > self._read_cache_size:
+            self._read_cache.popitem(last=False)
+        return list(stored)
+
+    async def _post(self, texts: list[str], timeout_seconds: float) -> list[list[float]]:
         try:
             response = await self._http.post(
                 f"{self._base_url}/api/embed",
                 json={"model": self._model, "input": texts},
-                timeout=self._timeout,
+                timeout=timeout_seconds,
             )
             response.raise_for_status()
             payload = response.json()
         except httpx.TimeoutException as exc:
-            raise EmbeddingError(f"embedding request timed out after {self._timeout}s") from exc
+            raise EmbeddingError(f"embedding request timed out after {timeout_seconds}s") from exc
         except httpx.HTTPError as exc:
             raise EmbeddingError(f"embedding service unavailable: {exc}") from exc
         except ValueError as exc:
@@ -84,10 +126,6 @@ class OllamaEmbeddingClient:
                     f"embedding service returned non-numeric values for vector {index}"
                 ) from exc
         return [[float(x) for x in vector] for vector in embeddings]
-
-    async def embed(self, text: str) -> list[float]:
-        """Return the embedding vector for ``text`` or raise ``EmbeddingError``."""
-        return (await self.embed_batch([text]))[0]
 
     async def is_available(self) -> bool:
         """Cheap readiness probe against Ollama's version endpoint."""

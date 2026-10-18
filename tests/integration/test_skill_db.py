@@ -184,16 +184,16 @@ async def test_match_skills_still_works_when_embeddings_are_unavailable(containe
     saved = await service.save_skill(user_id, **_save_kwargs())
 
     embedder = container.embedding_client()
-    original_embed = embedder.embed
+    original_embed = embedder.embed_read
 
     async def unavailable(_text: str) -> list[float]:
         raise EmbeddingError("embedding unavailable")
 
-    embedder.embed = unavailable  # type: ignore[method-assign]
+    embedder.embed_read = unavailable  # type: ignore[method-assign]
     try:
         result = await service.match_skills(user_id, query="modifying the database schema")
     finally:
-        embedder.embed = original_embed  # type: ignore[method-assign]
+        embedder.embed_read = original_embed  # type: ignore[method-assign]
 
     assert result.mode == "degraded_textual"
     assert saved.skill.id in {m.id for m in result.results}

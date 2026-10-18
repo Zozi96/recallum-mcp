@@ -90,6 +90,9 @@ class OllamaSettings(BaseModel):
     url: str = "http://localhost:11434"
     model: str = "embeddinggemma:300m-qat-q4_0"
     timeout_seconds: float = Field(default=30.0, gt=0)
+    read_timeout_seconds: float = Field(default=3.0, gt=0, le=60.0)
+    read_negative_window_seconds: float = Field(default=5.0, gt=0, le=300.0)
+    read_cache_size: int = Field(default=256, ge=1, le=10_000)
     dimensions: int = Field(default=EMBEDDING_DIMENSIONS, gt=0)
 
     @field_validator("dimensions")
@@ -104,18 +107,21 @@ class OllamaSettings(BaseModel):
         return value
 
 
+# Single source for the identity-cache default (maximum revocation delay).
+IDENTITY_CACHE_TTL_SECONDS = 30.0
+
 class AuthSettings(BaseModel):
     """API key authentication settings."""
 
     key_prefix: str = "rcl_"
     key_entropy_bytes: int = Field(default=32, ge=16, le=64)
-    # Seconds a successful authentication is reused before PostgreSQL is asked
-    # again, saving a round trip on every tool call. This is also exactly the
-    # worst-case delay before a revoked key stops working, so it is capped at
-    # five minutes. The default (5s) removes one authentication query per MCP
-    # tool call burst while keeping the revocation window small; set it to 0 to
-    # restore immediate revocation at the cost of a database hit on every call.
-    identity_cache_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+    # Seconds a successful authentication is reused. This value is the maximum
+    # revocation delay: a revoked key can keep working until the window ends.
+    # Default 30s (measured inter-arrival: 7.8% within 5s, 25.5% within 30s).
+    # Set to 0 to restore immediate revocation. Capped at five minutes.
+    identity_cache_seconds: float = Field(
+        default=IDENTITY_CACHE_TTL_SECONDS, ge=0.0, le=300.0
+    )
 
 
 class TelemetrySettings(BaseModel):
@@ -134,6 +140,21 @@ class TelemetrySettings(BaseModel):
         if self.buffer_limit < self.batch_size:
             raise ValueError("buffer_limit must be greater than or equal to batch_size")
         return self
+
+
+class UsageSettings(BaseModel):
+    """Bounded, deferred memory-usage recording."""
+
+    batch_size: int = Field(default=100, ge=1, le=10_000)
+    flush_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    buffer_limit: int = Field(default=1_000, ge=1, le=100_000)
+
+    @model_validator(mode="after")
+    def validate_buffer_capacity(self) -> UsageSettings:
+        if self.buffer_limit < self.batch_size:
+            raise ValueError("buffer_limit must be greater than or equal to batch_size")
+        return self
+
 
 
 class WebSettings(BaseModel):
@@ -360,6 +381,7 @@ class Settings(BaseSettings):
     ollama: OllamaSettings = OllamaSettings()
     auth: AuthSettings = AuthSettings()
     telemetry: TelemetrySettings = TelemetrySettings()
+    usage: UsageSettings = UsageSettings()
     web: WebSettings = WebSettings()
     limits: MemoryLimits = MemoryLimits()
     boundary: BoundarySettings = BoundarySettings()
@@ -428,6 +450,9 @@ class Settings(BaseSettings):
                 "url": self.ollama.url,
                 "model": self.ollama.model,
                 "timeout_seconds": self.ollama.timeout_seconds,
+                "read_timeout_seconds": self.ollama.read_timeout_seconds,
+                "read_negative_window_seconds": self.ollama.read_negative_window_seconds,
+                "read_cache_size": self.ollama.read_cache_size,
                 "dimensions": self.ollama.dimensions,
             },
             "auth": {
@@ -436,6 +461,7 @@ class Settings(BaseSettings):
                 "identity_cache_seconds": self.auth.identity_cache_seconds,
             },
             "telemetry": self.telemetry.model_dump(exclude={"metrics_token"}),
+            "usage": self.usage.model_dump(),
             "web": self.web.model_dump(),
             "limits": self.limits,
             "boundary": self.boundary.model_dump(),

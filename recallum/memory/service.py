@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from recallum.boundary_types import StrictImportance, StrictNonNegativeOffset, StrictPositiveLimit
+from recallum.config import UsageSettings
 from recallum.db.models import Memory
 from recallum.db.repositories.memory_repo import (
     MAX_CANDIDATES,
@@ -87,6 +88,7 @@ from recallum.memory.token_budget import (
     reorder_by_strategy,
     validate_strategy,
 )
+from recallum.memory.usage import UsageBuffer
 from recallum.retrieval import reciprocal_rank_fusion
 
 logger = logging.getLogger("recallum.memory")
@@ -102,6 +104,14 @@ ANCHOR_TYPES: tuple[str, ...] = get_args(AnchorType)
 _WHITESPACE = re.compile(r"\s+")
 
 
+class _EmbedOutsideSession(Exception):
+    """Write re-check missed the hash and no vector is in hand.
+
+    Callers leave the session, embed, and retry. Embedding here would hold a
+    pooled connection across Ollama HTTP (D6).
+    """
+
+
 class MemoryService:
     """Coordinates validation, embeddings, retrieval and persistence."""
 
@@ -111,6 +121,7 @@ class MemoryService:
         embeddings: OllamaEmbeddingClient,
         limits: MemoryLimits | None = None,
         profile_rebuild_queue: ProfileRebuildQueue | None = None,
+        usage_buffer: UsageBuffer | None = None,
     ) -> None:
         self._repo = repository
         self._embeddings = embeddings
@@ -118,6 +129,15 @@ class MemoryService:
         self._profile_rebuild_queue = profile_rebuild_queue
         if profile_rebuild_queue is not None:
             profile_rebuild_queue.bind(self._rebuild_profiles_for_keys)
+        if usage_buffer is None:
+            settings = UsageSettings()
+            usage_buffer = UsageBuffer(
+                repository,
+                batch_size=settings.batch_size,
+                flush_interval_seconds=settings.flush_interval_seconds,
+                buffer_limit=settings.buffer_limit,
+            )
+        self._usage = usage_buffer
 
     # ------------------------------------------------------------------
     # remember
@@ -236,13 +256,9 @@ class MemoryService:
             embedding = [0.0] * self._embeddings.dimensions
             stored_model = EMBEDDING_UNAVAILABLE_MESSAGE
         elif embedding is None:
-            try:
-                embedding = await self._embeddings.embed(normalized)
-            except EmbeddingError as exc:
-                record_sanitized_failure(logger, exc, message="Memory write embedding unavailable")
-                embedding = [0.0] * self._embeddings.dimensions
-                stored_model = EMBEDDING_UNAVAILABLE_MESSAGE
-                embedding_degraded = True
+            # Duplicate vanished between the pre-check and this write. Do not
+            # embed while the pooled session is open.
+            raise _EmbedOutsideSession()
         elif not isinstance(embedding, list) or len(embedding) != self._embeddings.dimensions:
             raise EmbeddingError(
                 f"expected embedding with {self._embeddings.dimensions} dimensions"
@@ -328,6 +344,14 @@ class MemoryService:
             return max_connections
         return 100
 
+    async def _embed_for_write(self, normalized: str) -> tuple[list[float], bool]:
+        """Embed outside any database session. Failure stores a marker vector."""
+        try:
+            return await self._embeddings.embed(normalized), False
+        except EmbeddingError as exc:
+            record_sanitized_failure(logger, exc, message="Memory write embedding unavailable")
+            return [0.0] * self._embeddings.dimensions, True
+
     async def remember(
         self,
         user_id: uuid.UUID,
@@ -357,13 +381,12 @@ class MemoryService:
         type one of ``file``/``symbol``/``module``); omitting them stores the
         memory exactly as before this feature existed.
 
-        The embedding is computed before the session opens: holding a pooled
-        connection across a network call to Ollama would stall the pool, and
-        the IntegrityError retry below must reuse the same vector rather than
-        embedding twice. On the rare dedup ``IntegrityError`` from a
-        concurrent duplicate insert, the transaction is rolled back and
-        retried (up to 3 times), which turns the race into a reconfirmation
-        just like the old per-call path.
+        An exact active duplicate is detected by hash in a short read before any
+        embedding call. A miss embeds next, still outside a database session:
+        holding a pooled connection across Ollama would stall the pool. The
+        write below re-checks the hash. If that duplicate vanished and no vector
+        is in hand, the write aborts and retries after embedding outside the
+        session. An IntegrityError retry reuses the same vector.
         """
         # Validate before paying for an embedding; ``_remember_in_session``
         # re-runs the same pure checks inside the transaction.
@@ -380,14 +403,15 @@ class MemoryService:
         if source_ref is not None:
             self._validate_source_ref(source_ref)
         if embedding is None and not embedding_degraded:
-            try:
-                embedding = await self._embeddings.embed(normalized)
-            except EmbeddingError as exc:
-                record_sanitized_failure(
-                    logger, exc, message="Memory write embedding unavailable"
-                )
-                embedding = [0.0] * self._embeddings.dimensions
-                embedding_degraded = True
+            scope, normalized_project, digest = self._dedup_key(project, normalized)
+            existing = await self._repo.find_active_by_hash(
+                user_id,
+                scope=scope,
+                project=normalized_project,
+                content_hash=digest,
+            )
+            if existing is None:
+                embedding, embedding_degraded = await self._embed_for_write(normalized)
         for attempt in range(3):
             try:
                 async with self._repo.session_for(user_id) as session:
@@ -409,6 +433,28 @@ class MemoryService:
                         rebuild=rebuild,
                         anchors=anchors,
                     )
+            except _EmbedOutsideSession:
+                embedding, embedding_degraded = await self._embed_for_write(normalized)
+                if attempt == 2:
+                    async with self._repo.session_for(user_id) as session:
+                        return await self._remember_in_session(
+                            session,
+                            user_id,
+                            content=content,
+                            category=category,
+                            kind=kind,
+                            project=project,
+                            importance=importance,
+                            metadata=metadata,
+                            source_client=source_client,
+                            ttl_seconds=ttl_seconds,
+                            source_type=source_type,
+                            source_ref=source_ref,
+                            embedding=embedding,
+                            embedding_degraded=embedding_degraded,
+                            rebuild=rebuild,
+                            anchors=anchors,
+                        )
             except IntegrityError as exc:
                 # Only the active-memory dedup index is a safe race. Any other
                 # constraint violation is an infrastructure/domain bug and must
@@ -418,6 +464,12 @@ class MemoryService:
                 if attempt == 2:
                     raise
         raise RuntimeError("remember retry loop exited without returning")
+
+    def _dedup_key(self, project: str | None, normalized: str) -> tuple[str, str | None, str]:
+        normalized_project = self._normalize_project(project)
+        scope = "project" if normalized_project is not None else "global"
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return scope, normalized_project, digest
 
     def _language_warning(self, normalized: str) -> str | None:
         """Advisory hint that ``normalized`` content looks non-English.
@@ -537,12 +589,31 @@ class MemoryService:
                 seen_texts.add(normalized)
                 unique_texts.append(normalized)
 
+        hash_keys: list[tuple[str, str | None, str]] = []
+        keys_by_text: dict[str, list[tuple[str, str, str]]] = {}
+        for entry in prepared:
+            if entry is None:
+                continue
+            item, normalized = entry
+            scope, project_key, digest = self._dedup_key(item.project, normalized)
+            triple = (scope, project_key or "", digest)
+            hash_keys.append((scope, project_key, digest))
+            keys_by_text.setdefault(normalized, []).append(triple)
+        existing_keys = (
+            await self._repo.find_active_hashes(user_id, hash_keys) if hash_keys else set()
+        )
+        texts_to_embed = [
+            text
+            for text in unique_texts
+            if any(key not in existing_keys for key in keys_by_text.get(text, ()))
+        ]
+
         text_to_vector: dict[str, list[float]] = {}
         degraded_texts: set[str] = set()
-        if unique_texts:
+        if texts_to_embed:
             try:
-                vectors = await self._embeddings.embed_batch(unique_texts)
-                for text, vector in zip(unique_texts, vectors, strict=True):
+                vectors = await self._embeddings.embed_batch(texts_to_embed)
+                for text, vector in zip(texts_to_embed, vectors, strict=True):
                     text_to_vector[text] = vector
             except EmbeddingError:
                 semaphore = asyncio.Semaphore(self._embedding_http_limit())
@@ -558,10 +629,70 @@ class MemoryService:
                             text_to_vector[text] = [0.0] * self._embeddings.dimensions
                             degraded_texts.add(text)
 
-                await asyncio.gather(*(_embed_one(text) for text in unique_texts))
+                await asyncio.gather(*(_embed_one(text) for text in texts_to_embed))
 
         profile_keys: set[str | None] = set()
         has_global = False
+        deferred: list[int] = []
+
+        async def _write_item(session, index: int, item, normalized: str) -> None:
+            nonlocal has_global
+            try:
+                async with session.begin_nested():
+                    result = await self._remember_in_session(
+                        session,
+                        user_id,
+                        content=item.content,
+                        category=item.category,
+                        kind=item.kind,
+                        project=item.project,
+                        importance=item.importance,
+                        metadata=item.metadata,
+                        source_client=source_client,
+                        ttl_seconds=item.ttl_seconds,
+                        source_type=item.source_type,
+                        source_ref=item.source_ref,
+                        anchors=(
+                            [a.model_dump() for a in item.anchors] if item.anchors else None
+                        ),
+                        embedding=text_to_vector.get(normalized),
+                        embedding_degraded=normalized in degraded_texts,
+                        rebuild=False,
+                    )
+            except _EmbedOutsideSession:
+                deferred.append(index)
+                return
+            except MemoryValidationError as exc:
+                outcomes[index] = RememberBatchItemOutcome(error=str(exc))
+                return
+            except EmbeddingError as exc:
+                record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                outcomes[index] = RememberBatchItemOutcome(
+                    error=EMBEDDING_UNAVAILABLE_MESSAGE,
+                )
+                return
+            except IntegrityError as exc:
+                # A non-dedup constraint violation is not a per-item
+                # race; let it propagate as an infrastructure failure.
+                if not self._is_dedup_integrity_error(exc):
+                    raise
+                record_sanitized_failure(logger, exc, message="Memory batch item failure")
+                outcomes[index] = RememberBatchItemOutcome(
+                    error="concurrent write conflicted with this item",
+                )
+                return
+            outcomes[index] = RememberBatchItemOutcome(
+                created=result.created,
+                memory=result.memory,
+                similar=result.similar,
+                language_warning=result.language_warning,
+                embedding_degraded=result.embedding_degraded,
+            )
+            if result.memory is not None:
+                if result.memory.scope == "project" and result.memory.project:
+                    profile_keys.add(result.memory.project)
+                else:
+                    has_global = True
 
         async with self._repo.session_for(user_id) as session:
             if session is None:
@@ -617,60 +748,35 @@ class MemoryService:
                     if entry is None:
                         continue
                     item, normalized = entry
-                    try:
-                        async with session.begin_nested():
-                            result = await self._remember_in_session(
-                                session,
-                                user_id,
-                                content=item.content,
-                                category=item.category,
-                                kind=item.kind,
-                                project=item.project,
-                                importance=item.importance,
-                                metadata=item.metadata,
-                                source_client=source_client,
-                                ttl_seconds=item.ttl_seconds,
-                                source_type=item.source_type,
-                                source_ref=item.source_ref,
-                                anchors=(
-                                    [a.model_dump() for a in item.anchors] if item.anchors else None
-                                ),
-                                embedding=text_to_vector.get(normalized),
-                                embedding_degraded=normalized in degraded_texts,
-                                rebuild=False,
-                            )
-                    except MemoryValidationError as exc:
-                        outcomes[index] = RememberBatchItemOutcome(error=str(exc))
-                        continue
-                    except EmbeddingError as exc:
-                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
-                        outcomes[index] = RememberBatchItemOutcome(
-                            error=EMBEDDING_UNAVAILABLE_MESSAGE,
-                        )
-                        continue
-                    except IntegrityError as exc:
-                        # A non-dedup constraint violation is not a per-item
-                        # race; let it propagate as an infrastructure failure.
-                        if not self._is_dedup_integrity_error(exc):
-                            raise
-                        record_sanitized_failure(logger, exc, message="Memory batch item failure")
-                        outcomes[index] = RememberBatchItemOutcome(
-                            error="concurrent write conflicted with this item",
-                        )
-                        continue
-                    outcomes[index] = RememberBatchItemOutcome(
-                        created=result.created,
-                        memory=result.memory,
-                        similar=result.similar,
-                        language_warning=result.language_warning,
-                        embedding_degraded=result.embedding_degraded,
-                    )
-                    if result.memory is not None:
-                        if result.memory.scope == "project" and result.memory.project:
-                            profile_keys.add(result.memory.project)
-                        else:
-                            has_global = True
+                    await _write_item(session, index, item, normalized)
 
+        if deferred:
+            # The shared transaction is closed. Embed, then write. A second
+            # miss with a vector in hand is a duplicate or a unique-index race,
+            # not another embed.
+            for index in deferred:
+                entry = prepared[index]
+                if entry is None:
+                    continue
+                _item, normalized = entry
+                if normalized not in text_to_vector and normalized not in degraded_texts:
+                    vector, degraded = await self._embed_for_write(normalized)
+                    text_to_vector[normalized] = vector
+                    if degraded:
+                        degraded_texts.add(normalized)
+            retry = list(deferred)
+            deferred.clear()
+            async with self._repo.session_for(user_id) as session:
+                if session is None:
+                    raise RuntimeError("remember_batch lost its session on embed retry")
+                for index in retry:
+                    entry = prepared[index]
+                    if entry is None:
+                        continue
+                    item, normalized = entry
+                    await _write_item(session, index, item, normalized)
+            if deferred:
+                raise RuntimeError("remember_batch retried an embed inside a session")
         if has_global:
             profile_keys.add(None)
             try:
@@ -1040,7 +1146,7 @@ class MemoryService:
         mode = "hybrid"
         query_embedding: list[float] | None = None
         try:
-            query_embedding = await self._embeddings.embed(normalized_query)
+            query_embedding = await self._embeddings.embed_read(normalized_query)
         except EmbeddingError:
             logger.warning("embedding unavailable for recall; using textual fallback")
             mode = "degraded_textual"
@@ -1074,6 +1180,7 @@ class MemoryService:
             max_tokens=effective_max_tokens,
             content_of=lambda pair: pair[0].memory.content,
         )
+        await self._repo.attach_anchors(user_id, [scored.memory for scored, _score in packed])
         results = [
             RecalledMemory(**_to_memory_out(scored.memory).model_dump(), score=score)
             for scored, score in packed
@@ -1207,7 +1314,7 @@ class MemoryService:
         embedding: list[float] | None = None
         if normalized_focus is not None:
             try:
-                embedding = await self._embeddings.embed(normalized_focus)
+                embedding = await self._embeddings.embed_read(normalized_focus)
             except EmbeddingError:
                 logger.warning("embedding unavailable for context focus; using textual fallback")
 
@@ -1216,13 +1323,18 @@ class MemoryService:
             if normalized_project is None
             else MemoryVisibility.from_filters(scope=None, project=normalized_project)
         )
+        await self._flush_pending_usage(user_id)
+        # Per category: packing is category-order, and profile exclusions cannot
+        # exceed min(effective, profile_context_max_items) after _cap_profile_block.
+        profile_overlap = min(effective_max_items, self._limits.profile_context_max_items)
+        per_category_limit = effective_max_items + profile_overlap + 1
         snapshot = await self._repo.context_snapshot(
             user_id,
             project=normalized_project,
             visibility=visibility,
             category=None,
             kind=validated_kind,
-            top_limit=self._limits.context_max_items_cap + 1,
+            per_category_limit=per_category_limit,
             candidate_limit=min(MAX_CANDIDATES, max(self._limits.context_focus_limit * 3, 10)),
             query=normalized_focus,
             embedding=embedding,
@@ -1362,12 +1474,19 @@ class MemoryService:
             return None
         return self._limits.trigram_min_word_similarity
 
+    async def _flush_pending_usage(self, user_id: uuid.UUID) -> None:
+        """Apply this user's pending serves before a freshness-sensitive read."""
+        try:
+            await self._usage.flush_user(user_id)
+        except Exception:
+            logger.warning("usage flush failed; the read continues", exc_info=True)
+
     async def _record_recalled(self, user_id: uuid.UUID, memory_ids: list[uuid.UUID]) -> None:
         """Count recall hits; a failure here never fails the read."""
         if not memory_ids:
             return
         try:
-            await self._repo.mark_recalled(user_id, memory_ids)
+            await self._usage.record_recall(user_id, memory_ids, datetime.now(UTC))
         except Exception:
             logger.warning("usage recording failed; the result is unaffected", exc_info=True)
 
@@ -1382,7 +1501,7 @@ class MemoryService:
         if not memory_ids:
             return
         try:
-            await self._repo.mark_seen_in_context(user_id, memory_ids)
+            await self._usage.record_context(user_id, memory_ids)
         except Exception:
             logger.warning("usage recording failed; the result is unaffected", exc_info=True)
 
@@ -1587,6 +1706,7 @@ class MemoryService:
     async def get_profile(self, user_id: uuid.UUID, *, project: str | None = None) -> ProfileBlock:
         """Load or lazily rebuild the materialized profile for a key."""
         normalized = self._normalize_project(project)
+        await self._flush_pending_usage(user_id)
         try:
             return await self._ensure_profile(user_id, project=normalized)
         except Exception as exc:
@@ -1607,30 +1727,35 @@ class MemoryService:
             else MemoryVisibility.from_filters(scope=None, project=normalized)
         )
         for _ in range(3):
-            generation = await self._repo.get_memory_generation(user_id)
-            memories = await self._repo.list_active_for_profile(
-                user_id,
-                visibility=visibility,
-                static_limit=self._limits.profile_static_max_items,
-                dynamic_limit=self._limits.profile_dynamic_max_items,
-                dynamic_since=datetime.now(UTC)
-                - timedelta(days=self._limits.profile_dynamic_window_days),
-                static_min_importance=self._limits.profile_static_min_importance,
-            )
-            selected = select_profile_slices(memories, limits=self._limits, now=datetime.now(UTC))
             try:
-                row = await self._repo.upsert_profile(
-                    user_id,
-                    project=normalized,
-                    static_items=[item.as_dict() for item in selected.static],
-                    # The dynamic slice is assembled live at read time from
-                    # recall usage; persisting it would freeze a snapshot that
-                    # every subsequent recall invalidates.
-                    dynamic_items=[],
-                    source_memory_ids=[item.id for item in selected.static],
-                    content_hash=profile_content_hash(selected.static, []),
-                    expected_generation=generation,
-                )
+                async with self._repo.session_for(user_id) as session:
+                    generation = await self._repo.get_memory_generation(user_id, session=session)
+                    memories = await self._repo.list_active_for_profile(
+                        user_id,
+                        visibility=visibility,
+                        static_limit=self._limits.profile_static_max_items,
+                        dynamic_limit=self._limits.profile_dynamic_max_items,
+                        dynamic_since=datetime.now(UTC)
+                        - timedelta(days=self._limits.profile_dynamic_window_days),
+                        static_min_importance=self._limits.profile_static_min_importance,
+                        session=session,
+                    )
+                    selected = select_profile_slices(
+                        memories, limits=self._limits, now=datetime.now(UTC)
+                    )
+                    row = await self._repo.upsert_profile(
+                        user_id,
+                        project=normalized,
+                        static_items=[item.as_dict() for item in selected.static],
+                        # The dynamic slice is assembled live at read time from
+                        # recall usage; persisting it would freeze a snapshot that
+                        # every subsequent recall invalidates.
+                        dynamic_items=[],
+                        source_memory_ids=[item.id for item in selected.static],
+                        content_hash=profile_content_hash(selected.static, []),
+                        expected_generation=generation,
+                        session=session,
+                    )
             except ProfileGenerationConflict:
                 continue
             return self._profile_block_from_row(row, project=normalized, dynamic=selected.dynamic)

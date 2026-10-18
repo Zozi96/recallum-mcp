@@ -9,10 +9,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from dependency_injector import providers
+from fastapi.testclient import TestClient
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from pydantic import ValidationError
 
+from recallum.app import create_app
+from recallum.auth.api_keys import hash_token
 from recallum.auth.identity import Identity, identity_scope
 from recallum.config import Settings, TelemetrySettings
 from recallum.db.models import ToolActivity
@@ -21,7 +25,12 @@ from recallum.telemetry.buffer import TelemetryBuffer
 from recallum.telemetry.events import ToolActivityEvent
 from recallum.telemetry.metrics import metrics_access_allowed
 from recallum.telemetry.middleware import UsageTelemetryMiddleware
-from tests.fakes import FakeTelemetryRepository
+from tests.fakes import (
+    FakeDatabaseReadiness,
+    FakeEmbeddingClient,
+    FakeTelemetryRepository,
+    build_test_container,
+)
 
 
 def event(*, user_id=None, created_at=None, tool="recall", project=None):
@@ -328,7 +337,8 @@ async def test_snapshot_reports_seeded_latency_and_degraded_ratio():
     assert "user_id" not in dumped
     assert "query" not in dumped
     assert "content" not in dumped
-    assert "token" not in dumped
+    assert snap.identity_cache_hits == 0
+    assert snap.identity_cache_misses == 0
 
 
 async def test_middleware_marks_embedding_unavailable_writes_in_snapshot():
@@ -418,3 +428,42 @@ async def test_degraded_write_is_not_an_embedding_unavailable_marker():
     assert snap.write_calls == 1
     assert snap.degraded_calls == 1
     assert snap.embedding_unavailable_writes == 0
+
+
+def test_identity_cache_counters_reach_metrics_without_key_material():
+    """Repeated authentications show hits and misses; the snapshot has no key material."""
+    container, _ = build_test_container(embedder=FakeEmbeddingClient(available=True))
+    container.database_readiness.override(providers.Object(FakeDatabaseReadiness(True)))
+    settings = Settings(telemetry={"metrics_token": "operator-secret"})
+    app = create_app(settings, container)
+    email = "identity-cache-metrics@example.com"
+    unknown = "rcl_not-a-real-key-zz"
+
+    async def _authenticate():
+        service = container.api_key_service()
+        user = await service.create_user(email)
+        issued = await service.issue_key(user.id)
+        auth = container.authenticator()
+        assert await auth.authenticate(issued.plaintext) is not None
+        assert await auth.authenticate(issued.plaintext) is not None
+        assert await auth.authenticate(unknown) is None
+        assert await auth.authenticate("") is None
+        return user, issued
+
+    user, issued = asyncio.run(_authenticate())
+    with TestClient(app) as client:
+        response = client.get(
+            "/metrics", headers={"Authorization": "Bearer operator-secret"}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["identity_cache_hits"] == 1
+    assert body["identity_cache_misses"] == 2
+    serialized = response.text
+    assert email not in serialized
+    assert issued.plaintext not in serialized
+    assert unknown not in serialized
+    assert hash_token(issued.plaintext) not in serialized
+    assert hash_token(unknown) not in serialized
+    assert str(user.id) not in serialized
+    assert str(issued.key.id) not in serialized

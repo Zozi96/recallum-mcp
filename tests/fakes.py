@@ -91,6 +91,10 @@ class FakeEmbeddingClient:
         norm = math.sqrt(sum(x * x for x in vector)) or 1.0
         return [x / norm for x in vector]
 
+    async def embed_read(self, text: str) -> list[float]:
+        return await self.embed(text)
+
+
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed(t) for t in texts]
 
@@ -125,6 +129,10 @@ class ScriptedEmbeddingClient:
             return list(self.vectors[text])
         except KeyError as exc:
             raise EmbeddingError(f"no scripted vector for {text!r}") from exc
+
+    async def embed_read(self, text: str) -> list[float]:
+        return await self.embed(text)
+
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed(t) for t in texts]
@@ -307,6 +315,22 @@ class FakeMemoryRepository:
                 return memory
         return None
 
+    async def find_active_hashes(
+        self,
+        user_id: uuid.UUID,
+        keys: Sequence[tuple[str, str | None, str]],
+    ) -> set[tuple[str, str, str]]:
+        wanted = {(scope, project or "", digest) for scope, project, digest in keys}
+        return {
+            (memory.scope, memory.project or "", memory.content_hash)
+            for memory in self._active(user_id)
+            if (memory.scope, memory.project or "", memory.content_hash) in wanted
+        }
+
+    async def attach_anchors(self, user_id: uuid.UUID, memories: Sequence[Any]) -> None:
+        """Anchors are already on the in-memory rows; nothing to query."""
+        _ = (user_id, memories)
+
     async def get_active(self, user_id: uuid.UUID, memory_id: uuid.UUID) -> Memory | None:
         memory = self.rows.get(memory_id)
         if memory is None or memory.user_id != user_id or memory.is_deleted or memory.is_expired:
@@ -399,7 +423,7 @@ class FakeMemoryRepository:
         visibility: MemoryVisibility,
         category: str | None,
         kind: str | None = None,
-        top_limit: int,
+        per_category_limit: int,
         candidate_limit: int,
         query: str | None,
         embedding: list[float] | None,
@@ -416,12 +440,21 @@ class FakeMemoryRepository:
         def _most_important(bucket_visibility: MemoryVisibility) -> list[Memory]:
             # ``kind`` narrows the ordinary importance pools only (mirrors
             # the adapter's context_snapshot); the profile/dynamic slice and
-            # totals below stay unfiltered.
+            # totals below stay unfiltered. The cap is per category: a pool-wide
+            # slice would drop an early packing category behind higher ranks.
             bucket = sorted(
                 self._filtered(user_id, bucket_visibility, None, kind), key=lambda m: str(m.id)
             )
             bucket.sort(key=lambda m: (m.importance, m.created_at), reverse=True)
-            return bucket[:top_limit]
+            kept: list[Memory] = []
+            seen: dict[str, int] = {}
+            for memory in bucket:
+                count = seen.get(memory.category, 0)
+                if count >= per_category_limit:
+                    continue
+                seen[memory.category] = count + 1
+                kept.append(memory)
+            return kept
 
         global_top = _most_important(MemoryVisibility.global_only())
         project_top = (
@@ -736,23 +769,29 @@ class FakeMemoryRepository:
         self._bump(user_id)
         return memory
 
-    async def mark_recalled(self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]) -> None:
-        now = datetime.now(UTC)
-        for memory_id in memory_ids:
-            memory = self.rows.get(memory_id)
-            if memory is None or memory.user_id != user_id or memory.is_deleted:
-                continue
-            memory.recall_count = (memory.recall_count or 0) + 1
-            memory.last_recalled_at = now
-
-    async def mark_seen_in_context(
-        self, user_id: uuid.UUID, memory_ids: Sequence[uuid.UUID]
+    async def apply_usage(
+        self,
+        user_id: uuid.UUID,
+        memory_ids: Sequence[uuid.UUID],
+        recall_deltas: Sequence[int],
+        context_deltas: Sequence[int],
+        served_at: Sequence[datetime | None],
     ) -> None:
-        for memory_id in memory_ids:
+        if not memory_ids:
+            return
+        for memory_id, recall_delta, context_delta, at in zip(
+            memory_ids, recall_deltas, context_deltas, served_at, strict=True
+        ):
             memory = self.rows.get(memory_id)
             if memory is None or memory.user_id != user_id or memory.is_deleted:
                 continue
-            memory.context_count = (memory.context_count or 0) + 1
+            memory.recall_count = (memory.recall_count or 0) + recall_delta
+            memory.context_count = (memory.context_count or 0) + context_delta
+            if at is None:
+                continue
+            current = memory.last_recalled_at
+            if current is None or at > current:
+                memory.last_recalled_at = at
 
     async def stale_embeddings_batch(
         self,
@@ -795,7 +834,10 @@ class FakeMemoryRepository:
         # Return a lightweight stand-in with the same attributes.
         return row
 
-    async def get_memory_generation(self, user_id: uuid.UUID) -> int:
+    async def get_memory_generation(
+        self, user_id: uuid.UUID, *, session: Any | None = None
+    ) -> int:
+        del session
         return self.generations.get(user_id, 0)
 
     async def list_profile_projects(self, user_id: uuid.UUID) -> Sequence[str]:
@@ -811,9 +853,11 @@ class FakeMemoryRepository:
         source_memory_ids,
         content_hash: str,
         expected_generation: int,
+        session: Any | None = None,
     ) -> Any:
         from types import SimpleNamespace
 
+        del session
         if self.profile_rebuild_failures > 0:
             self.profile_rebuild_failures -= 1
             raise RuntimeError("simulated profile rebuild failure")
@@ -842,8 +886,9 @@ class FakeMemoryRepository:
         dynamic_limit: int,
         dynamic_since: datetime,
         static_min_importance: int = 8,
+        session: Any | None = None,
     ):
-        del static_min_importance  # obsolete; category gates static before LIMIT
+        del static_min_importance, session  # obsolete; category gates static before LIMIT
         rows = self._filtered(user_id, visibility, None)
         static = [m for m in rows if m.category in {"preference", "constraint"}]
         dynamic = [
@@ -1342,12 +1387,19 @@ class FakeApiKeyRepository:
         self.keys[key.id] = key
         return key
 
-    async def find_active_by_hash(self, key_hash: str) -> tuple[ApiKey, User] | None:
+    async def find_active_by_hash(
+        self, key_hash: str, *, refresh_before: datetime | None = None
+    ) -> tuple[ApiKey, User] | None:
         for key in self.keys.values():
             if key.key_hash == key_hash and key.revoked_at is None:
                 user = self.users.users.get(key.user_id)
-                if user is not None:
-                    return key, user
+                if user is None:
+                    continue
+                if refresh_before is not None and (
+                    key.last_used_at is None or key.last_used_at <= refresh_before
+                ):
+                    await self.touch(key.id)
+                return key, user
         return None
 
     async def touch(self, key_id: uuid.UUID) -> None:

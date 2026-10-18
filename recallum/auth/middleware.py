@@ -16,6 +16,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from recallum.auth.api_keys import hash_token
 from recallum.auth.identity import Identity, identity_scope
+from recallum.config import IDENTITY_CACHE_TTL_SECONDS
 from recallum.db.repositories.api_key_repo import ApiKeyRepository
 
 logger = logging.getLogger("recallum.auth")
@@ -27,11 +28,10 @@ logger = logging.getLogger("recallum.auth")
 LAST_USED_REFRESH_INTERVAL = timedelta(seconds=60)
 
 # How long a successful authentication may be reused without asking PostgreSQL
-# again. Defaults to five seconds: a small window that still removes the
-# per-call database round trip for a busy agent while keeping the revocation
-# window small. Set ``RECALLUM__AUTH__IDENTITY_CACHE_SECONDS`` to 0 to restore
-# immediate revocation at the cost of a database hit on every call.
-IDENTITY_CACHE_TTL = timedelta(seconds=5)
+# again. The number lives on ``IDENTITY_CACHE_TTL_SECONDS``; this timedelta is
+# that default, and it is the maximum revocation delay. Set
+# ``RECALLUM__AUTH__IDENTITY_CACHE_SECONDS`` to 0 for immediate revocation.
+IDENTITY_CACHE_TTL = timedelta(seconds=IDENTITY_CACHE_TTL_SECONDS)
 
 # Only successful authentications are cached, so the ceiling is the number of
 # real, valid keys rather than anything an unauthenticated caller controls. It
@@ -51,10 +51,9 @@ class TokenAuthenticator:
     checkout, a transaction and a query — against a pool of five, before the
     call's own work starts — so caching removes a round trip from the hot path.
 
-    It defaults to five seconds, a small window that removes the per-call
-    database round trip for a busy agent while keeping the revocation window
-    small. Set the TTL to zero to restore immediate revocation at the cost of
-    a database hit on every call.
+    It defaults to 30 seconds, the maximum revocation delay: a revoked key can
+    keep working until that window ends. Set the TTL to zero to restore
+    immediate revocation at the cost of a database hit on every call.
 
     Failures are never cached, so an unknown, malformed or already-revoked
     token always reaches the database and always fails closed. Only the window
@@ -76,6 +75,8 @@ class TokenAuthenticator:
         self._clock = clock
         # Keyed by token hash, never by the raw token.
         self._cache: dict[str, tuple[Identity, float]] = {}
+        self.identity_cache_hits = 0
+        self.identity_cache_misses = 0
 
     async def authenticate(self, token: str) -> Identity | None:
         if not token:
@@ -84,14 +85,19 @@ class TokenAuthenticator:
 
         cached = self._cached(key_hash)
         if cached is not None:
+            self.identity_cache_hits += 1
             return cached
 
-        found = await self._keys.find_active_by_hash(key_hash)
+        # Miss = DB lookup, including unknown tokens. Empty tokens return above.
+        self.identity_cache_misses += 1
+
+        found = await self._keys.find_active_by_hash(
+            key_hash,
+            refresh_before=datetime.now(UTC) - self._refresh_interval,
+        )
         if found is None:
             return None
         key, user = found
-        if self._needs_refresh(key.last_used_at):
-            await self._keys.touch(key.id)
         identity = Identity(user_id=user.id, email=user.email, api_key_id=key.id)
         self._remember(key_hash, identity)
         return identity
@@ -122,11 +128,6 @@ class TokenAuthenticator:
         now = self._clock()
         for key_hash in [h for h, (_, expires) in self._cache.items() if now >= expires]:
             self._cache.pop(key_hash, None)
-
-    def _needs_refresh(self, last_used_at: datetime | None) -> bool:
-        if last_used_at is None:
-            return True
-        return datetime.now(UTC) - last_used_at >= self._refresh_interval
 
 
 class BearerAuthMiddleware(Middleware):
