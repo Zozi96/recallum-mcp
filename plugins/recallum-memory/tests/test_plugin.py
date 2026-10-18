@@ -1544,7 +1544,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(codex["version"], cursor["version"])
         self.assertEqual(codex["version"], devin["version"])
         self.assertEqual(codex["version"], muse["version"])
-        self.assertEqual(codex["version"], "0.21.0")
+        self.assertEqual(codex["version"], "0.22.0")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
         self.assertIn("Cursor", grok["description"])
