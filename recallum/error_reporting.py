@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
-from sentry_sdk.types import Event
+from sentry_sdk.types import DataCollectionUserOptions, Event
 
 from recallum import __version__
 
@@ -32,7 +32,7 @@ _CONTENT_FIELDS = (
 )
 _FRAME_CONTENT_FIELDS = ("context_line", "post_context", "pre_context", "vars")
 _SAFE_TAGS = {"correlation_id", "surface"}
-_DATA_COLLECTION: dict[str, Any] = {
+_DATA_COLLECTION: DataCollectionUserOptions = {
     "user_info": False,
     "cookies": {"mode": "off"},
     "http_headers": {"request": {"mode": "off"}},
@@ -88,7 +88,7 @@ def _sanitize_event(event: Event, hint: dict[str, Any]) -> Event:
     return event
 
 
-def before_send_transaction(event: dict[str, Any], hint: dict[str, Any]) -> None:
+def before_send_transaction(event: Event, hint: dict[str, Any]) -> None:
     """Drop transactions: an incoming sampled sentry-trace header can force one."""
     return None
 
