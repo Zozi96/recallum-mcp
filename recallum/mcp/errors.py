@@ -24,6 +24,7 @@ from recallum.diagnostics import (
     record_sanitized_failure,
 )
 from recallum.embeddings.ollama import EmbeddingError
+from recallum.error_reporting import capture_unexpected_error
 from recallum.memory import MemoryValidationError
 from recallum.skills import SkillValidationError
 
@@ -49,6 +50,7 @@ def translates_domain_errors[F: Callable[..., Awaitable[Any]]](tool: F) -> F:
                 public_message = EMBEDDING_UNAVAILABLE_MESSAGE
             except Exception as exc:
                 record_sanitized_failure(logger, exc, message="MCP operation failure")
+                capture_unexpected_error(exc, correlation_id=correlation_id)
                 public_message = f"{GENERIC_TOOL_ERROR_MESSAGE} (reference: {correlation_id})"
 
         # Raise only after the handled exception and its context have left scope.

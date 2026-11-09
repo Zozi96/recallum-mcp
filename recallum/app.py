@@ -27,6 +27,7 @@ from recallum.container import (
     init_container_resources,
     shutdown_container,
 )
+from recallum.error_reporting import configure_error_reporting
 from recallum.http_boundary import (
     FixedWindowLimiter,
     MCPAuthRateLimitMiddleware,
@@ -275,6 +276,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     """Build the ASGI application with composed lifespans and the /mcp mount."""
     setup_logging()
     resolved_settings = settings if settings is not None else get_settings()
+    configure_error_reporting(resolved_settings)
     resolved_container = container if container is not None else create_container(resolved_settings)
     limiter = FixedWindowLimiter(max_entries=resolved_settings.boundary.rate.max_buckets)
 

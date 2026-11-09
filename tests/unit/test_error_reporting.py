@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import sentry_sdk
 from fastapi import FastAPI
@@ -135,8 +135,8 @@ def test_mcp_capture_adds_only_safe_correlation_tags(monkeypatch) -> None:
 
     assert captured == [error]
     assert scope.set_tag.call_args_list == [
-        (("surface", "mcp"),),
-        (("correlation_id", correlation_id),),
+        call("surface", "mcp"),
+        call("correlation_id", correlation_id),
     ]
 
 

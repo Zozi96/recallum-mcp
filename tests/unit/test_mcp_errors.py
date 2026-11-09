@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import traceback
+from unittest.mock import Mock
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -199,4 +200,61 @@ async def test_concurrent_calls_with_same_client_id_get_independent_refs(
     logged = {record.correlation_id for record in _mcp_records(caplog)}
     assert logged == refs
     assert str(client_id) not in caplog.text
+    assert SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_is_captured_once_with_the_public_reference(monkeypatch):
+    capture = Mock()
+    monkeypatch.setattr(errors, "capture_unexpected_error", capture)
+    error = RuntimeError(SENTINEL)
+
+    @errors.translates_domain_errors
+    async def failing_tool():
+        raise error
+
+    with pytest.raises(ToolError) as failure:
+        await failing_tool()
+
+    capture.assert_called_once_with(error, correlation_id=_public_reference(failure.value))
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        MemoryValidationError("importance must be between 0 and 10"),
+        SkillValidationError("steps must not be empty"),
+        EmbeddingError(SENTINEL),
+    ],
+)
+@pytest.mark.asyncio
+async def test_expected_errors_are_not_captured(monkeypatch, expected):
+    capture = Mock()
+    monkeypatch.setattr(errors, "capture_unexpected_error", capture)
+
+    @errors.translates_domain_errors
+    async def failing_tool():
+        raise expected
+
+    with pytest.raises(ToolError):
+        await failing_tool()
+
+    capture.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_keeps_the_original_public_error(caplog, monkeypatch):
+    def fail_scope():
+        raise RuntimeError(SENTINEL)
+
+    monkeypatch.setattr("recallum.error_reporting.sentry_sdk.new_scope", fail_scope)
+
+    @errors.translates_domain_errors
+    async def failing_tool():
+        raise RuntimeError(SENTINEL)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ToolError) as failure:
+        await failing_tool()
+
+    _public_reference(failure.value)
     assert SENTINEL not in caplog.text

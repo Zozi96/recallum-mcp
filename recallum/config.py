@@ -142,6 +142,13 @@ class TelemetrySettings(BaseModel):
         return self
 
 
+class ErrorReportingSettings(BaseModel):
+    """Opt-in Sentry-compatible error reporting."""
+
+    # Empty disables reporting; the DSN is a credential for the error sink.
+    dsn: SecretStr = SecretStr("")
+
+
 class UsageSettings(BaseModel):
     """Bounded, deferred memory-usage recording."""
 
@@ -381,6 +388,7 @@ class Settings(BaseSettings):
     ollama: OllamaSettings = OllamaSettings()
     auth: AuthSettings = AuthSettings()
     telemetry: TelemetrySettings = TelemetrySettings()
+    error_reporting: ErrorReportingSettings = ErrorReportingSettings()
     usage: UsageSettings = UsageSettings()
     web: WebSettings = WebSettings()
     limits: MemoryLimits = MemoryLimits()

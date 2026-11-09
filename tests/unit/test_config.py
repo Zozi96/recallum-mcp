@@ -127,3 +127,21 @@ def test_identity_cache_default_is_max_revocation_delay() -> None:
     five = create_container(Settings(auth={"identity_cache_seconds": 5}))
     assert zero.authenticator.kwargs["cache_ttl"]().total_seconds() == 0.0
     assert five.authenticator.kwargs["cache_ttl"]().total_seconds() == 5.0
+
+
+def test_error_reporting_dsn_defaults_disabled_and_stays_secret() -> None:
+    dsn = "https://public-key@o0.ingest.sentry.io/0"
+    assert Settings().error_reporting.dsn.get_secret_value() == ""
+
+    settings = Settings(error_reporting={"dsn": dsn})
+
+    assert settings.error_reporting.dsn.get_secret_value() == dsn
+    assert dsn not in repr(settings)
+    assert "error_reporting" not in settings.for_container()
+    assert dsn not in repr(settings.for_container())
+
+
+def test_error_reporting_dsn_reads_documented_environment_variable(monkeypatch) -> None:
+    monkeypatch.setenv("RECALLUM__ERROR_REPORTING__DSN", "https://k@example.test/1")
+
+    assert Settings().error_reporting.dsn.get_secret_value() == "https://k@example.test/1"

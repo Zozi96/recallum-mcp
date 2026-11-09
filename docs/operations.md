@@ -77,6 +77,7 @@ All settings use `RECALLUM__<GROUP>__<FIELD>`:
 | `RECALLUM__TELEMETRY__BUFFER_LIMIT` | `1000` | Maximum in-memory events; overflow drops the oldest |
 | `RECALLUM__TELEMETRY__RETENTION_DAYS` | `90` | Age after which persisted activity is purged |
 | `RECALLUM__TELEMETRY__METRICS_TOKEN` | empty | Operator token for `GET /metrics`; required off loopback (compose sets it) |
+| `RECALLUM__ERROR_REPORTING__DSN` | empty (disabled) | Sentry, self-hosted Sentry or GlitchTip-compatible DSN; when set, reports unhandled HTTP errors and unexpected MCP errors with sanitized stack frames only (no messages, requests or memory content) |
 | `RECALLUM__USAGE__BATCH_SIZE` | `100` | Pending usage keys applied per database batch |
 | `RECALLUM__USAGE__FLUSH_INTERVAL_SECONDS` | `5` | Maximum delay before pending usage is flushed |
 | `RECALLUM__USAGE__BUFFER_LIMIT` | `1000` | Maximum distinct pending usage keys; overflow drops new keys |

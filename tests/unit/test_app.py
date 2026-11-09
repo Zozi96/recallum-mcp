@@ -60,6 +60,28 @@ def test_lifespan_health_and_clean_shutdown():
     assert len(fakes["telemetry"].events) == 1
 
 
+def test_create_app_configures_error_reporting_before_building_the_app(monkeypatch):
+    from recallum import app as app_module
+
+    settings = Settings()
+    container, _ = build_test_container()
+    events: list[object] = []
+    monkeypatch.setattr(
+        app_module, "configure_error_reporting", lambda received: events.append(received)
+    )
+    real_build = app_module.build_mcp_server
+    monkeypatch.setattr(
+        app_module,
+        "build_mcp_server",
+        lambda built: events.append("mcp") or real_build(built),
+    )
+
+    create_app(settings, container)
+
+    assert events[0] is settings
+    assert events[1] == "mcp"
+
+
 def test_public_version_matches_package_metadata():
     container, _ = build_test_container()
     assert create_app(Settings(), container).version == package_version("recallum")
