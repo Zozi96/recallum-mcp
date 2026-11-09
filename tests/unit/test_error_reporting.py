@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
+from sentry_sdk.transport import Transport
 
 from recallum import __version__, error_reporting
 from recallum.config import Settings
@@ -42,11 +43,25 @@ def test_dsn_initializes_error_only_reporting(monkeypatch) -> None:
     assert kwargs["release"] == f"recallum@{__version__}"
     assert kwargs["default_integrations"] is False
     assert kwargs["auto_enabling_integrations"] is False
-    assert kwargs["send_default_pii"] is False
+    assert kwargs["data_collection"] == {
+        "user_info": False,
+        "cookies": {"mode": "off"},
+        "http_headers": {"request": {"mode": "off"}},
+        "http_bodies": [],
+        "url_query_params": {"mode": "off"},
+        "graphql": {"document": False, "variables": False},
+        "gen_ai": {"inputs": False, "outputs": False},
+        "database_query_data": False,
+        "queues": False,
+        "stack_frame_variables": False,
+        "frame_context_lines": 0,
+    }
+    assert "send_default_pii" not in kwargs
+    assert "traces_sample_rate" not in kwargs
     assert kwargs["include_local_variables"] is False
     assert kwargs["include_source_context"] is False
     assert kwargs["max_breadcrumbs"] == 0
-    assert kwargs["traces_sample_rate"] == 0.0
+    assert kwargs["before_send_transaction"] is error_reporting.before_send_transaction
     assert kwargs["auto_session_tracking"] is False
     assert kwargs["before_send"] is error_reporting._sanitize_event
     integrations = kwargs["integrations"]
@@ -181,3 +196,57 @@ def test_real_fastapi_integration_captures_sanitized_unhandled_errors(monkeypatc
         assert exception["value"] == "[redacted]"
     finally:
         sentry_sdk.get_client().close()
+
+
+class _EnvelopeRecorder(Transport):
+    """Records every envelope item; function transports only observe events."""
+
+    def __init__(self, items: list[tuple[str, dict]]) -> None:
+        super().__init__()
+        self._items = items
+
+    def capture_envelope(self, envelope) -> None:
+        for item in envelope.items:
+            self._items.append((item.headers.get("type"), item.payload.json))
+
+
+def test_sampled_incoming_trace_header_never_emits_a_transaction(monkeypatch) -> None:
+    items: list[tuple[str, dict]] = []
+    original_init = sentry_sdk.init
+
+    def init_with_recorder(*args, **kwargs):
+        return original_init(*args, **kwargs, transport=_EnvelopeRecorder(items))
+
+    monkeypatch.setattr(error_reporting.sentry_sdk, "init", init_with_recorder)
+    sentry_sdk.get_client().close()
+    try:
+        error_reporting.configure_error_reporting(Settings(error_reporting={"dsn": DSN}))
+        app = FastAPI()
+
+        @app.get("/failure")
+        async def failure():
+            raise RuntimeError(SENTINEL)
+
+        @app.get("/ok")
+        async def ok():
+            return {"status": "ok"}
+
+        sampled = {"sentry-trace": "0123456789abcdef0123456789abcdef-0123456789abcdef-1"}
+        with TestClient(app, raise_server_exceptions=False) as client:
+            assert client.get(f"/ok?q={SENTINEL}", headers=sampled).status_code == 200
+            assert (
+                client.get(f"/failure?q={SENTINEL}", headers=sampled).status_code == 500
+            )
+        sentry_sdk.get_client().flush(timeout=2)
+
+        assert [kind for kind, _ in items] == ["event"]
+        payload = items[0][1]
+        assert SENTINEL not in json.dumps(items)
+        assert "request" not in payload
+        assert payload["exception"]["values"][0]["value"] == "[redacted]"
+    finally:
+        sentry_sdk.get_client().close()
+
+
+def test_transaction_hook_drops_every_transaction() -> None:
+    assert error_reporting.before_send_transaction({"type": "transaction"}, {}) is None

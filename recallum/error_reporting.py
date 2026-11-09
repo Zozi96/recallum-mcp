@@ -32,6 +32,19 @@ _CONTENT_FIELDS = (
 )
 _FRAME_CONTENT_FIELDS = ("context_line", "post_context", "pre_context", "vars")
 _SAFE_TAGS = {"correlation_id", "surface"}
+_DATA_COLLECTION: dict[str, Any] = {
+    "user_info": False,
+    "cookies": {"mode": "off"},
+    "http_headers": {"request": {"mode": "off"}},
+    "http_bodies": [],
+    "url_query_params": {"mode": "off"},
+    "graphql": {"document": False, "variables": False},
+    "gen_ai": {"inputs": False, "outputs": False},
+    "database_query_data": False,
+    "queues": False,
+    "stack_frame_variables": False,
+    "frame_context_lines": 0,
+}
 
 
 def _sanitize_stacktrace(stacktrace: Any) -> None:
@@ -75,6 +88,11 @@ def _sanitize_event(event: Event, hint: dict[str, Any]) -> Event:
     return event
 
 
+def before_send_transaction(event: dict[str, Any], hint: dict[str, Any]) -> None:
+    """Drop transactions: an incoming sampled sentry-trace header can force one."""
+    return None
+
+
 def configure_error_reporting(settings: Settings) -> None:
     """Initialize error-only reporting when an operator supplies a DSN."""
     dsn = settings.error_reporting.dsn.get_secret_value()
@@ -90,13 +108,13 @@ def configure_error_reporting(settings: Settings) -> None:
         ],
         default_integrations=False,
         auto_enabling_integrations=False,
-        send_default_pii=False,
+        data_collection=_DATA_COLLECTION,
         include_local_variables=False,
         include_source_context=False,
         max_breadcrumbs=0,
-        traces_sample_rate=0.0,
         auto_session_tracking=False,
         before_send=_sanitize_event,
+        before_send_transaction=before_send_transaction,
     )
 
 
