@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
+from sentry_sdk.types import Event
 
 from recallum import __version__
 
@@ -45,10 +46,11 @@ def _sanitize_stacktrace(stacktrace: Any) -> None:
                 frame.pop(field, None)
 
 
-def _sanitize_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_event(event: Event, hint: dict[str, Any]) -> Event:
     """Keep diagnostic structure while removing user-authored content."""
+    mutable_event = cast(dict[str, Any], event)
     for field in _CONTENT_FIELDS:
-        event.pop(field, None)
+        mutable_event.pop(field, None)
 
     exception = event.get("exception")
     if isinstance(exception, dict):
