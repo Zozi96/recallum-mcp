@@ -97,6 +97,14 @@ def configure_error_reporting(settings: Settings) -> None:
     """Initialize error-only reporting when an operator supplies a DSN."""
     dsn = settings.error_reporting.dsn.get_secret_value()
     if not dsn:
+        # A later app configuration must not reuse an earlier DSN-enabled client.
+        sentry_sdk.get_client().close()
+        for scope in (
+            sentry_sdk.get_current_scope(),
+            sentry_sdk.get_isolation_scope(),
+            sentry_sdk.get_global_scope(),
+        ):
+            scope.set_client(None)
         return
     sentry_sdk.init(
         dsn=dsn,

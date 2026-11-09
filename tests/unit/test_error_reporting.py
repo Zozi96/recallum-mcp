@@ -248,5 +248,28 @@ def test_sampled_incoming_trace_header_never_emits_a_transaction(monkeypatch) ->
         sentry_sdk.get_client().close()
 
 
+def test_missing_dsn_disables_previously_configured_reporting() -> None:
+    items: list[tuple[str, dict]] = []
+    sentry_sdk.get_client().close()
+    try:
+        sentry_sdk.init(
+            dsn=DSN,
+            transport=_EnvelopeRecorder(items),
+            default_integrations=False,
+            auto_enabling_integrations=False,
+        )
+        assert sentry_sdk.is_initialized()
+
+        error_reporting.configure_error_reporting(Settings())
+
+        assert not sentry_sdk.is_initialized()
+        sentry_sdk.capture_exception(RuntimeError(SENTINEL))
+        sentry_sdk.flush(timeout=2)
+        assert items == []
+    finally:
+        sentry_sdk.get_client().close()
+        sentry_sdk.get_global_scope().set_client(None)
+
+
 def test_transaction_hook_drops_every_transaction() -> None:
     assert error_reporting.before_send_transaction({"type": "transaction"}, {}) is None
