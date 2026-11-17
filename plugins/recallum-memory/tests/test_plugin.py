@@ -1684,7 +1684,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(codex["version"], cursor["version"])
         self.assertEqual(codex["version"], devin["version"])
         self.assertEqual(codex["version"], muse["version"])
-        self.assertEqual(codex["version"], "0.23.1")
+        self.assertEqual(codex["version"], "0.23.2")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
         self.assertIn("Cursor", grok["description"])
@@ -3860,7 +3860,7 @@ class DoctorTests(unittest.TestCase):
                     {
                         "name": "recallum-memory",
                         "enabled": True,
-                        "version": "0.23.1",
+                        "version": "0.23.2",
                         "skills": ["recallum-memory", "recallum-update-harnesses"],
                         "rules": ["recallum-memory.mdc"],
                         "mcpServers": ["recallum"] if mcp_servers_present else [],
