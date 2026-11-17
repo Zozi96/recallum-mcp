@@ -565,6 +565,22 @@ class HookTests(unittest.TestCase):
         self.assertIn("Write memories and phrase recall queries in English", context)
         self.assertIn("verbatim", context)
 
+    def test_prompt_hint_pins_english_for_writes_and_queries(self) -> None:
+        # The prompt hint fires exactly when a capture is likely, so it
+        # carries the same English rule as SessionStart (ADR 0024 decision
+        # 1): the session hint may belong to another surface, and the skill
+        # that explains the rule in full loads lazily.
+        result = run_hook(
+            "prompt",
+            json.dumps({"cwd": "/work/alpha", "prompt": "Remember that we use UTC."}),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = " ".join(
+            json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"].split()
+        )
+        self.assertIn("Write memories and phrase recall queries in English", context)
+        self.assertIn("verbatim", context)
+
     def test_codex_is_told_the_bare_server_tool_name(self) -> None:
         # Codex sets CLAUDE_PLUGIN_ROOT alongside PLUGIN_ROOT for compatibility
         # with hooks written against Claude Code, so this is what a real Codex
@@ -1479,6 +1495,33 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn("before planning, call", context)
         self.assertLess(context.index("no stored memories"), context.index("Checkpoint:"))
         self.assertLess(context.index("Checkpoint:"), context.index("After substantial work"))
+
+    def test_digest_branches_pin_english_for_writes_and_queries(self) -> None:
+        # ADR 0024 decision 1: every session hint carries the English rule,
+        # including both digest branches. The fallback-only assertion in
+        # HookTests cannot see these paths: a session with the digest
+        # configured never emits the fallback hint.
+        _StubMCPHandler.context_result = {
+            "groups": [
+                {"category": "fact", "items": [{"category": "fact", "content": "uses uv"}]}
+            ],
+            "omitted": 0,
+        }
+        context = " ".join(self._session_context().split())
+        self.assertIn("already loaded", context)
+        self.assertIn("Write memories and phrase recall queries in English", context)
+        self.assertIn("verbatim", context)
+
+        _StubMCPHandler.context_result = {
+            "groups": [],
+            "total_items": 0,
+            "omitted": 0,
+            "truncated": False,
+        }
+        context = " ".join(self._session_context().split())
+        self.assertIn("no stored memories", context)
+        self.assertIn("Write memories and phrase recall queries in English", context)
+        self.assertIn("verbatim", context)
 
     def test_server_failure_falls_back_to_the_standard_hint(self) -> None:
         _StubMCPHandler.fail_with = 500

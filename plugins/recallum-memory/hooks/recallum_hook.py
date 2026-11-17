@@ -858,13 +858,13 @@ def _session_context(project: str) -> str:
             f"(context with focus=<task>):\n{digest}\n"
             f"Use {_tool('recall')} for task-specific detail."
             f"{_checkpoint_hint(project)}{_capture_hint()}"
-            f"{_lookup_hint()}{VISIBILITY_HINT}"
+            f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
         )
     if digest == "":
         return (
             f"Recallum: no stored memories for project {project!r} yet; skip the "
             f"context call.{_checkpoint_hint(project)}{_capture_hint()}"
-            f"{_lookup_hint()}{VISIBILITY_HINT}"
+            f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
         )
     return (
         f"Recallum: before planning, call {_tool('context')} with "
@@ -881,6 +881,7 @@ def _prompt_hint(project: str) -> str:
         "Recallum: if this turn settles a durable preference, decision, or "
         f"constraint, store it per the recallum-memory skill (project={project!r}); "
         "recall first when history could change the plan. Current instructions win."
+        f"{LANGUAGE_HINT}"
     )
 
 
