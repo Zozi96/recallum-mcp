@@ -31,6 +31,22 @@ _Avoid_: Account, tenant
 **Identity Administration**:
 The user and API-key lifecycle used to create users and issue, list, or revoke their credentials.
 _Avoid_: User management, key management
+
+**Hook Guidance**:
+The concise lifecycle reminder emitted by a client harness integration at session start or on a Memory Signal to supply the project identity and point the agent to the authoritative memory skill without repeating full capture or conflict-resolution policies.
+_Avoid_: Hook manual, inline policy dump
+
+**Context Digest**:
+A compact, pre-fetched summary of Session Context delivered inline when a session starts so the agent begins with relevant Memories without making an initial read call.
+_Avoid_: Context dump, full bootstrap
+
+**Memory Signal**:
+A user-authored phrase indicating intent to recall, store, update, or constrain durable knowledge, used to trigger lightweight prompt-time Hook Guidance while ignoring system notifications and routine turns.
+_Avoid_: Every-turn trigger, keyword interrupt
+
+**Hook Cooldown**:
+The per-session deduplication and suppression window that prevents Hook Guidance from firing repeatedly on resumed sessions, back-to-back lifecycle events, or consecutive user prompts.
+_Avoid_: Global disable, rate limit
 ## Web identity
 
 A web session is a browser credential stored independently from API keys. Only

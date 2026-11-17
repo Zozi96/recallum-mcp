@@ -128,7 +128,9 @@ is an option when relevant, not a mandatory second call. A known memory UUID is 
 2. At session start or resume, call `context` with `project` — unless the session hook already
    injected the digest, in which case do not repeat the call. When the task is already known, pass
    it as `focus` (a short task summary): the snapshot then also includes memories relevant to that
-   task. Do this before planning when the tool is available.
+   task. Keep the first call bounded (`max_chars=2000`, `max_items=10`) unless the task clearly
+   needs more, and skip it when the first turn is self-contained. Do this before planning when the
+   tool is available. Session hook text is a summary of this policy, never a substitute for it.
 3. When the user asks what was decided, preferred, constrained, remembered, or previously known,
    call `recall` with a focused query and `project`. Also use `recall` whenever `context` reports
    `omitted > 0` and the omitted material could matter. Fetch the full text of items marked

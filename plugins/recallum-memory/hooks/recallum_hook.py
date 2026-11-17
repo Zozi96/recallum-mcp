@@ -23,6 +23,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -67,6 +68,40 @@ DIGEST_MAX_CHARS = 1500
 DIGEST_RENDER_CAP = 2200
 PROTOCOL_VERSION = "2025-06-18"
 
+# The initial read is a snapshot, not a corpus download. The server default
+# (context_default_max_chars = 6000) produced ~8.8 KB tool results in observed
+# sessions, over 8x the entire hook text budget, so the guidance states a
+# bounded call and leaves deeper reads to an explicit focus query.
+INITIAL_CONTEXT_MAX_CHARS = 2000
+INITIAL_CONTEXT_MAX_ITEMS = 10
+
+# Ephemeral per-session state lives in the system temp directory: the hook must
+# never write into a checkout, and the state is only meaningful for the life of
+# one client session.
+STATE_DIR = "recallum-hook"
+SESSION_DEDUP_SECONDS = 5.0
+PROMPT_COOLDOWN_TURNS = 5
+PROMPT_COOLDOWN_SECONDS = 600.0
+# A harness that resumes or compacts a session already carries this guidance in
+# its transcript; re-injecting it is pure duplication. `compact` keeps its
+# injection because compaction drops the transcript the hint lived in.
+SKIPPED_SESSION_SOURCES = frozenset({"resume"})
+FORCED_SESSION_SOURCES = frozenset({"clear", "compact"})
+# Prompt-time hints belong to the human. Harness-generated payloads (task
+# notifications, hook warnings, subagent briefs) are not user intent, and in
+# observed sessions they were the main source of spurious matches.
+INTERNAL_PROMPT_MARKERS = (
+    "<system-reminder",
+    "<task-notification",
+    "<codegraph_context",
+    "<command-name",
+    "[Hook Warning]",
+    "Background task completed.",
+    "# Task Tool Invocation",
+    "# Follow-up Instructions",
+    "Subagent type:",
+)
+
 MEMORY_SIGNAL = re.compile(
     r"\b(?:remember|remembered|recall|recalled|memory|memories|prefer|preference|"
     r"decision|decided|constraint|remembering|recordar|recuerda|recordamos|recordado|"
@@ -88,6 +123,98 @@ def _read_payload() -> dict[str, object] | None:
     except (json.JSONDecodeError, OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _explicit_session_id(payload: dict[str, object]) -> str | None:
+    """The harness-provided session identity, when it sends one."""
+    for name in ("session_id", "sessionId", "conversation_id"):
+        value = payload.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _state_key(payload: dict[str, object], project: str) -> str:
+    """A stable short key for one client session.
+
+    Without a harness session id the workspace stands in for it: the state is
+    then only good enough to collapse back-to-back lifecycle events, so callers
+    that need per-session semantics (the prompt cooldown) require the explicit
+    id instead.
+    """
+    identity = _explicit_session_id(payload)
+    if identity is None:
+        cwd = payload.get("cwd")
+        identity = f"{project}|{cwd if isinstance(cwd, str) else ''}"
+    return hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
+def _read_state(key: str) -> dict[str, object]:
+    path = Path(tempfile.gettempdir()) / STATE_DIR / f"{key}.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _write_state(key: str, state: dict[str, object]) -> None:
+    path = Path(tempfile.gettempdir()) / STATE_DIR / f"{key}.json"
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _injected_recently(key: str) -> bool:
+    """True when this session already received the session hint moments ago.
+
+    Some harnesses dispatch `startup` and `resume` within a few hundred
+    milliseconds and concatenate both outputs into one message, which doubled
+    the injected text for no benefit.
+    """
+    stamp = _read_state(key).get("session_at")
+    if not isinstance(stamp, (int, float)):
+        return False
+    return (time.time() - float(stamp)) < SESSION_DEDUP_SECONDS
+
+
+def _mark_injected(key: str) -> None:
+    state = _read_state(key)
+    state["session_at"] = time.time()
+    _write_state(key, state)
+
+
+def _prompt_hint_allowed(key: str) -> bool:
+    """Cooldown gate for prompt-time hints: 5 turns or 10 minutes.
+
+    The hint says the same thing every time it fires, so observing it changed
+    nothing within a turn. Either enough turns passed to make it worth
+    repeating, or enough time passed that the agent has probably drifted.
+    """
+    state = _read_state(key)
+    since = state.get("turns_since_emit")
+    since_turns = int(since) + 1 if isinstance(since, (int, float)) else 1
+    last = state.get("prompt_at")
+    last_at = float(last) if isinstance(last, (int, float)) else 0.0
+    allowed = (
+        since_turns >= PROMPT_COOLDOWN_TURNS
+        or (time.time() - last_at) >= PROMPT_COOLDOWN_SECONDS
+    )
+    if allowed:
+        state["prompt_at"] = time.time()
+        state["turns_since_emit"] = 0
+    else:
+        state["turns_since_emit"] = since_turns
+    _write_state(key, state)
+    return allowed
+
+
+def _is_internal_prompt(prompt: str) -> bool:
+    """True for harness-generated payloads that are not user intent."""
+    stripped = prompt.lstrip()
+    if not stripped:
+        return True
+    return stripped.startswith(INTERNAL_PROMPT_MARKERS)
 
 
 # Shared wall-clock budget for every git call in one hook run. The hook
@@ -433,16 +560,17 @@ VISIBILITY_HINT = (
 )
 
 
-WORKFLOW_HINT = (
-    " Optional: after a useful recall/context hit, use related_memories only to "
-    "explore a seed's thematic neighborhood. Read the similar field on remember "
-    "and remember_batch outcomes and resolve it yourself -- merge memories that "
-    "restate or refine the same claim; update or forget a similar memory that "
-    "contradicts the new claim or is incorrect. For stale items prefer "
-    "reconfirm over identical remember, and end each reviewed item with exactly "
-    "one of reconfirm, update, forget, or merge_memories. If MCP prompts are "
-    "supported, use session-start, capture-scan, or stale-review."
-)
+# The detailed capture, merge, and stale-resolution policy deliberately does not
+# live here (ADR 0024). Repeating it on every SessionStart cost ~700 characters
+# per session, including resumes whose transcript already carried it, and the
+# agent still had to open the skill to apply it. The hook names the work and the
+# authoritative surface instead; SKILL.md and the MCP prompts keep the rules.
+def _capture_hint() -> str:
+    return (
+        " After substantial work, capture newly verified reusable context that would "
+        f"save a future agent rediscovery ({_tool('remember_batch')} for several items); "
+        "read the recallum-memory skill before writing."
+    )
 
 
 # Keep the checkpoint reminder short; the bundled skill remains authoritative
@@ -729,32 +857,30 @@ def _session_context(project: str) -> str:
             "not call context again unless you need a task-focused snapshot "
             f"(context with focus=<task>):\n{digest}\n"
             f"Use {_tool('recall')} for task-specific detail."
-            f"{_checkpoint_hint(project)} After substantial work, preserve newly verified "
-            "reusable context "
-            f"({_tool('remember_batch')} for several items); follow the Recallum "
-            "skill's scope and safety rules. Current user and repository "
-            f"instructions override memory.{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
-            f"{WORKFLOW_HINT}"
+            f"{_checkpoint_hint(project)}{_capture_hint()}"
+            f"{_lookup_hint()}{VISIBILITY_HINT}"
         )
     if digest == "":
         return (
             f"Recallum: no stored memories for project {project!r} yet; skip the "
-            f"context call.{_checkpoint_hint(project)} After substantial work, capture newly "
-            "verified "
-            f"reusable context with {_tool('remember_batch')} per the Recallum "
-            "skill's scope and safety rules. Current user and repository "
-            f"instructions override memory.{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
-            f"{WORKFLOW_HINT}"
+            f"context call.{_checkpoint_hint(project)}{_capture_hint()}"
+            f"{_lookup_hint()}{VISIBILITY_HINT}"
         )
     return (
         f"Recallum: before planning, call {_tool('context')} with "
-        f"project={project!r} and, when the task is already known, "
-        "focus=<task summary>, if available."
-        f"{_checkpoint_hint(project)} After substantial work, preserve "
-        "newly verified reusable context that would save a future agent "
-        "rediscovery; follow the Recallum skill's scope and safety rules. "
-        "Current user and repository instructions override memory."
-        f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}{WORKFLOW_HINT}"
+        f"project={project!r}, max_chars={INITIAL_CONTEXT_MAX_CHARS}, "
+        f"max_items={INITIAL_CONTEXT_MAX_ITEMS}, and focus=<task summary> when the "
+        "task is already known; skip it when the first turn is self-contained."
+        f"{_checkpoint_hint(project)}{_capture_hint()}"
+        f"{LANGUAGE_HINT}{_lookup_hint()}{VISIBILITY_HINT}"
+    )
+
+
+def _prompt_hint(project: str) -> str:
+    return (
+        "Recallum: if this turn settles a durable preference, decision, or "
+        f"constraint, store it per the recallum-memory skill (project={project!r}); "
+        "recall first when history could change the plan. Current instructions win."
     )
 
 
@@ -805,24 +931,32 @@ def main() -> int:
         return 0
     project = _project(payload)
     if event == "session":
+        source = payload.get("source")
+        source = source.strip().lower() if isinstance(source, str) else ""
+        if source in SKIPPED_SESSION_SOURCES:
+            return 0
+        # Dedup needs a real session identity: keying on the workspace would
+        # swallow the first hint of every new session opened in that directory.
+        key = None if _explicit_session_id(payload) is None else _state_key(payload, project)
+        if key is not None and source not in FORCED_SESSION_SOURCES and _injected_recently(key):
+            return 0
         _emit("SessionStart", _session_context(project))
+        if key is not None:
+            _mark_injected(key)
         return 0
 
     prompt = payload.get("prompt", payload.get("user_prompt", ""))
     if not isinstance(prompt, str):
         return 0
+    if _is_internal_prompt(prompt):
+        return 0
     searchable = FALSE_POSITIVE.sub("", prompt)
     if not MEMORY_SIGNAL.search(searchable):
         return 0
-    _emit(
-        "UserPromptSubmit",
-        f"Recallum: for project {project!r}, recall relevant durable context. Store atomic "
-        "reusable preferences, decisions, constraints, or verified facts such as architecture, "
-        "terminology, "
-        "workflows, commands, integration contracts, root causes, and recurring gotchas when the "
-        "user requests it or the Recallum skill criteria are met; ask before sensitive or "
-        "ambiguous content. Current instructions win." + LANGUAGE_HINT,
-    )
+    if _explicit_session_id(payload) is not None:
+        if not _prompt_hint_allowed(_state_key(payload, project)):
+            return 0
+    _emit("UserPromptSubmit", _prompt_hint(project))
     return 0
 
 

@@ -312,8 +312,10 @@ Tools are named `recallum___*` (triple underscore). Droid can keep the server de
 if the tools are not listed directly, load them with ToolSearch (`+recallum` or `select:` of
 the full name) before concluding they are unavailable.
 
-The shared `hooks.json` wires `SessionStart` (startup|resume|clear|compact) and
-`UserPromptSubmit` for Droid, both under a 5 s timeout and failing open. Droid sets
+The shared `hooks.json` wires `SessionStart` (startup|clear|compact) and
+`UserPromptSubmit` for Droid, both under a 5 s timeout and failing open. `resume` is
+deliberately not subscribed: a resumed session already carries the guidance in its
+transcript (ADR 0024). Droid sets
 `DROID_PLUGIN_ROOT` (plus a `CLAUDE_PLUGIN_ROOT` compatibility alias) for plugin hooks, but
 its value is not a usable path — droid 0.229.0 sets it to
 `/PLUGIN_ROOT_NOT_EXPANDED_ERROR` and only expands the literal `${DROID_PLUGIN_ROOT}` token

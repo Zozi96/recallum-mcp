@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -494,23 +495,31 @@ class HookTests(unittest.TestCase):
         self.assertIn("newly verified reusable context", context)
         self.assertIn("save a future agent rediscovery", context)
 
-    def test_session_start_teaches_related_reconfirm_and_workflow_prompts(self) -> None:
+    def test_session_start_points_to_the_skill_instead_of_repeating_workflow_rules(self) -> None:
+        """ADR 0024: the hook names the work; the skill carries the rules.
+
+        Repeating the merge/reconfirm/stale wording on every SessionStart cost
+        ~700 characters per session -- including resumes whose transcript
+        already carried it -- and the agent still had to open the skill to
+        apply it.
+        """
         context = self._session_context({"PLUGIN_ROOT": "/plugins/recallum-memory"})
-        for term in (
+        self.assertIn("read the recallum-memory skill before writing", context)
+        for relocated in (
             "related_memories",
-            "reconfirm",
-            "session-start",
-            "capture-scan",
+            "merge_memories",
             "stale-review",
+            "reconfirm over",
         ):
-            with self.subTest(term=term):
-                self.assertIn(term, context)
+            with self.subTest(relocated=relocated):
+                self.assertNotIn(relocated, context)
 
-    def test_session_start_carries_hygiene_criteria_in_every_client_variant(self) -> None:
-        """Each client variant carries stale-resolution and merge-vs-update.
+    def test_session_start_carries_a_bounded_read_and_the_skill_pointer_everywhere(self) -> None:
+        """ADR 0024: every client variant states the bound and the pointer.
 
-        The story's open question is resolved to "both criteria present in
-        every variant"; exact wording parity across clients is not asserted.
+        The S002 criteria (stale resolution, merge-vs-update) moved to the
+        skill, so this asserts they stay pinned there, once, rather than being
+        restated by each client variant on every session start.
         """
         variants = (
             {},
@@ -524,15 +533,17 @@ class HookTests(unittest.TestCase):
         for env in variants:
             with self.subTest(env=sorted(env)):
                 context = " ".join(self._session_context(env).split())
-                self.assertIn(
-                    "exactly one of reconfirm, update, forget, or merge_memories",
-                    context,
-                )
-                self.assertIn("restate or refine the same claim", context)
-                self.assertIn("update or forget a similar memory that contradicts", context)
-                self.assertIn("related_memories", context)
-                self.assertIn("reconfirm over identical remember", context)
-                self.assertIn("session-start, capture-scan, or stale-review", context)
+                self.assertIn("max_chars=2000", context)
+                self.assertIn("max_items=10", context)
+                self.assertIn("read the recallum-memory skill before writing", context)
+        skill = " ".join(
+            (PLUGIN_ROOT / "skills" / "recallum-memory" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+        self.assertIn("every verified stale item ends in one of those four actions", skill)
+        self.assertIn("restate or refine one underlying claim", skill)
+        self.assertIn("Never merge contradictions", skill)
 
     def test_session_start_pins_english_for_both_writes_and_queries(self) -> None:
         # The skill that explains the rule in full is loaded lazily, so the
@@ -1029,6 +1040,84 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
+
+    def test_resumed_session_emits_nothing(self) -> None:
+        # A resume already carries the guidance in its transcript. The hook
+        # matcher no longer subscribes to `resume`, and the script refuses it
+        # too, because a client may still dispatch the event by name.
+        result = run_hook(
+            "session",
+            json.dumps(
+                {"cwd": "/work/alpha", "source": "resume", "session_id": uuid.uuid4().hex}
+            ),
+            {"PLUGIN_ROOT": "/plugins/recallum-memory"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_duplicate_startup_for_one_session_emits_once(self) -> None:
+        env = {"PLUGIN_ROOT": "/plugins/recallum-memory"}
+        payload = json.dumps(
+            {"cwd": "/work/alpha", "source": "startup", "session_id": uuid.uuid4().hex}
+        )
+        first = run_hook("session", payload, env)
+        second = run_hook("session", payload, env)
+        self.assertIn("Recallum", first.stdout)
+        self.assertEqual(second.stdout, "")
+
+    def test_clear_and_compact_reinject_after_a_startup(self) -> None:
+        env = {"PLUGIN_ROOT": "/plugins/recallum-memory"}
+        session = uuid.uuid4().hex
+        run_hook(
+            "session",
+            json.dumps({"cwd": "/work/alpha", "source": "startup", "session_id": session}),
+            env,
+        )
+        for source in ("clear", "compact"):
+            with self.subTest(source=source):
+                result = run_hook(
+                    "session",
+                    json.dumps({"cwd": "/work/alpha", "source": source, "session_id": session}),
+                    env,
+                )
+                self.assertIn("Recallum", result.stdout)
+
+    def test_prompt_hint_cools_down_inside_one_session(self) -> None:
+        env = {"PLUGIN_ROOT": "/plugins/recallum-memory"}
+        session = uuid.uuid4().hex
+        emitted = []
+        for index in range(6):
+            result = run_hook(
+                "prompt",
+                json.dumps(
+                    {
+                        "cwd": "/work/alpha",
+                        "session_id": session,
+                        "prompt": f"Remember that rule {index} still applies.",
+                    }
+                ),
+                env,
+            )
+            emitted.append(bool(result.stdout.strip()))
+        self.assertEqual(emitted, [True, False, False, False, False, True])
+
+    def test_harness_generated_prompts_do_not_trigger_the_hint(self) -> None:
+        # Observed sessions fired on subagent briefs and task notifications,
+        # which are not user intent and repeat the same nudge for free.
+        for prompt in (
+            "Background task completed. The decision is to keep the schema.",
+            "# Task Tool Invocation\nSubagent type: explore. Remember the constraint.",
+            "[Hook Warning] Hook timed out after 30s",
+            "",
+        ):
+            with self.subTest(prompt=prompt[:34]):
+                result = run_hook(
+                    "prompt",
+                    json.dumps({"prompt": prompt, "session_id": uuid.uuid4().hex}),
+                    {"PLUGIN_ROOT": "/plugins/recallum-memory"},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
 
 
 class RemoteKeyTests(unittest.TestCase):
