@@ -573,6 +573,10 @@ def _antigravity_plugin_present(problems: list[str]) -> bool | None:
     contains that phrase, and as "cannot tell" (skip) only otherwise --
     matched loosely, not as a brittle exact string, so minor formatting
     differences in the real CLI's text still count as a definitive answer.
+
+    agy v1.1.19 returned ``{"imports": [{"name": ..., "components": [...]}]}``;
+    v1.5.9 returns a top-level list of plugin objects with explicit
+    ``skills`` / ``rules`` / ``mcpServers`` / ``hooks`` arrays. Accept both.
     """
     if shutil.which("agy") is None:
         return None
@@ -590,19 +594,29 @@ def _antigravity_plugin_present(problems: list[str]) -> bool | None:
             "config: Antigravity CLI plugin recallum-memory is not listed by agy plugin list"
         )
         return False
-    imports = payload.get("imports") if isinstance(payload, dict) else None
-    entry = None
-    if isinstance(imports, list):
-        entry = next(
-            (
-                item
-                for item in imports
-                if isinstance(item, dict) and item.get("name") == "recallum-memory"
-            ),
-            None,
-        )
-    components = entry.get("components") if isinstance(entry, dict) else None
-    present = isinstance(components, list) and "mcpServers" in components
+    if isinstance(payload, dict):
+        raw_entries = payload.get("imports")
+        entries = raw_entries if isinstance(raw_entries, list) else []
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        entries = []
+    entry = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, dict) and item.get("name") == "recallum-memory"
+        ),
+        None,
+    )
+    present = False
+    if isinstance(entry, dict):
+        components = entry.get("components")
+        if isinstance(components, list):
+            present = "mcpServers" in components
+        else:
+            mcp_servers = entry.get("mcpServers")
+            present = isinstance(mcp_servers, list) and bool(mcp_servers)
     if not present:
         problems.append(
             "config: Antigravity CLI plugin recallum-memory is not listed by agy plugin list"

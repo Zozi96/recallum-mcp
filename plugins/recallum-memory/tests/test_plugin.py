@@ -1641,7 +1641,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(codex["version"], cursor["version"])
         self.assertEqual(codex["version"], devin["version"])
         self.assertEqual(codex["version"], muse["version"])
-        self.assertEqual(codex["version"], "0.23.0")
+        self.assertEqual(codex["version"], "0.23.1")
         self.assertIn("Grok", grok["description"])
         self.assertIn("grok", grok["keywords"])
         self.assertIn("Cursor", grok["description"])
@@ -3793,6 +3793,7 @@ class DoctorTests(unittest.TestCase):
         malformed: bool = False,
         nonzero_exit: bool = False,
         no_plugins_text: bool = False,
+        list_shape: bool = False,
     ) -> Path:
         """Fake ``agy`` on PATH. Every invocation is logged with a sentinel
         string only this fake binary emits, so a test can prove it was not
@@ -3804,10 +3805,34 @@ class DoctorTests(unittest.TestCase):
         ``plugin_listed=False`` alone still models a *parsed* JSON response
         that omits recallum-memory (e.g. other plugins imported), which is a
         distinct real-world shape from the no-imports-at-all case.
+        ``list_shape=True`` models agy v1.5.9's top-level array of plugin
+        objects instead of the v1.1.19 ``{"imports": [...]}`` object.
         """
-        components = ["skills"] + (["mcpServers"] if mcp_servers_present else [])
-        imports = [{"name": "recallum-memory", "components": components}] if plugin_listed else []
-        payload = json.dumps({"imports": imports})
+        if list_shape:
+            entries: list[dict[str, object]] = [
+                {"name": "ponytail", "enabled": True, "version": "5.3.2"}
+            ]
+            if plugin_listed:
+                entries.append(
+                    {
+                        "name": "recallum-memory",
+                        "enabled": True,
+                        "version": "0.23.1",
+                        "skills": ["recallum-memory", "recallum-update-harnesses"],
+                        "rules": ["recallum-memory.mdc"],
+                        "mcpServers": ["recallum"] if mcp_servers_present else [],
+                        "hooks": ["SessionStart"],
+                    }
+                )
+            payload = json.dumps(entries)
+        else:
+            components = ["skills"] + (["mcpServers"] if mcp_servers_present else [])
+            imports = (
+                [{"name": "recallum-memory", "components": components}]
+                if plugin_listed
+                else []
+            )
+            payload = json.dumps({"imports": imports})
         lines = [
             "import json, sys",
             "from pathlib import Path",
@@ -4349,6 +4374,21 @@ class DoctorTests(unittest.TestCase):
             self._healthy_home(home)
             self._write_antigravity_config(home)
             log = self._write_agy_cli(home, plugin_listed=True, mcp_servers_present=True)
+            result = self._run_doctor(home, "--json")
+            report = json.loads(result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(report["clients"]["Antigravity CLI"]["plugin_present"])
+            self.assertFalse(any("plugin" in p for p in report["problems"]))
+            self.assertIn("FAKE_AGY_SENTINEL_v1", log.read_text(encoding="utf-8"))
+
+    def test_antigravity_plugin_new_list_shape_is_reported_present(self) -> None:
+        # agy v1.5.9 returns a top-level array of plugin objects instead of
+        # the v1.1.19 {"imports": [...]} object.
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._healthy_home(home)
+            self._write_antigravity_config(home)
+            log = self._write_agy_cli(home, list_shape=True)
             result = self._run_doctor(home, "--json")
             report = json.loads(result.stdout)
             self.assertEqual(result.returncode, 0, result.stderr)
