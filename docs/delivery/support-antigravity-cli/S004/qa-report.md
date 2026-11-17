@@ -22,3 +22,5 @@ attempt: 1
 ## Gaps
 
 - None blocking.
+
+**Update 2026-11-16:** agy 1.5.9 now rejects the Claude array-of-groups schema and the test pins that; see `oq123-evidence.md`.

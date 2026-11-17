@@ -23,3 +23,5 @@ senior_implementer: false
 
 - Non-blocking maintenance nit: `test_skills_and_mcp_servers_unaffected_by_hooks_json_presence` asserts the literal `"2 processed"` for skills (test_plugin.py ~L1430) and will need updating when a third skill lands.
 - Two of the three tests skip without a real `agy` binary, so CI without `agy` pins only the absence test. Acceptable, worth knowing.
+
+**Update 2026-11-16:** agy 1.5.9 now rejects the Claude array-of-groups schema; the test pins the object form accepted and the array form rejected. See `oq123-evidence.md`.

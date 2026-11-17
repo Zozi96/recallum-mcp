@@ -97,3 +97,22 @@ should not be treated as settled fact for this constraint without a runtime repr
 
 Original `hooks.json` restored, plugin uninstalled, native config diffed identical to its
 pre-experiment snapshot, temporary files removed.
+
+## Re-check 2026-11-16 — agy 1.5.9
+
+The constraint-5 result above is version-specific. Re-running the same probes against
+`agy` 1.5.9 (`/home/zozi/.local/bin/agy`) gives:
+
+- the text report changed from `skills : 2 processed` to
+  `skills 2 · agents 0 · rules 0 · hooks 1 · mcpServers 1 · sidecars 0`;
+- the single-object schema still validates (`hooks 1`), now with a warning
+  `hook "SessionStart": unknown event "hooks" is ignored`;
+- the Claude array-of-groups schema is rejected with
+  `failed to parse hooks.json: json: cannot unmarshal array into Go struct field
+  .SessionStart of type jsonhook.JSONHookSpec` and exit 1;
+- a legacy `type` + `url` MCP entry is accepted with
+  `unknown field "type" is ignored: the transport follows from the fields`.
+
+`test_plugin.py` now matches these results: `_agy_report_line` accepts both report formats;
+the legacy-shape test asserts the warning instead of a rejection; the schema test accepts
+the object form and rejects the array form.

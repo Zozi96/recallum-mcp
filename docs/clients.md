@@ -141,14 +141,15 @@ file has the raw token.
 As with every other client, the endpoint must be HTTPS with the exact `/mcp/` path; plain HTTP is
 accepted only for `localhost`/`127.0.0.1`.
 
-`agy plugin validate plugins/recallum-memory` reports `hooks : 1 processed`. **This is validation
-acceptance only — it is not evidence that the hook ever dispatches.** `agy` gates every session
-behind interactive Google OAuth sign-in before any session-start hook, hook dispatch, or MCP tool
-surface becomes reachable, so hook parity with Codex/Claude Code/Grok Build is unconfirmed and must
-not be assumed. `agy plugin validate` also reports `skills : 2 processed`. **This is validation
-acceptance only — it is not evidence that skill-driven tool discovery works at runtime.** The same
-OAuth gate blocks observation of runtime skill loading, so skill-driven discovery, like hook
-dispatch, is expected but unconfirmed.
+`agy plugin validate plugins/recallum-memory` lists the `hooks` component in its summary line
+(v1.5.9: `hooks 1`). **This is validation acceptance only — it is not evidence that the hook ever
+dispatches.** `agy` gates every session behind interactive Google OAuth sign-in before any
+session-start hook, hook dispatch, or MCP tool surface becomes reachable, so hook parity with
+Codex/Claude Code/Grok Build is unconfirmed and must not be assumed. The same command also lists
+the `skills` component (v1.5.9: `skills 2`). **This is validation acceptance only — it is not
+evidence that skill-driven tool discovery works at runtime.** The same OAuth gate blocks
+observation of runtime skill loading, so skill-driven discovery, like hook dispatch, is expected
+but unconfirmed.
 
 Diagnose with the same read-only doctor used for the other clients:
 

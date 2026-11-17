@@ -110,14 +110,22 @@ def _agy_validate(directory: Path) -> tuple[int, str]:
 
 
 def _agy_report_line(output: str, section: str) -> str:
-    """Return agy's per-section report line, e.g. ``"skills      : 2 processed"``.
+    """Return agy's per-section report line for ``section``.
 
-    Tolerant of agy's column padding, and anchored to the named section, so a
-    count belonging to a different section can never satisfy the match.
-    Raises if the section reported no count at all (e.g. "skipped (not found)").
+    agy v1.1.19 printed ``"skills      : 2 processed"``; v1.5.9 prints one
+    summary line such as ``"skills 2 · agents 0 · …"``. Match both shapes,
+    anchored to the named section, so a count belonging to a different
+    section can never satisfy the match. Raises if the section reported no
+    count at all (e.g. "skipped (not found)").
     """
 
-    match = re.search(rf"{section}\s*:\s*\d+ processed", output)
+    match = re.search(rf"{re.escape(section)}\s*:\s*\d+ processed", output)
+    if match is None:
+        match = re.search(
+            rf"(?<!\S){re.escape(section)}\s+\d+(?=\s*(?:·|$))",
+            output,
+            re.MULTILINE,
+        )
     assert match is not None, f"no {section!r} report line in: {output}"
     return match.group(0)
 
@@ -2120,11 +2128,12 @@ class AntigravityMcpConfigTests(unittest.TestCase):
     def test_agy_plugin_validate_reports_skills_and_mcp_servers(self) -> None:
         returncode, output = _agy_validate(PLUGIN_ROOT)
         self.assertEqual(returncode, 0, output)
-        # Both sections must report a processed count rather than
-        # "skipped (not found)". Assert that the anchored line exists, not the
-        # count it carries: per S004's stage-6 ruling a hard-coded skill count
-        # breaks whenever a skill is added or removed. The anchored form also
-        # replaces a literal match on agy's exact column padding.
+        # Both sections must report a count rather than "skipped (not found)".
+        # Assert that the anchored line exists, not the count it carries: per
+        # S004's stage-6 ruling a hard-coded skill count breaks whenever a
+        # skill is added or removed. The anchored form also replaces a literal
+        # match on agy's exact column padding and accepts both the v1.1.19
+        # "processed" wording and the v1.5.9 summary line.
         self.assertNotIn("skipped", _agy_report_line(output, "skills"))
         self.assertNotIn("skipped", _agy_report_line(output, "mcpServers"))
         self.assertNotIn(
@@ -2133,7 +2142,7 @@ class AntigravityMcpConfigTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
-    def test_agy_plugin_validate_rejects_legacy_type_url_shape(self) -> None:
+    def test_agy_plugin_validate_warns_on_legacy_type_url_shape(self) -> None:
         assert AGY is not None  # narrows for the type checker; skipUnless guarantees it at runtime
         with tempfile.TemporaryDirectory() as directory:
             probe = Path(directory) / "legacy-probe"
@@ -2156,11 +2165,13 @@ class AntigravityMcpConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             returncode, output = _agy_validate(probe)
-            self.assertNotEqual(returncode, 0)
-            self.assertIn(
-                'Error: MCP server "recallum" must have either command or serverUrl',
-                output,
-            )
+            # agy v1.5.9 tolerates the legacy shape but warns that "type" is
+            # ignored: the transport follows from "url". The shipped config
+            # still uses serverUrl (test_antigravity_mcp_config_shape).
+            self.assertEqual(returncode, 0, output)
+            self.assertIn('unknown field "type" is ignored', output)
+            self.assertIn("the transport follows from the fields", output)
+            self.assertNotIn("skipped", _agy_report_line(output, "mcpServers"))
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
     def test_agy_plugin_install_copies_mcp_config_into_isolated_home(self) -> None:
@@ -2203,8 +2214,8 @@ class AntigravityHookGapTests(unittest.TestCase):
     or genuine interactive mode against an authenticated profile. Skills are
     plugin content, independent of `hooks.json`, so the user is not worse
     off: this class pins that skill loading does not regress, and that the
-    schema-rejection theme constraint 5 claimed does not hold at the layers
-    reachable in tests.
+    shipped single-object schema is accepted while the Claude array form is
+    rejected by agy 1.5.9.
     """
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
@@ -2238,14 +2249,12 @@ class AntigravityHookGapTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(AGY, "agy binary not present on PATH or ~/.local/bin")
-    def test_validate_does_not_discriminate_array_vs_object_hooks_schema(self) -> None:
-        # Theme constraint 5 claims a Claude-style array-of-groups
-        # SessionStart is rejected with a Go unmarshal error. Verified
-        # against real agy v1.1.19: both the array form and the shipped
-        # object form are ACCEPTED by `plugin validate` and `plugin
-        # install`; no parse error is observed at either layer. See
-        # docs/delivery/support-antigravity-cli/S004/oq123-evidence.md,
-        # "Constraint 5 is unverified at the reachable layers".
+    def test_validate_accepts_object_hooks_schema_and_rejects_array(self) -> None:
+        # The shipped bundle uses Antigravity's single-object event schema.
+        # agy v1.5.9 accepts it (with a warning about the nested "hooks" key)
+        # and rejects Claude's array-of-groups shape with a Go unmarshal
+        # error. This reverses the v1.1.19 result recorded in S004; pin the
+        # current binary rather than the historical claim.
         object_schema = {
             "SessionStart": {
                 "hooks": [{"type": "command", "command": "true", "timeout": 15}]
@@ -2256,20 +2265,33 @@ class AntigravityHookGapTests(unittest.TestCase):
                 {"hooks": [{"type": "command", "command": "true", "timeout": 15}]}
             ]
         }
-        for name, schema in (("object", object_schema), ("array", array_schema)):
-            with self.subTest(schema=name), tempfile.TemporaryDirectory() as directory:
-                probe = Path(directory) / "probe"
-                probe.mkdir()
-                (probe / "plugin.json").write_text(
-                    GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
-                )
-                (probe / "hooks.json").write_text(
-                    json.dumps(schema), encoding="utf-8"
-                )
-                _, output = _agy_validate(probe)
-                self.assertNotIn("cannot unmarshal", output, output)
-                self.assertIn("hooks", output)
-                self.assertIn("1 processed", output)
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "object-probe"
+            probe.mkdir()
+            (probe / "plugin.json").write_text(
+                GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (probe / "hooks.json").write_text(
+                json.dumps(object_schema), encoding="utf-8"
+            )
+            returncode, output = _agy_validate(probe)
+            self.assertEqual(returncode, 0, output)
+            self.assertNotIn("cannot unmarshal", output)
+            self.assertNotIn("skipped", _agy_report_line(output, "hooks"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "array-probe"
+            probe.mkdir()
+            (probe / "plugin.json").write_text(
+                GROK_MANIFEST.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (probe / "hooks.json").write_text(
+                json.dumps(array_schema), encoding="utf-8"
+            )
+            returncode, output = _agy_validate(probe)
+            self.assertNotEqual(returncode, 0)
+            self.assertIn("cannot unmarshal array", output)
+            self.assertIn("SessionStart", output)
 
     def test_recallum_hook_has_no_antigravity_branch_or_prefix_constant(self) -> None:
         # Deliberate absence, not an omission: with no SessionStart dispatch
